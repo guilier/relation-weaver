@@ -1,6 +1,4 @@
 ## 📄 README.md
-
-```markdown
 # 📚 人物关系谱系 (Obsidian Relation Weaver)
 
 > 一个 Obsidian 插件，用于管理小说/世界构建中的人物、阵营、关系和时间线。
