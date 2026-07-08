@@ -1,6 +1,6 @@
 {
   "id": "relation-weaver",
-  "name": "人物关系谱系",
+  "name": "Relation Weaver",
   "version": "2.1.0",
   "minAppVersion": "0.15.0",
   "description": "管理人物关系、阵营、时间线，支持热力图、亲密度演化、生命周期可视化、写作仪表盘",
