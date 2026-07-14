@@ -4,54 +4,1245 @@ function __extends(d, b) {
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
 }var obsidian = require('obsidian');
 var debounce = obsidian.debounce;
+var NOVEL_COMPACT_HIDDEN = ['graph', 'heatmap', 'statistics', 'lifecycle'];
+
+var NOVEL_PRIMARY_TAB_IDS = ['chars', 'search', 'timeline', 'relations', 'dashboard', 'factions'];
+
+var PLOT_STATUSES = ['埋设', '推进', '回收'];
+
+var LIMITS = {
+    TIMELINE_AUTO_EXPAND_YEAR_COUNT: 3,
+    TIMELINE_AUTO_EXPAND_MONTH_EVENT_COUNT: 8,
+    DETAIL_MODAL_EVENT_PREVIEW: 50,
+    CHAR_LIST_VIRTUAL_THRESHOLD: 80,
+    CHAR_LIST_VIRTUAL_ITEM_HEIGHT: 132,
+    CHAR_LIST_VIRTUAL_HEADER_HEIGHT: 36,
+    CHAR_LIST_VIRTUAL_OVERSCAN: 6,
+    UNDO_HISTORY_MAX: 50
+};
+
+function showUserError(message, error) {
+    console.error(message, error || '');
+    new obsidian.Notice('❌ ' + message);
+}
+
+function escapeHtml(text) {
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function normalizeVaultPath(path) {
+    if (!path || typeof path !== 'string') return '';
+    var segments = path.replace(/\\/g, '/').split('/');
+    var result = [];
+    for (var i = 0; i < segments.length; i++) {
+        var seg = segments[i].trim();
+        if (!seg || seg === '.') continue;
+        if (seg === '..') {
+            if (result.length > 0) result.pop();
+            continue;
+        }
+        result.push(seg);
+    }
+    return result.join('/');
+}
+
+function deepCloneJson(value) {
+    return JSON.parse(JSON.stringify(value));
+}
+
+function pushUndoSnapshot(view, label) {
+    if (!view || !view.plugin) return;
+    if (!view.plugin._undoStack) view.plugin._undoStack = [];
+    view.plugin._undoStack.push({
+        label: label || '操作',
+        factions: deepCloneJson(view.factions || []),
+        relations: deepCloneJson(view.relations || [])
+    });
+    if (view.plugin._undoStack.length > LIMITS.UNDO_HISTORY_MAX) {
+        view.plugin._undoStack.shift();
+    }
+    view.plugin._redoStack = [];
+}
+
+function restoreRelationsSnapshot(view, snapshot) {
+    view.factions = deepCloneJson(snapshot.factions);
+    view.relations = deepCloneJson(snapshot.relations);
+}
+
+var NOVEL_TAG_PRESETS = {
+    gudai: {
+        label: '古言 / 历史',
+        tags: [
+            { value: '朝堂', label: '朝堂', color: '#e74c3c' },
+            { value: '博弈', label: '博弈', color: '#9b59b6' },
+            { value: '感情', label: '感情', color: '#e91e63' },
+            { value: '战争', label: '战争', color: '#c0392b' },
+            { value: '出场', label: '出场', color: '#2ecc71' },
+            { value: '死亡', label: '死亡', color: '#7f8c8d' },
+            { value: '诸侯', label: '诸侯', color: '#3498db' },
+            { value: '日常', label: '日常', color: '#16a085' }
+        ]
+    },
+    xiandai: {
+        label: '现代都市',
+        tags: [
+            { value: '职场', label: '职场', color: '#3498db' },
+            { value: '感情', label: '感情', color: '#e91e63' },
+            { value: '转折', label: '转折', color: '#e67e22' },
+            { value: '日常', label: '日常', color: '#16a085' },
+            { value: '冲突', label: '冲突', color: '#e74c3c' },
+            { value: '出场', label: '出场', color: '#2ecc71' },
+            { value: '回忆', label: '回忆', color: '#9b59b6' }
+        ]
+    },
+    xuanhuan: {
+        label: '玄幻修仙',
+        tags: [
+            { value: '突破', label: '突破', color: '#9b59b6' },
+            { value: '宗门', label: '宗门', color: '#3498db' },
+            { value: '历练', label: '历练', color: '#27ae60' },
+            { value: '大战', label: '大战', color: '#e74c3c' },
+            { value: '感情', label: '感情', color: '#e91e63' },
+            { value: '出场', label: '出场', color: '#2ecc71' },
+            { value: '机缘', label: '机缘', color: '#f39c12' },
+            { value: '阴谋', label: '阴谋', color: '#7f8c8d' }
+        ]
+    }
+};
+
+function isNovelCompactUI(plugin) {
+    if (plugin.settings.novelCompactUI === false) return false;
+    return (plugin.settings.useCaseMode || 'novel') === 'novel';
+}
+
+function getTabsForRender(plugin, showMoreTabs) {
+    var all = [];
+    var hidden = plugin.settings.hiddenTabs || [];
+    for (var i = 0; i < arguments.length; i++) {}
+    // caller passes ALL_VIEW_TABS filter via getVisibleTabs first
+    return { primary: [], secondary: [], showMore: !!showMoreTabs };
+}
+
+function splitTabsForNovelUI(plugin, visibleTabs, showMoreTabs) {
+    if (!isNovelCompactUI(plugin)) {
+        return { primary: visibleTabs, secondary: [], compact: false };
+    }
+    var primary = [];
+    var secondary = [];
+    for (var i = 0; i < visibleTabs.length; i++) {
+        var t = visibleTabs[i];
+        if (t.alwaysShow || NOVEL_PRIMARY_TAB_IDS.indexOf(t.id) !== -1) {
+            primary.push(t);
+        } else if (NOVEL_COMPACT_HIDDEN.indexOf(t.id) !== -1) {
+            secondary.push(t);
+        } else {
+            primary.push(t);
+        }
+    }
+    return { primary: primary, secondary: secondary, compact: true, showMore: !!showMoreTabs };
+}
+
+function parseEventMeta(eventText) {
+    var text = eventText;
+    var plotLine = '';
+    var plotStatus = '';
+    var chapterNote = '';
+    var m1 = text.match(/\|\s*情节线\s*[:：]\s*([^|]+)/);
+    if (m1) { plotLine = m1[1].trim(); text = text.replace(m1[0], ''); }
+    var m2 = text.match(/\|\s*状态\s*[:：]\s*([^|]+)/);
+    if (m2) { plotStatus = m2[1].trim(); text = text.replace(m2[0], ''); }
+    var m3 = text.match(/\|\s*笔记\s*[:：]\s*(\[\[[^\]]+\]\]|[^\|]+)/);
+    if (m3) { chapterNote = m3[1].trim(); text = text.replace(m3[0], ''); }
+    text = text.replace(/\s+\|\s*$/g, '').trim();
+    return { event: text.trim(), plotLine: plotLine, plotStatus: plotStatus, chapterNote: chapterNote };
+}
+
+function serializeEventMeta(rec) {
+    var parts = [rec.event];
+    if (rec.plotLine) parts.push('情节线:' + rec.plotLine);
+    if (rec.plotStatus) parts.push('状态:' + rec.plotStatus);
+    if (rec.chapterNote) parts.push('笔记:' + rec.chapterNote);
+    if (parts.length <= 1) return rec.event;
+    return parts[0] + ' | ' + parts.slice(1).join(' | ');
+}
+
+function parseTimelineExtended(content, settings) {
+    settings = settings || {};
+    var mode = settings.timelineMode || 'auto';
+    var records = [];
+    var lines = content.split('\n');
+    var currentVolume = '';
+    var currentYear = '';
+    var currentMonth = '';
+
+    for (var i = 0; i < lines.length; i++) {
+        var line = lines[i];
+        var trimmed = line.trim();
+        if (!trimmed) continue;
+
+        if (trimmed.startsWith('# ') && !trimmed.startsWith('## ')) {
+            var h1 = trimmed.substring(2).trim();
+            if (mode === 'chapter' || (mode === 'auto' && /卷|部|篇|Book|Act/i.test(h1))) {
+                currentVolume = h1;
+            }
+            continue;
+        }
+
+        if (trimmed.startsWith('## ') && !trimmed.startsWith('### ')) {
+            currentYear = trimmed.substring(3).trim();
+            currentMonth = '';
+            continue;
+        }
+
+        if (trimmed.startsWith('### ')) {
+            currentMonth = trimmed.substring(4).replace(/[：:]/g, '').trim();
+            continue;
+        }
+
+        if (currentYear && (trimmed.startsWith('- ') || trimmed.startsWith('* '))) {
+            var raw = trimmed.substring(2).trim();
+            if (!raw) continue;
+            var tag = '';
+            var tagMatch = raw.match(/^\[([^\]]+)\]\s*/);
+            if (tagMatch) {
+                tag = tagMatch[1];
+                raw = raw.substring(tagMatch[0].length);
+            }
+            var meta = parseEventMeta(raw);
+            records.push({
+                volume: currentVolume,
+                year: currentYear,
+                month: currentMonth || '未标注',
+                event: meta.event,
+                tag: tag,
+                plotLine: meta.plotLine,
+                plotStatus: meta.plotStatus,
+                chapterNote: meta.chapterNote,
+                _lineIndex: i
+            });
+        }
+    }
+    return records;
+}
+
+function getRelationMetaPath(plugin) {
+    var folder = (plugin.settings.charFolder || '').trim();
+    if (!folder) {
+        var active = plugin.app.workspace.getActiveFile();
+        if (active && active.parent) folder = active.parent.path;
+    }
+    var fname = (plugin.settings.relationMetaFile || '关系与阵营.md').trim();
+    return normalizeVaultPath(folder ? folder + '/' + fname : fname);
+}
+
+function parseFactionsFromMd(content) {
+    var factions = [];
+    var lines = content.split('\n');
+    var current = null;
+    var inFactionSection = false;
+
+    for (var i = 0; i < lines.length; i++) {
+        var t = lines[i].trim();
+        if (t === '# 阵营' || t === '## 阵营') { inFactionSection = true; continue; }
+        if (t.startsWith('# 关系') || t === '## 关系') { inFactionSection = false; if (current) { factions.push(current); current = null; } continue; }
+        if (!inFactionSection) continue;
+        if (t.startsWith('## ')) {
+            if (current) factions.push(current);
+            current = { name: t.substring(3).trim(), color: '#4a90e2', desc: '' };
+            continue;
+        }
+        if (current && t.startsWith('- ')) {
+            var body = t.substring(2);
+            var sep = body.indexOf('：') !== -1 ? body.indexOf('：') : body.indexOf(':');
+            if (sep !== -1) {
+                var k = body.substring(0, sep).trim();
+                var v = body.substring(sep + 1).trim();
+                if (k === '颜色') current.color = v;
+                if (k === '描述') current.desc = v;
+            }
+        }
+    }
+    if (current) factions.push(current);
+    return factions;
+}
+
+function parseRelationsFromMd(content) {
+    var relations = [];
+    var lines = content.split('\n');
+    var current = null;
+    var inRelSection = false;
+
+    for (var i = 0; i < lines.length; i++) {
+        var t = lines[i].trim();
+        if (t.startsWith('# 关系') || t === '## 关系') { inRelSection = true; continue; }
+        if (inRelSection && (t === '# 阵营' || t === '## 阵营')) break;
+        if (!inRelSection) continue;
+        if (t.startsWith('## ')) {
+            if (current && current.charA && current.charB) relations.push(current);
+            var title = t.substring(3).trim();
+            var names = title.split(/[·•\-—]/).map(function(s) { return s.trim(); }).filter(Boolean);
+            current = {
+                charA: names[0] || '',
+                charB: names[1] || '',
+                type: '其他',
+                intimacy: 0,
+                desc: '',
+                startTime: '',
+                endTime: ''
+            };
+            continue;
+        }
+        if (current && t.startsWith('- ')) {
+            var body = t.substring(2);
+            var sep = body.indexOf('：') !== -1 ? body.indexOf('：') : body.indexOf(':');
+            if (sep !== -1) {
+                var k = body.substring(0, sep).trim();
+                var v = body.substring(sep + 1).trim();
+                if (k === '类型') current.type = v;
+                else if (k === '亲密度') current.intimacy = parseInt(v, 10) || 0;
+                else if (k === '描述') current.desc = v;
+                else if (k === '开始' || k === '开始时间') current.startTime = v;
+                else if (k === '结束' || k === '结束时间') current.endTime = v;
+            }
+        }
+    }
+    if (current && current.charA && current.charB) relations.push(current);
+    return relations;
+}
+
+function serializeRelationMetaMd(factions, relations) {
+    var lines = ['# 关系与阵营', '', '> 由「人物关系谱系」插件维护，可在 Obsidian 中直接编辑', ''];
+    lines.push('# 阵营', '');
+    if (!factions || factions.length === 0) {
+        lines.push('（暂无阵营）', '');
+    } else {
+        for (var fi = 0; fi < factions.length; fi++) {
+            var f = factions[fi];
+            lines.push('## ' + f.name);
+            lines.push('- 颜色：' + (f.color || '#4a90e2'));
+            if (f.desc) lines.push('- 描述：' + f.desc);
+            lines.push('');
+        }
+    }
+    lines.push('# 关系', '');
+    if (!relations || relations.length === 0) {
+        lines.push('（暂无关系）', '');
+    } else {
+        for (var ri = 0; ri < relations.length; ri++) {
+            var r = relations[ri];
+            lines.push('## ' + r.charA + ' · ' + r.charB);
+            lines.push('- 类型：' + (r.type || '其他'));
+            lines.push('- 亲密度：' + (r.intimacy || 0));
+            if (r.desc) lines.push('- 描述：' + r.desc);
+            if (r.startTime) lines.push('- 开始：' + r.startTime);
+            if (r.endTime) lines.push('- 结束：' + r.endTime);
+            lines.push('');
+        }
+    }
+    return lines.join('\n');
+}
+
+async function loadRelationsFromMd(plugin) {
+    var path = getRelationMetaPath(plugin);
+    try {
+        if (!await plugin.app.vault.adapter.exists(path)) return null;
+        var content = await plugin.app.vault.adapter.read(path);
+        if (!content || content.indexOf('# 关系') === -1) return null;
+        return {
+            factions: parseFactionsFromMd(content),
+            relations: parseRelationsFromMd(content)
+        };
+    } catch (e) {
+        showUserError('读取关系与阵营文件失败', e);
+        return null;
+    }
+}
+
+async function saveRelationsToMd(plugin, factions, relations) {
+    if (plugin.settings.syncRelationsToMd === false) return;
+    var path = getRelationMetaPath(plugin);
+    var content = serializeRelationMetaMd(factions, relations);
+    try {
+        var existing = plugin.app.vault.getAbstractFileByPath(path);
+        if (existing) {
+            await plugin.app.vault.modify(existing, content);
+        } else {
+            var folder = path.substring(0, path.lastIndexOf('/'));
+            if (folder && !await plugin.app.vault.adapter.exists(folder)) {
+                await plugin.app.vault.adapter.mkdir(folder);
+            }
+            await plugin.app.vault.create(path, content);
+        }
+    } catch (e) {
+        showUserError('写入关系与阵营文件失败', e);
+    }
+}
+
+function getTimelineTimePoints(timeline, settings) {
+    var points = [];
+    var seen = {};
+    var mode = (settings && settings.timelineMode) || 'auto';
+    for (var i = 0; i < timeline.length; i++) {
+        var evt = timeline[i];
+        var label = '';
+        if (mode === 'chapter' && evt.volume) {
+            label = evt.volume + ' / ' + evt.year;
+        } else {
+            label = evt.year;
+        }
+        if (label && !seen[label]) {
+            seen[label] = true;
+            points.push({ label: label, year: evt.year, volume: evt.volume || '' });
+        }
+    }
+    return points;
+}
+
+function getSortedTimelineEvents(timeline) {
+    return timeline.slice().sort(function(a, b) {
+        var av = a.volume || '';
+        var bv = b.volume || '';
+        if (av !== bv) return av.localeCompare(bv);
+        return (a.year || '').localeCompare(b.year || '');
+    });
+}
+
+function getNextTimePoint(timeline, currentTimeStr) {
+    if (!timeline.length) return '';
+    var sorted = getSortedTimelineEvents(timeline);
+    if (!currentTimeStr) return sorted[0].year;
+    for (var i = 0; i < sorted.length; i++) {
+        if (sorted[i].year === currentTimeStr || (sorted[i].volume + ' / ' + sorted[i].year) === currentTimeStr) {
+            return sorted[i + 1] ? sorted[i + 1].year : sorted[i].year;
+        }
+    }
+    return sorted[0].year;
+}
+
+function applyNovelTagPreset(plugin, presetKey) {
+    var preset = NOVEL_TAG_PRESETS[presetKey];
+    if (!preset) return;
+    plugin.settings.customEventTags = JSON.parse(JSON.stringify(preset.tags));
+    plugin.settings.novelTagPreset = presetKey;
+}
+
+function getUnredeemedPlotEvents(timeline) {
+    return getUnredeemedPlotLines(timeline).reduce(function(acc, g) {
+        return acc.concat(g.events.filter(function(e) { return e.plotStatus !== '回收'; }));
+    }, []);
+}
+
+function getPlotLineGroups(timeline) {
+    var groups = {};
+    for (var i = 0; i < timeline.length; i++) {
+        var e = timeline[i];
+        if (!e.plotLine) continue;
+        if (!groups[e.plotLine]) {
+            groups[e.plotLine] = { plotLine: e.plotLine, events: [], latestStatus: '', isRedeemed: false };
+        }
+        groups[e.plotLine].events.push(e);
+    }
+    var result = [];
+    for (var key in groups) {
+        if (!groups.hasOwnProperty(key)) continue;
+        var g = groups[key];
+        var lastEvt = g.events[g.events.length - 1];
+        g.latestStatus = lastEvt.plotStatus || '';
+        g.isRedeemed = lastEvt.plotStatus === '回收';
+        result.push(g);
+    }
+    result.sort(function(a, b) { return a.plotLine.localeCompare(b.plotLine, 'zh-CN'); });
+    return result;
+}
+
+function getUnredeemedPlotLines(timeline) {
+    return getPlotLineGroups(timeline).filter(function(g) { return !g.isRedeemed; });
+}
+
+function isSimilarPlotLineName(a, b) {
+    if (a === b) return false;
+    var na = a.replace(/[-_\s·]/g, '').toLowerCase();
+    var nb = b.replace(/[-_\s·]/g, '').toLowerCase();
+    if (na === nb) return true;
+    if (na.length > 2 && nb.length > 2 && (na.indexOf(nb) !== -1 || nb.indexOf(na) !== -1)) return true;
+    return false;
+}
+
+function validatePlotLines(timeline) {
+    var warnings = [];
+    var groups = getPlotLineGroups(timeline);
+    var statusOrder = { '埋设': 1, '推进': 2, '回收': 3 };
+
+    for (var gi = 0; gi < groups.length; gi++) {
+        var g = groups[gi];
+        var events = g.events;
+        var firstIdx = { '埋设': -1, '推进': -1, '回收': -1 };
+        var recycleIdx = -1;
+
+        for (var i = 0; i < events.length; i++) {
+            var st = events[i].plotStatus;
+            if (st && firstIdx[st] === -1) firstIdx[st] = i;
+            if (st === '回收' && recycleIdx === -1) recycleIdx = i;
+            if (recycleIdx !== -1 && i > recycleIdx && st && st !== '回收') {
+                warnings.push({
+                    type: 'after_recycle',
+                    severity: 'high',
+                    plotLine: g.plotLine,
+                    message: '「' + g.plotLine + '」已在「' + events[recycleIdx].year + '」回收，但「' + events[i].year + '」仍有「' + st + '」',
+                    event: events[i]
+                });
+            }
+        }
+
+        if (firstIdx['回收'] !== -1 && firstIdx['埋设'] !== -1 && firstIdx['回收'] < firstIdx['埋设']) {
+            warnings.push({
+                type: 'recycle_before_plant',
+                severity: 'high',
+                plotLine: g.plotLine,
+                message: '「' + g.plotLine + '」的「回收」出现在「埋设」之前',
+                event: events[firstIdx['回收']]
+            });
+        }
+        if (firstIdx['推进'] !== -1 && firstIdx['埋设'] !== -1 && firstIdx['推进'] < firstIdx['埋设']) {
+            warnings.push({
+                type: 'advance_before_plant',
+                severity: 'medium',
+                plotLine: g.plotLine,
+                message: '「' + g.plotLine + '」的「推进」出现在「埋设」之前',
+                event: events[firstIdx['推进']]
+            });
+        }
+
+        for (var j = 1; j < events.length; j++) {
+            var prevSt = events[j - 1].plotStatus;
+            var curSt = events[j].plotStatus;
+            if (prevSt && curSt && statusOrder[prevSt] && statusOrder[curSt] && statusOrder[curSt] < statusOrder[prevSt]) {
+                warnings.push({
+                    type: 'status_regress',
+                    severity: 'medium',
+                    plotLine: g.plotLine,
+                    message: '「' + g.plotLine + '」状态从「' + prevSt + '」回退到「' + curSt + '」（' + events[j].year + '）',
+                    event: events[j]
+                });
+            }
+        }
+    }
+
+    for (var a = 0; a < groups.length; a++) {
+        for (var b = a + 1; b < groups.length; b++) {
+            if (isSimilarPlotLineName(groups[a].plotLine, groups[b].plotLine)) {
+                warnings.push({
+                    type: 'similar_name',
+                    severity: 'low',
+                    plotLine: groups[a].plotLine,
+                    message: '情节线名称相似：「' + groups[a].plotLine + '」与「' + groups[b].plotLine + '」，是否要合并？'
+                });
+            }
+        }
+    }
+    return warnings;
+}
+
+function buildEventMdLine(evt) {
+    var tagPart = evt.tag ? '[' + evt.tag + '] ' : '';
+    return '- ' + tagPart + serializeEventMeta({
+        event: evt.event,
+        plotLine: evt.plotLine || '',
+        plotStatus: evt.plotStatus || '',
+        chapterNote: evt.chapterNote || ''
+    });
+}
+
+async function deleteEventFromMd(app, plugin, lineIndex) {
+    var fullPath = getTimelineFullPathForExt(plugin);
+    var file = app.vault.getAbstractFileByPath(fullPath);
+    if (!file || lineIndex == null || lineIndex < 0) return false;
+    var content = await app.vault.read(file);
+    var lines = content.split('\n');
+    if (lineIndex >= lines.length) return false;
+    lines.splice(lineIndex, 1);
+    await app.vault.modify(file, lines.join('\n'));
+    return true;
+}
+
+async function updateEventInMd(app, plugin, originalEvt, newEvt) {
+    var locChanged = (originalEvt.volume || '') !== (newEvt.volume || '') ||
+        originalEvt.year !== newEvt.year ||
+        (originalEvt.month || '未标注') !== (newEvt.month || '未标注');
+    if (locChanged) {
+        await deleteEventFromMd(app, plugin, originalEvt._lineIndex);
+        await appendEventToMd(app, plugin, newEvt);
+    } else {
+        var fullPath = getTimelineFullPathForExt(plugin);
+        var file = app.vault.getAbstractFileByPath(fullPath);
+        if (!file || originalEvt._lineIndex == null) return false;
+        var content = await app.vault.read(file);
+        var lines = content.split('\n');
+        if (originalEvt._lineIndex >= lines.length) return false;
+        lines[originalEvt._lineIndex] = buildEventMdLine(newEvt);
+        await app.vault.modify(file, lines.join('\n'));
+    }
+    return true;
+}
+
+function getPlotLineGroup(timeline, plotLineName) {
+    var groups = getPlotLineGroups(timeline);
+    for (var i = 0; i < groups.length; i++) {
+        if (groups[i].plotLine === plotLineName) return groups[i];
+    }
+    return null;
+}
+
+function buildCharMdBlock(name, fields) {
+    var lines = ['## ' + name];
+    for (var k in fields) {
+        if (fields.hasOwnProperty(k) && fields[k]) {
+            lines.push('- ' + k + '：' + fields[k]);
+        }
+    }
+    return lines.join('\n');
+}
+
+async function appendCharToMd(app, plugin, name, fields) {
+    var path = plugin.settings.charFile ? resolveCharPathForExt(plugin) : '人物索引.md';
+    var fullPath = getCharFullPathForExt(plugin);
+    var block = buildCharMdBlock(name, fields);
+    var existing = app.vault.getAbstractFileByPath(fullPath);
+    if (existing) {
+        var content = await app.vault.read(existing);
+        if (content.indexOf('## ' + name) !== -1) {
+            return updateCharInMd(app, plugin, name, fields);
+        }
+        await app.vault.modify(existing, content.trim() + '\n\n' + block + '\n');
+    } else {
+        var folder = fullPath.substring(0, fullPath.lastIndexOf('/'));
+        if (folder && !await app.vault.adapter.exists(folder)) await app.vault.adapter.mkdir(folder);
+        await app.vault.create(fullPath, '# 人物索引\n\n' + block + '\n');
+    }
+}
+
+async function updateCharInMd(app, plugin, name, fields) {
+    var fullPath = getCharFullPathForExt(plugin);
+    var file = app.vault.getAbstractFileByPath(fullPath);
+    if (!file) return false;
+    var content = await app.vault.read(file);
+    var lines = content.split('\n');
+    var out = [];
+    var inTarget = false;
+    var replaced = false;
+
+    for (var i = 0; i < lines.length; i++) {
+        var line = lines[i];
+        if (line.trim().startsWith('## ') && !line.trim().startsWith('### ')) {
+            if (inTarget) {
+                inTarget = false;
+                if (!replaced) {
+                    for (var k in fields) {
+                        if (fields.hasOwnProperty(k) && fields[k]) out.push('- ' + k + '：' + fields[k]);
+                    }
+                    replaced = true;
+                }
+            }
+            if (line.trim() === '## ' + name) {
+                inTarget = true;
+                out.push(line);
+                for (var k2 in fields) {
+                    if (fields.hasOwnProperty(k2) && fields[k2]) out.push('- ' + k2 + '：' + fields[k2]);
+                }
+                replaced = true;
+                continue;
+            }
+        }
+        if (inTarget && (line.trim().startsWith('- ') || line.trim().startsWith('* '))) {
+            continue;
+        }
+        out.push(line);
+    }
+    await app.vault.modify(file, out.join('\n'));
+    return true;
+}
+
+function resolveCharPathForExt(plugin) {
+    var folder = (plugin.settings.charFolder || '').trim();
+    if (!folder) {
+        var f = plugin.app.workspace.getActiveFile();
+        if (f && f.parent) folder = f.parent.path;
+    }
+    return (plugin.settings.charFile || '人物索引.md').trim();
+}
+
+function getCharFullPathForExt(plugin) {
+    var folder = (plugin.settings.charFolder || '').trim();
+    if (!folder) {
+        var f = plugin.app.workspace.getActiveFile();
+        if (f && f.parent) folder = f.parent.path;
+    }
+    var fname = (plugin.settings.charFile || '人物索引.md').trim();
+    return folder ? folder + '/' + fname : fname;
+}
+
+function getTimelineFullPathForExt(plugin) {
+    var folder = (plugin.settings.timelineFolder || plugin.settings.charFolder || '').trim();
+    if (!folder) {
+        var f = plugin.app.workspace.getActiveFile();
+        if (f && f.parent) folder = f.parent.path;
+    }
+    var fname = (plugin.settings.timelineFile || '时间线.md').trim();
+    return folder ? folder + '/' + fname : fname;
+}
+
+async function appendEventToMd(app, plugin, evt) {
+    var fullPath = getTimelineFullPathForExt(plugin);
+    var existing = app.vault.getAbstractFileByPath(fullPath);
+    var tagPart = evt.tag ? '[' + evt.tag + '] ' : '';
+    var line = '- ' + tagPart + serializeEventMeta(evt);
+    var section = '';
+
+    if (plugin.settings.timelineMode === 'chapter' && evt.volume) {
+        section += '# ' + evt.volume + '\n\n';
+    }
+    section += '## ' + evt.year + '\n';
+    if (evt.month && evt.month !== '未标注') section += '### ' + evt.month + '：\n';
+    section += line + '\n';
+
+    if (existing) {
+        var content = await app.vault.read(existing);
+        if (content.indexOf('## ' + evt.year) !== -1) {
+            var idx = content.indexOf('## ' + evt.year);
+            var after = content.indexOf('\n', idx) + 1;
+            var before = content.substring(0, after);
+            var rest = content.substring(after);
+            var nextH2 = rest.search(/\n## /);
+            if (nextH2 === -1) {
+                await app.vault.modify(existing, content.trim() + '\n' + line + '\n');
+            } else {
+                var insertAt = after + nextH2;
+                await app.vault.modify(existing, content.substring(0, insertAt) + line + '\n' + content.substring(insertAt));
+            }
+        } else {
+            await app.vault.modify(existing, content.trim() + '\n\n' + section);
+        }
+    } else {
+        var folder = fullPath.substring(0, fullPath.lastIndexOf('/'));
+        if (folder && !await app.vault.adapter.exists(folder)) await app.vault.adapter.mkdir(folder);
+        await app.vault.create(fullPath, '# 时间线\n\n' + section);
+    }
+}
+
+function renderWikiLinksInElement(container, app, onClick) {
+    var wikiPattern = /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
+    var walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null);
+    var textNodes = [];
+    while (walker.nextNode()) textNodes.push(walker.currentNode);
+
+    for (var i = 0; i < textNodes.length; i++) {
+        var node = textNodes[i];
+        var text = node.nodeValue || '';
+        if (text.indexOf('[[') === -1) continue;
+        wikiPattern.lastIndex = 0;
+        if (!wikiPattern.test(text)) continue;
+        wikiPattern.lastIndex = 0;
+
+        var frag = document.createDocumentFragment();
+        var lastIndex = 0;
+        var match;
+        while ((match = wikiPattern.exec(text)) !== null) {
+            if (match.index > lastIndex) {
+                frag.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+            }
+            var path = match[1];
+            var display = match[2] || path;
+            var link = document.createElement('a');
+            link.href = '#';
+            link.className = 'my-char-wikilink';
+            link.setAttribute('data-path', path);
+            link.textContent = display;
+            frag.appendChild(link);
+            lastIndex = wikiPattern.lastIndex;
+        }
+        if (lastIndex < text.length) {
+            frag.appendChild(document.createTextNode(text.slice(lastIndex)));
+        }
+        if (node.parentNode) node.parentNode.replaceChild(frag, node);
+    }
+
+    var links = container.querySelectorAll('.my-char-wikilink');
+    for (var li = 0; li < links.length; li++) {
+        (function(link) {
+            link.addEventListener('click', function(e) {
+                e.preventDefault();
+                var p = link.getAttribute('data-path');
+                var file = app.metadataCache.getFirstLinkpathDest(p, '');
+                if (file) app.workspace.openLinkText(p, '');
+                else if (onClick) onClick(p);
+            });
+        })(links[li]);
+    }
+}
+
+function performGlobalSearch(view, query) {
+    var q = (query || '').trim().toLowerCase();
+    if (!q) {
+        return { chars: [], relations: [], timeline: [], plotLines: [], factions: [] };
+    }
+    var chars = view.chars.filter(function(c) {
+        if (c.name.toLowerCase().indexOf(q) !== -1) return true;
+        var fields = c.fields || {};
+        for (var k in fields) {
+            if (fields.hasOwnProperty(k) && String(fields[k] || '').toLowerCase().indexOf(q) !== -1) return true;
+        }
+        return false;
+    });
+    var relations = view.relations.filter(function(r) {
+        return (r.charA || '').toLowerCase().indexOf(q) !== -1 ||
+            (r.charB || '').toLowerCase().indexOf(q) !== -1 ||
+            (r.type || '').toLowerCase().indexOf(q) !== -1 ||
+            (r.desc || '').toLowerCase().indexOf(q) !== -1;
+    });
+    var timeline = view.timeline.filter(function(e) {
+        return (e.event || '').toLowerCase().indexOf(q) !== -1 ||
+            (e.year || '').toLowerCase().indexOf(q) !== -1 ||
+            (e.month || '').toLowerCase().indexOf(q) !== -1 ||
+            (e.plotLine || '').toLowerCase().indexOf(q) !== -1 ||
+            (e.tag || '').toLowerCase().indexOf(q) !== -1 ||
+            (e.volume || '').toLowerCase().indexOf(q) !== -1;
+    });
+    var plotLines = getPlotLineGroups(view.timeline).filter(function(g) {
+        if (g.plotLine.toLowerCase().indexOf(q) !== -1) return true;
+        for (var i = 0; i < g.events.length; i++) {
+            if ((g.events[i].event || '').toLowerCase().indexOf(q) !== -1) return true;
+        }
+        return false;
+    });
+    var factions = view.factions.filter(function(f) {
+        return (f.name || '').toLowerCase().indexOf(q) !== -1 ||
+            (f.desc || '').toLowerCase().indexOf(q) !== -1;
+    });
+    return { chars: chars, relations: relations, timeline: timeline, plotLines: plotLines, factions: factions };
+}
+
+function downloadTextFile(content, filename, mimeType) {
+    mimeType = mimeType || 'text/plain;charset=utf-8';
+    var blob = new Blob(['\uFEFF' + content], { type: mimeType });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+async function saveTextToVault(app, folder, filename, content) {
+    var path = folder ? folder + '/' + filename : filename;
+    var existing = app.vault.getAbstractFileByPath(path);
+    if (existing) {
+        await app.vault.modify(existing, content);
+    } else {
+        if (folder && !await app.vault.adapter.exists(folder)) {
+            await app.vault.adapter.mkdir(folder);
+        }
+        await app.vault.create(path, content);
+    }
+    return path;
+}
+
+function isAppearTimelineTag(tag) {
+    if (!tag) return false;
+    var t = String(tag).trim();
+    if (t === '出场' || t === '登场' || t === '首次出场' || t === '首次出现' || t === '首次登场') return true;
+    return /出场|登场/.test(t);
+}
+
+function formatFirstAppearFromEvent(evt, settings) {
+    settings = settings || {};
+    var mode = settings.timelineMode || 'auto';
+    if (mode === 'chapter' || (mode === 'auto' && evt.volume)) {
+        if (evt.volume && evt.month && evt.month !== '未标注') {
+            return evt.volume + ' · ' + evt.year + ' · ' + evt.month;
+        }
+        if (evt.volume) return evt.volume + ' · ' + evt.year;
+    }
+    if (evt.month && evt.month !== '未标注') return evt.year + ' · ' + evt.month;
+    return evt.year || '';
+}
+
+function firstAppearValuesMatch(a, b) {
+    if (!a || !b) return false;
+    var na = String(a).replace(/\s+/g, '').toLowerCase();
+    var nb = String(b).replace(/\s+/g, '').toLowerCase();
+    if (na === nb) return true;
+    if (na.indexOf(nb) !== -1 || nb.indexOf(na) !== -1) return true;
+    var pa = parseHistoricalDate(a);
+    var pb = parseHistoricalDate(b);
+    if (pa && pb && pa.sortValue !== null && pb.sortValue !== null && pa.sortValue === pb.sortValue) return true;
+    return false;
+}
+
+function getTimelineFirstAppearMap(timeline, charNames, plugin) {
+    var map = {};
+    for (var i = 0; i < timeline.length; i++) {
+        var evt = timeline[i];
+        if (!isAppearTimelineTag(evt.tag)) continue;
+        var appeared = findCharsInEvent(evt.event, charNames);
+        for (var j = 0; j < appeared.length; j++) {
+            var name = appeared[j];
+            if (!map[name]) {
+                map[name] = {
+                    event: evt,
+                    location: formatFirstAppearFromEvent(evt, plugin.settings),
+                    timelineIndex: i
+                };
+            }
+        }
+    }
+    return map;
+}
+
+function auditFirstAppearSync(view) {
+    var settings = view.plugin.settings;
+    var fieldName = settings.firstAppearFieldName || '首次出场';
+    var timelineMap = getTimelineFirstAppearMap(view.timeline, view.charNames, view.plugin);
+    var issues = [];
+
+    for (var i = 0; i < view.chars.length; i++) {
+        var c = view.chars[i];
+        var charFirst = view.getFieldValue(c, fieldName);
+        var tl = timelineMap[c.name];
+
+        if (tl && !charFirst) {
+            issues.push({
+                type: 'missing_on_char',
+                charName: c.name,
+                suggested: tl.location,
+                event: tl.event,
+                severity: 'medium',
+                message: '「' + c.name + '」时间线已 [出场]（' + tl.location + '），人物档案未填首次出场'
+            });
+        } else if (!tl && charFirst) {
+            issues.push({
+                type: 'missing_on_timeline',
+                charName: c.name,
+                charValue: charFirst,
+                severity: 'low',
+                message: '「' + c.name + '」档案写首次出场「' + charFirst + '」，时间线无 [出场] 事件'
+            });
+        } else if (tl && charFirst && !firstAppearValuesMatch(charFirst, tl.location)) {
+            issues.push({
+                type: 'mismatch',
+                charName: c.name,
+                charValue: charFirst,
+                timelineValue: tl.location,
+                event: tl.event,
+                severity: 'high',
+                message: '「' + c.name + '」不一致：档案「' + charFirst + '」≠ 时间线「' + tl.location + '」'
+            });
+        }
+    }
+    return issues;
+}
+
+async function setCharFieldInMd(app, plugin, charName, fieldName, fieldValue) {
+    var fullPath = getCharFullPathForExt(plugin);
+    var file = app.vault.getAbstractFileByPath(fullPath);
+    if (!file) return false;
+    var content = await app.vault.read(file);
+    var lines = content.split('\n');
+    var out = [];
+    var inTarget = false;
+    var fieldUpdated = false;
+    var foundChar = false;
+
+    for (var i = 0; i < lines.length; i++) {
+        var line = lines[i];
+        var trimmed = line.trim();
+        if (trimmed.startsWith('## ') && !trimmed.startsWith('### ')) {
+            if (inTarget && !fieldUpdated) {
+                out.push('- ' + fieldName + '：' + fieldValue);
+                fieldUpdated = true;
+            }
+            inTarget = trimmed === '## ' + charName;
+            if (inTarget) foundChar = true;
+            out.push(line);
+            continue;
+        }
+        if (inTarget && (trimmed.startsWith('- ') || trimmed.startsWith('* '))) {
+            var fieldLine = trimmed.substring(2);
+            var colonIdx = fieldLine.indexOf('：');
+            if (colonIdx === -1) colonIdx = fieldLine.indexOf(':');
+            if (colonIdx !== -1) {
+                var key = fieldLine.substring(0, colonIdx).trim();
+                if (key === fieldName) {
+                    out.push('- ' + fieldName + '：' + fieldValue);
+                    fieldUpdated = true;
+                    continue;
+                }
+            }
+        }
+        out.push(line);
+    }
+    if (inTarget && !fieldUpdated) {
+        out.push('- ' + fieldName + '：' + fieldValue);
+        fieldUpdated = true;
+    }
+    if (!foundChar) return false;
+    await app.vault.modify(file, out.join('\n'));
+    return true;
+}
+
+async function syncFirstAppearFromEvent(app, plugin, view, evt) {
+    if (plugin.settings.syncFirstAppearOnEvent === false) {
+        return { synced: [], skipped: [], mismatched: [] };
+    }
+    if (!isAppearTimelineTag(evt.tag)) {
+        return { synced: [], skipped: [], mismatched: [] };
+    }
+    var appeared = findCharsInEvent(evt.event, view.charNames);
+    if (!appeared.length) {
+        return { synced: [], skipped: [], mismatched: [] };
+    }
+    var fieldName = plugin.settings.firstAppearFieldName || '首次出场';
+    var location = formatFirstAppearFromEvent(evt, plugin.settings);
+    var synced = [];
+    var skipped = [];
+    var mismatched = [];
+
+    for (var i = 0; i < appeared.length; i++) {
+        var name = appeared[i];
+        var charData = view.findChar(name);
+        if (!charData) {
+            skipped.push(name);
+            continue;
+        }
+        var current = view.getFieldValue(charData, fieldName);
+        if (current && !firstAppearValuesMatch(current, location)) {
+            mismatched.push({ name: name, current: current, location: location });
+            continue;
+        }
+        if (current && firstAppearValuesMatch(current, location)) continue;
+        var ok = await setCharFieldInMd(app, plugin, name, fieldName, location);
+        if (ok) synced.push(name);
+        else skipped.push(name);
+    }
+    return { synced: synced, skipped: skipped, mismatched: mismatched };
+}
+
+function needsEmptyStateGuide(view) {
+    if (view.tab === 'importexport' || view.tab === 'dashboard' || view.tab === 'search') return false;
+    return view.chars.length === 0 && view.timeline.length === 0;
+}
+
+function getDataSetupStatus(view) {
+    var charPath = getCharFullPath(view.plugin);
+    var timelinePath = getTimelineFullPath(view.plugin);
+    return {
+        charPath: charPath,
+        timelinePath: timelinePath,
+        charFileExists: !!view.app.vault.getAbstractFileByPath(charPath),
+        timelineFileExists: !!view.app.vault.getAbstractFileByPath(timelinePath),
+        charCount: view.chars.length,
+        timelineCount: view.timeline.length,
+        relationCount: view.relations.length,
+        factionCount: view.factions.length
+    };
+}
+
+function openCharViewAndRun(app, fn) {
+    openCharView(app);
+    window.setTimeout(function() {
+        var leaves = app.workspace.getLeavesOfType(VIEW_TYPE);
+        if (leaves.length > 0 && leaves[0].view) fn(leaves[0].view);
+    }, 80);
+}
+
+var novelExt = {
+    NOVEL_COMPACT_HIDDEN: NOVEL_COMPACT_HIDDEN,
+    NOVEL_PRIMARY_TAB_IDS: NOVEL_PRIMARY_TAB_IDS,
+    PLOT_STATUSES: PLOT_STATUSES,
+    NOVEL_TAG_PRESETS: NOVEL_TAG_PRESETS,
+    isNovelCompactUI: isNovelCompactUI,
+    splitTabsForNovelUI: splitTabsForNovelUI,
+    parseEventMeta: parseEventMeta,
+    serializeEventMeta: serializeEventMeta,
+    parseTimelineExtended: parseTimelineExtended,
+    getRelationMetaPath: getRelationMetaPath,
+    loadRelationsFromMd: loadRelationsFromMd,
+    saveRelationsToMd: saveRelationsToMd,
+    getTimelineTimePoints: getTimelineTimePoints,
+    getNextTimePoint: getNextTimePoint,
+    applyNovelTagPreset: applyNovelTagPreset,
+    getUnredeemedPlotEvents: getUnredeemedPlotEvents,
+    getPlotLineGroups: getPlotLineGroups,
+    getUnredeemedPlotLines: getUnredeemedPlotLines,
+    getPlotLineGroup: getPlotLineGroup,
+    validatePlotLines: validatePlotLines,
+    buildEventMdLine: buildEventMdLine,
+    appendCharToMd: appendCharToMd,
+    updateCharInMd: updateCharInMd,
+    appendEventToMd: appendEventToMd,
+    updateEventInMd: updateEventInMd,
+    deleteEventFromMd: deleteEventFromMd,
+    isAppearTimelineTag: isAppearTimelineTag,
+    formatFirstAppearFromEvent: formatFirstAppearFromEvent,
+    firstAppearValuesMatch: firstAppearValuesMatch,
+    getTimelineFirstAppearMap: getTimelineFirstAppearMap,
+    auditFirstAppearSync: auditFirstAppearSync,
+    setCharFieldInMd: setCharFieldInMd,
+    syncFirstAppearFromEvent: syncFirstAppearFromEvent,
+    performGlobalSearch: performGlobalSearch,
+    downloadTextFile: downloadTextFile,
+    saveTextToVault: saveTextToVault,
+    renderWikiLinksInElement: renderWikiLinksInElement,
+    getCharFullPathForExt: getCharFullPathForExt,
+    getTimelineFullPathForExt: getTimelineFullPathForExt
+};
+
+
+// ========== UI 样式辅助 ==========
+function setFilterChip(btn, isActive, activeColor) {
+    btn.className = "my-char-chip";
+    if (isActive) {
+        btn.classList.add("is-active");
+        if (activeColor) btn.style.setProperty("--chip-active-bg", activeColor);
+    } else {
+        btn.style.removeProperty("--chip-active-bg");
+    }
+    return btn;
+}
+
+function setBadge(el, bgColor, extraClass) {
+    el.className = "my-char-badge" + (extraClass ? " " + extraClass : "");
+    el.style.setProperty("--badge-bg", bgColor);
+    return el;
+}
+
+function setRelAccent(el, color) {
+    el.style.setProperty("--rel-accent", color);
+    return el;
+}
 
 var VIEW_TYPE = 'my-char-view';
 
 // ========== Tab 配置（支持按场景隐藏）==========
 var ALL_VIEW_TABS = [
-    { id: 'chars', label: '👥 人物', desc: '人物列表与详情', alwaysShow: true },
-    { id: 'factions', label: '🏰 阵营', desc: '分组/势力/分类' },
-    { id: 'relations', label: '🔗 关系', desc: '人物或概念之间的关联' },
-    { id: 'timeline', label: '📅 时间线', desc: '事件与日记按时间排列' },
-    { id: 'lifecycle', label: '⏳ 生命周期', desc: '出生/出场/死亡时间轴' },
-    { id: 'statistics', label: '📊 统计', desc: '数据汇总分析' },
-    { id: 'dashboard', label: '📋 仪表盘', desc: '写作进度与待办' },
-    { id: 'heatmap', label: '🔥 热力图', desc: '人物出场频率' },
-    { id: 'importexport', label: '💾 导入导出', desc: '备份与迁移数据', alwaysShow: true }
+    { id: 'chars', desc: '实体列表与详情', alwaysShow: true },
+    { id: 'search', desc: '跨模块统一搜索', alwaysShow: true },
+    { id: 'factions', desc: '分组/势力/分类' },
+    { id: 'relations', desc: '实体之间的关联' },
+    { id: 'graph', desc: '关系网络可视化' },
+    { id: 'timeline', desc: '事件与日记按时间排列' },
+    { id: 'lifecycle', desc: '出生/出场/死亡时间轴' },
+    { id: 'statistics', desc: '数据汇总分析' },
+    { id: 'dashboard', desc: '写作进度与待办' },
+    { id: 'heatmap', desc: '出场频率热力图' },
+    { id: 'importexport', desc: '备份与迁移数据', alwaysShow: true }
 ];
+
+var USE_CASE_TERMS = {
+    novel: { entity: '人物', faction: '阵营', relation: '关系', timeline: '时间线', event: '事件' },
+    diary: { entity: '人物', faction: '分组', relation: '关系', timeline: '日记', event: '记录' },
+    trpg: { entity: '角色', faction: '阵营', relation: '关系', timeline: '冒险日志', event: '事件' },
+    knowledge: { entity: '概念', faction: '分类', relation: '关联', timeline: '脉络', event: '节点' }
+};
+
+var TAB_LABEL_TEMPLATES = {
+    chars: '👥 ',
+    search: '🔍 ',
+    factions: '🏰 ',
+    relations: '🔗 ',
+    graph: '🕸️ ',
+    timeline: '📅 ',
+    lifecycle: '⏳ 生命周期',
+    statistics: '📊 统计',
+    dashboard: '📋 仪表盘',
+    heatmap: '🔥 热力图',
+    importexport: '💾 导入导出'
+};
 
 var USE_CASE_PRESETS = {
     novel: {
         label: '小说 / 历史创作',
         viewTitle: '人物关系谱系',
         hiddenTabs: [],
-        preset: 'default'
+        preset: 'default',
+        terms: USE_CASE_TERMS.novel,
+        timelineMode: 'auto',
+        novelCompactUI: true
     },
     diary: {
         label: '日常日记',
         viewTitle: '人物与事件',
-        hiddenTabs: ['factions', 'lifecycle', 'heatmap', 'dashboard', 'statistics'],
-        preset: 'modern'
+        hiddenTabs: ['factions', 'lifecycle', 'heatmap', 'dashboard', 'statistics', 'graph'],
+        preset: 'diary',
+        terms: USE_CASE_TERMS.diary
     },
     trpg: {
         label: '跑团 / TRPG',
         viewTitle: '角色与冒险',
         hiddenTabs: ['heatmap'],
-        preset: 'fantasy'
+        preset: 'fantasy',
+        terms: USE_CASE_TERMS.trpg
     },
     knowledge: {
         label: '知识 / 概念关系',
         viewTitle: '知识关系图谱',
         hiddenTabs: ['lifecycle', 'heatmap', 'dashboard'],
-        preset: 'default'
+        preset: 'knowledge',
+        terms: USE_CASE_TERMS.knowledge
     },
     custom: {
         label: '自定义',
         viewTitle: '',
         hiddenTabs: null,
-        preset: null
+        preset: null,
+        terms: null
     }
 };
+
+function getTermSet(plugin) {
+    var mode = plugin.settings.useCaseMode || 'novel';
+    var base = USE_CASE_TERMS[mode] || USE_CASE_TERMS.novel;
+    var custom = plugin.settings.termLabels || {};
+    return {
+        entity: custom.entity || base.entity,
+        faction: custom.faction || base.faction,
+        relation: custom.relation || base.relation,
+        timeline: custom.timeline || base.timeline,
+        event: custom.event || base.event
+    };
+}
+
+function getTerm(plugin, key) {
+    return getTermSet(plugin)[key] || key;
+}
+
+function getTabDisplayLabel(plugin, tabId) {
+    if (plugin.settings.tabLabels && plugin.settings.tabLabels[tabId]) {
+        return plugin.settings.tabLabels[tabId];
+    }
+    var terms = getTermSet(plugin);
+    if (tabId === 'chars') return TAB_LABEL_TEMPLATES.chars + terms.entity;
+    if (tabId === 'search') return TAB_LABEL_TEMPLATES.search + '全局搜索';
+    if (tabId === 'factions') return TAB_LABEL_TEMPLATES.factions + terms.faction;
+    if (tabId === 'relations') return TAB_LABEL_TEMPLATES.relations + terms.relation;
+    if (tabId === 'graph') return TAB_LABEL_TEMPLATES.graph + terms.relation + '图谱';
+    if (tabId === 'timeline') return TAB_LABEL_TEMPLATES.timeline + terms.timeline;
+    return TAB_LABEL_TEMPLATES[tabId] || tabId;
+}
+
+function getToolbarStatsText(view) {
+    var t = getTermSet(view.plugin);
+    return t.entity + ':' + view.chars.length + ' | ' + t.faction + ':' + view.factions.length + ' | ' + t.relation + ':' + view.relations.length;
+}
+
+function shouldHideLifecycleFields(plugin) {
+    var mode = plugin.settings.useCaseMode;
+    return mode === 'diary' || mode === 'knowledge';
+}
 
 function getViewTitle(plugin) {
     var title = plugin.settings.viewTitle;
@@ -67,6 +1258,8 @@ function getVisibleTabs(plugin) {
     return ALL_VIEW_TABS.filter(function(t) {
         if (t.alwaysShow) return true;
         return hidden.indexOf(t.id) === -1;
+    }).map(function(t) {
+        return { id: t.id, label: getTabDisplayLabel(plugin, t.id), desc: t.desc, alwaysShow: t.alwaysShow };
     });
 }
 
@@ -83,13 +1276,20 @@ function applyFieldPreset(plugin, presetKey) {
         plugin.settings.birthFieldNames = '诞生,出生';
         plugin.settings.firstAppearFieldName = '登场';
         plugin.settings.intimateFieldName = '羁绊';
-    } else if (presetKey === 'modern') {
+    } else if (presetKey === 'modern' || presetKey === 'diary') {
         plugin.settings.factionFieldName = '所属组织';
         plugin.settings.customRelationTypes = '同事,上下级,朋友,恋人,家人,竞争对手';
         plugin.settings.deathFieldNames = '去世,死亡';
         plugin.settings.birthFieldNames = '出生';
         plugin.settings.firstAppearFieldName = '首次出现';
         plugin.settings.intimateFieldName = '亲密关系';
+    } else if (presetKey === 'knowledge') {
+        plugin.settings.factionFieldName = '分类';
+        plugin.settings.customRelationTypes = '包含,引用,因果,对比,相关,从属,对立';
+        plugin.settings.deathFieldNames = '废止,停用';
+        plugin.settings.birthFieldNames = '创建,提出';
+        plugin.settings.firstAppearFieldName = '首次收录';
+        plugin.settings.intimateFieldName = '相关概念';
     } else if (presetKey === 'scifi') {
         plugin.settings.factionFieldName = '所属势力';
         plugin.settings.customRelationTypes = '同盟,敌对,从属,克隆,共生,竞争';
@@ -119,6 +1319,15 @@ function applyUseCaseMode(plugin, mode) {
     }
     if (cfg.preset) {
         applyFieldPreset(plugin, cfg.preset);
+    }
+    if (cfg.terms) {
+        plugin.settings.termLabels = Object.assign({}, cfg.terms);
+    }
+    if (cfg.timelineMode) {
+        plugin.settings.timelineMode = cfg.timelineMode;
+    }
+    if (cfg.novelCompactUI !== undefined) {
+        plugin.settings.novelCompactUI = cfg.novelCompactUI;
     }
 }
 
@@ -199,14 +1408,19 @@ var DEFAULT_EVENT_TAGS = [
 // ========== 【修复】直接使用保存的标签，不再强制合并默认标签 ==========
 function getEventTags(plugin) {
     var customTags = plugin.settings.customEventTags || [];
-    
-    // 如果没有任何标签，使用默认标签作为初始值
-    if (customTags.length === 0) {
-        return JSON.parse(JSON.stringify(DEFAULT_EVENT_TAGS));
+    var cacheKey = JSON.stringify(customTags);
+    if (plugin._eventTagsCache && plugin._eventTagsCacheKey === cacheKey) {
+        return plugin._eventTagsCache;
     }
-    
-    // 直接返回保存的标签列表，不做任何合并
-    return JSON.parse(JSON.stringify(customTags));
+    var result;
+    if (customTags.length === 0) {
+        result = deepCloneJson(DEFAULT_EVENT_TAGS);
+    } else {
+        result = deepCloneJson(customTags);
+    }
+    plugin._eventTagsCache = result;
+    plugin._eventTagsCacheKey = cacheKey;
+    return result;
 }
 
 function getTagMap(plugin) {
@@ -223,6 +1437,8 @@ function getTagMap(plugin) {
 
 function invalidateTagCache(plugin) {
     plugin._tagMapCache = null;
+    plugin._eventTagsCache = null;
+    plugin._eventTagsCacheKey = null;
 }
 
 function getTagLabel(plugin, tagValue) {
@@ -301,22 +1517,400 @@ function getCurrentFolder(app) {
     return '';
 }
 
-function getCharFullPath(plugin) {
-    var folder = getCurrentFolder(plugin.app);
-    var filename = '人物索引.md';
-    if (folder) {
-        return folder + '/' + filename;
+function resolveDataFilePath(plugin, folderSettingKey, fileSettingKey, defaultFileName) {
+    var settings = plugin.settings || {};
+    var folder = (settings[folderSettingKey] || '').trim();
+    if (!folder) {
+        folder = getCurrentFolder(plugin.app);
     }
-    return filename;
+    var filename = (settings[fileSettingKey] || defaultFileName).trim();
+    return folder ? folder + '/' + filename : filename;
+}
+
+function getCharFullPath(plugin) {
+    return resolveDataFilePath(plugin, 'charFolder', 'charFile', '人物索引.md');
+}
+
+function parseCharsFromContent(content) {
+    var chars = [];
+    if (!content || typeof content !== 'string') return chars;
+    var lines = content.split('\n');
+    var current = null;
+
+    for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].trim();
+        if (!line) continue;
+
+        if (line.startsWith('## ') && !line.startsWith('### ')) {
+            if (current && current.name) chars.push(current);
+            current = { name: line.substring(3).trim(), fields: {} };
+            continue;
+        }
+
+        if (line.startsWith('# ')) continue;
+        if (line.startsWith('---')) continue;
+
+        if (current) {
+            var text = line;
+            var hasDash = line.startsWith('- ');
+            if (hasDash) text = line.substring(2);
+
+            var sep = text.indexOf('：');
+            if (sep === -1) sep = text.indexOf(':');
+
+            if (sep !== -1) {
+                var key = text.substring(0, sep).trim();
+                var value = text.substring(sep + 1).trim();
+                if (value !== undefined) current.fields[key] = value;
+            }
+        }
+    }
+    if (current && current.name) chars.push(current);
+    return chars;
 }
 
 function getTimelineFullPath(plugin) {
-    var folder = getCurrentFolder(plugin.app);
-    var filename = '时间线.md';
-    if (folder) {
-        return folder + '/' + filename;
+    return resolveDataFilePath(plugin, 'timelineFolder', 'timelineFile', '时间线.md');
+}
+
+function getGraphNotesFolder(plugin) {
+    var custom = (plugin.settings.graphNotesFolder || '').trim();
+    if (custom) return custom;
+    var charFolder = (plugin.settings.charFolder || '').trim() || getCurrentFolder(plugin.app);
+    return charFolder ? charFolder + '/关系图谱节点' : '关系图谱节点';
+}
+
+function sanitizeNoteName(name) {
+    return String(name).replace(/[\\/:*?"<>|]/g, '-').replace(/\s+/g, ' ').trim();
+}
+
+function getRelationsForChar(view, charName) {
+    var result = [];
+    for (var i = 0; i < view.relations.length; i++) {
+        var rel = view.relations[i];
+        if (rel.charA === charName || rel.charB === charName) {
+            result.push({
+                relation: rel,
+                other: rel.charA === charName ? rel.charB : rel.charA
+            });
+        }
     }
-    return filename;
+    return result;
+}
+
+var GRAPH_SYNC_UNTYPED_LABEL = '(无类型)';
+
+function getCharTypeForGraph(char) {
+    if (!char || !char.fields) return '';
+    var typeVal = char.fields['类型'];
+    return typeVal && String(typeVal).trim() ? String(typeVal).trim() : '';
+}
+
+function getCharTypeLabelForGraph(char) {
+    var typeVal = getCharTypeForGraph(char);
+    return typeVal || GRAPH_SYNC_UNTYPED_LABEL;
+}
+
+function isGraphSyncModeSelected(plugin) {
+    return plugin.settings.graphSyncMode === 'selected';
+}
+
+function isCharIncludedInGraphSync(plugin, char) {
+    if (!isGraphSyncModeSelected(plugin)) return true;
+    var allowed = plugin.settings.graphSyncTypes || [];
+    if (allowed.length === 0) return false;
+    return allowed.indexOf(getCharTypeLabelForGraph(char)) !== -1;
+}
+
+function getCharsForGraphSync(plugin, view) {
+    var result = [];
+    for (var i = 0; i < view.chars.length; i++) {
+        if (isCharIncludedInGraphSync(plugin, view.chars[i])) {
+            result.push(view.chars[i]);
+        }
+    }
+    return result;
+}
+
+function collectCharTypesForGraph(view) {
+    var typeSet = {};
+    var untypedCount = 0;
+    for (var i = 0; i < view.chars.length; i++) {
+        var typeVal = getCharTypeForGraph(view.chars[i]);
+        if (typeVal) {
+            typeSet[typeVal] = (typeSet[typeVal] || 0) + 1;
+        } else {
+            untypedCount++;
+        }
+    }
+    var sortOrder = ['⭐ 主角', '主角', '🔶 配角', '配角', '👤 龙套', '龙套'];
+    var sorted = [];
+    for (var si = 0; si < sortOrder.length; si++) {
+        if (typeSet[sortOrder[si]]) {
+            sorted.push({ label: sortOrder[si], count: typeSet[sortOrder[si]] });
+            delete typeSet[sortOrder[si]];
+        }
+    }
+    var remaining = Object.keys(typeSet).sort();
+    for (var ri = 0; ri < remaining.length; ri++) {
+        sorted.push({ label: remaining[ri], count: typeSet[remaining[ri]] });
+    }
+    if (untypedCount > 0) {
+        sorted.push({ label: GRAPH_SYNC_UNTYPED_LABEL, count: untypedCount });
+    }
+    return sorted;
+}
+
+function getGraphSyncSummaryText(plugin, view) {
+    var terms = getTermSet(plugin);
+    var total = view.chars.length;
+    var syncCount = getCharsForGraphSync(plugin, view).length;
+    if (!isGraphSyncModeSelected(plugin)) {
+        return '同步范围：全部类型（' + syncCount + ' 个' + terms.entity + '）';
+    }
+    var selected = plugin.settings.graphSyncTypes || [];
+    if (selected.length === 0) {
+        return '同步范围：未选择任何类型（0/' + total + '）';
+    }
+    var labels = selected.slice(0, 4).join('、');
+    if (selected.length > 4) labels += ' 等' + selected.length + '类';
+    return '同步范围：' + labels + '（' + syncCount + '/' + total + '）';
+}
+
+function formatGraphSyncNotice(res) {
+    var msg = '✅ 已同步 ' + res.count + ' 个节点到 ' + res.folder;
+    if (res.skipped > 0) msg += '（跳过 ' + res.skipped + ' 个）';
+    if (res.removed > 0) msg += '（移除 ' + res.removed + ' 个旧节点）';
+    return msg;
+}
+
+async function loadCharsForGraphSettings(app, plugin) {
+    var leaves = app.workspace.getLeavesOfType(VIEW_TYPE);
+    if (leaves.length > 0 && leaves[0].view && leaves[0].view.chars && leaves[0].view.chars.length > 0) {
+        return leaves[0].view.chars;
+    }
+    var path = getCharFullPath(plugin);
+    var file = app.vault.getAbstractFileByPath(path);
+    if (!file) return [];
+    try {
+        var content = await app.vault.read(file);
+        return parseCharsFromContent(content);
+    } catch (e) {
+        console.log('读取人物类型失败:', e);
+        return [];
+    }
+}
+
+async function syncGraphNotesToVault(plugin, view) {
+    var folder = getGraphNotesFolder(plugin);
+    var adapter = plugin.app.vault.adapter;
+    if (!await adapter.exists(folder)) {
+        await adapter.mkdir(folder);
+    }
+    var terms = getTermSet(plugin);
+    var factionField = plugin.settings.factionFieldName || '阵营';
+    var charsToSync = getCharsForGraphSync(plugin, view);
+    var syncedNames = {};
+    for (var sn = 0; sn < charsToSync.length; sn++) {
+        syncedNames[charsToSync[sn].name] = true;
+    }
+    var synced = 0;
+
+    for (var ci = 0; ci < charsToSync.length; ci++) {
+        var c = charsToSync[ci];
+        var notePath = folder + '/' + sanitizeNoteName(c.name) + '.md';
+        var lines = ['---', 'tags: [relation-weaver]', 'entity: ' + c.name];
+        if (c.fields && c.fields[factionField]) {
+            lines.push(factionField + ': ' + c.fields[factionField]);
+        }
+        var typeVal = getCharTypeForGraph(c);
+        if (typeVal) lines.push('类型: ' + typeVal);
+        lines.push('---', '', '# ' + c.name, '');
+        if (c.fields) {
+            var keys = Object.keys(c.fields);
+            for (var ki = 0; ki < keys.length; ki++) {
+                lines.push('- ' + keys[ki] + '：' + c.fields[keys[ki]]);
+            }
+        }
+        lines.push('', '## ' + terms.relation, '');
+        var rels = getRelationsForChar(view, c.name);
+        if (rels.length === 0) {
+            lines.push('_（暂无' + terms.relation + '）_');
+        } else {
+            for (var ri = 0; ri < rels.length; ri++) {
+                var item = rels[ri];
+                var rel = item.relation;
+                var intimacyLabel = getIntimacyLabel(rel.intimacy || 0);
+                var relLabel = (rel.type || terms.relation) + '（' + intimacyLabel + '）';
+                if (syncedNames[item.other]) {
+                    lines.push('- [[' + item.other + ']] — ' + relLabel);
+                } else {
+                    lines.push('- ' + item.other + ' — ' + relLabel);
+                }
+            }
+        }
+        lines.push('', '> 由「人物关系谱系」插件同步，可在 Obsidian 原生图谱中拖拽探索');
+        var content = lines.join('\n');
+        var existing = plugin.app.vault.getAbstractFileByPath(notePath);
+        if (existing) {
+            await plugin.app.vault.modify(existing, content);
+        } else {
+            await plugin.app.vault.create(notePath, content);
+        }
+        synced++;
+    }
+
+    var removed = 0;
+    for (var cj = 0; cj < view.chars.length; cj++) {
+        var excluded = view.chars[cj];
+        if (syncedNames[excluded.name]) continue;
+        var stalePath = folder + '/' + sanitizeNoteName(excluded.name) + '.md';
+        var staleFile = plugin.app.vault.getAbstractFileByPath(stalePath);
+        if (staleFile) {
+            await plugin.app.vault.delete(staleFile);
+            removed++;
+        }
+    }
+
+    return {
+        folder: folder,
+        count: synced,
+        skipped: view.chars.length - synced,
+        removed: removed
+    };
+}
+
+async function openObsidianGlobalGraph(app, folderPath) {
+    var leaf = app.workspace.getLeaf('tab', 'vertical');
+    var state = {};
+    if (folderPath) {
+        state.search = 'path:"' + folderPath + '"';
+    }
+    await leaf.setViewState({ type: 'graph', state: state, active: true });
+}
+
+async function openObsidianLocalGraph(app, file) {
+    if (!file) return false;
+    var leaf = app.workspace.getLeaf('tab', 'vertical');
+    await leaf.openFile(file);
+    var graphLeaf = app.workspace.getLeaf('split', 'vertical');
+    await graphLeaf.setViewState({
+        type: 'graph',
+        state: { localGraph: true, localNodeId: file.path },
+        active: true
+    });
+    return true;
+}
+
+async function openLocalGraphForEntity(app, plugin, view, charName) {
+    var charData = null;
+    for (var i = 0; i < view.chars.length; i++) {
+        if (view.chars[i].name === charName) {
+            charData = view.chars[i];
+            break;
+        }
+    }
+    if (charData && !isCharIncludedInGraphSync(plugin, charData)) {
+        new obsidian.Notice('「' + charName + '」的类型未纳入图谱同步范围，请在设置或图谱页调整');
+        return;
+    }
+    var folder = getGraphNotesFolder(plugin);
+    var path = folder + '/' + sanitizeNoteName(charName) + '.md';
+    var file = app.vault.getAbstractFileByPath(path);
+    if (!file) {
+        await syncGraphNotesToVault(plugin, view);
+        file = app.vault.getAbstractFileByPath(path);
+    }
+    if (!file) {
+        new obsidian.Notice('无法找到「' + charName + '」的图谱节点，请先同步');
+        return;
+    }
+    await openObsidianLocalGraph(app, file);
+}
+
+var SCENARIO_TEMPLATES = {
+    novel: {
+        folder: '小说世界',
+        charFile: '人物索引.md',
+        timelineFile: '时间线.md',
+        charContent: '## 张三\n- 身份：主角\n- 阵营：北境王国\n- 首次出场：公元前300年\n- 出生：公元前280年\n- 亲密人物：李四\n\n## 李四\n- 身份：挚友\n- 阵营：北境王国\n- 出生：公元前290年\n- 首次出场：公元前295年\n\n## 王五\n- 身份：对手\n- 阵营：南域联盟\n- 首次出场：公元前298年\n',
+        timelineContent: '# 第一卷·北境\n\n## 第一章\n### 开篇：\n- [出场] 张三首次登场 | 情节线:主线-A | 状态:埋设 | 笔记:[[第一章]]\n- [感情] 张三与李四相遇\n\n## 第二章\n### 冲突：\n- [博弈] 王五现身，三方对峙 | 情节线:主线-A | 状态:推进\n'
+    },
+    diary: {
+        folder: '生活日记',
+        charFile: '人物索引.md',
+        timelineFile: '日记时间线.md',
+        charContent: '## 小明\n- 身份：同事\n- 所属组织：公司A\n- 首次出现：2025年1月\n- 亲密关系：小红\n\n## 小红\n- 身份：朋友\n- 所属组织：公司B\n- 首次出现：2024年12月\n',
+        timelineContent: '## 2025年7月7日\n- [日常] 和小明一起吃午饭，聊了项目进展\n\n## 2025年7月6日\n- [感情] 给小红发了生日祝福\n'
+    },
+    trpg: {
+        folder: '跑团战役',
+        charFile: '人物索引.md',
+        timelineFile: '冒险日志.md',
+        charContent: '## 艾拉\n- 身份：精灵游侠 PC\n- 势力：银月旅团\n- 登场：序章\n- 诞生：森林历102年\n\n## 莫格\n- 身份：矮人战士 PC\n- 势力：铁锤氏族\n- 登场：序章\n\n## 暗影领主\n- 身份：BBEG\n- 势力：深渊教团\n- 登场：第一章\n',
+        timelineContent: '## 序章\n### 酒馆：\n- [出场] 艾拉与莫格在「断剑酒馆」相遇\n- [博弈] 接受神秘委托\n\n## 第一章\n### 地下城：\n- [战斗] 遭遇暗影领主的爪牙\n'
+    },
+    knowledge: {
+        folder: '知识库',
+        charFile: '概念索引.md',
+        timelineFile: '知识脉络.md',
+        charContent: '## 机器学习\n- 分类：人工智能\n- 首次收录：2020年\n- 相关概念：深度学习, 神经网络\n\n## 深度学习\n- 分类：人工智能\n- 首次收录：2018年\n- 相关概念：机器学习, 反向传播\n\n## 反向传播\n- 分类：算法\n- 首次收录：2019年\n',
+        timelineContent: '## 2018年\n- [节点] 深度学习概念首次整理\n\n## 2019年\n- [引用] 反向传播与梯度下降的关系梳理\n\n## 2020年\n- [因果] 机器学习与深度学习体系建立\n'
+    }
+};
+
+async function createScenarioTemplate(app, plugin, mode) {
+    var tpl = SCENARIO_TEMPLATES[mode];
+    if (!tpl) {
+        new obsidian.Notice('未知场景模板');
+        return null;
+    }
+    var adapter = app.vault.adapter;
+    if (!await adapter.exists(tpl.folder)) {
+        await adapter.mkdir(tpl.folder);
+    }
+    var graphFolder = tpl.folder + '/关系图谱节点';
+    if (!await adapter.exists(graphFolder)) {
+        await adapter.mkdir(graphFolder);
+    }
+
+    var charPath = tpl.folder + '/' + tpl.charFile;
+    var timelinePath = tpl.folder + '/' + tpl.timelineFile;
+    if (!await adapter.exists(charPath)) {
+        await app.vault.create(charPath, tpl.charContent);
+    }
+    if (!await adapter.exists(timelinePath)) {
+        await app.vault.create(timelinePath, tpl.timelineContent);
+    }
+
+    var readmePath = tpl.folder + '/README.md';
+    if (!await adapter.exists(readmePath)) {
+        var readme = '# ' + tpl.folder + '\n\n本文件夹由「人物关系谱系」插件自动生成。\n\n- **' + tpl.charFile + '**：实体/人物数据\n- **' + tpl.timelineFile + '**：时间线/日记/脉络\n- **关系与阵营.md**：关系与阵营（可双向编辑）\n- **关系图谱节点/**：同步到 Obsidian 原生图谱的独立笔记\n\n💡 不同场景 = 不同文件夹，在插件设置中指定文件夹路径即可切换数据源。\n';
+        await app.vault.create(readmePath, readme);
+    }
+
+    var relMetaPath = tpl.folder + '/关系与阵营.md';
+    if (!await adapter.exists(relMetaPath)) {
+        await app.vault.create(relMetaPath, '# 关系与阵营\n\n# 阵营\n\n（暂无阵营）\n\n# 关系\n\n（暂无关系）\n');
+    }
+
+    plugin.settings.charFolder = tpl.folder;
+    plugin.settings.timelineFolder = tpl.folder;
+    plugin.settings.charFile = tpl.charFile;
+    plugin.settings.timelineFile = tpl.timelineFile;
+    plugin.settings.graphNotesFolder = graphFolder;
+    applyUseCaseMode(plugin, mode);
+    await plugin.saveSettings();
+
+    var view = app.workspace.getLeavesOfType(VIEW_TYPE)[0];
+        if (view && view.view) {
+        await view.view.loadAllData();
+        if (plugin.settings.syncGraphOnSave !== false) {
+            await syncGraphNotesToVault(plugin, view.view);
+        }
+    }
+    refreshCharView(app);
+    return tpl.folder;
 }
 
 function createOption(value, text) {
@@ -383,6 +1977,40 @@ function parseHistoricalDate(str) {
     if (numMatch) {
         var y2 = parseFloat(numMatch[1]);
         return { sortValue: y2, display: s, era: 'ad', year: y2 };
+    }
+
+    // ===== 现代日期（日记模式）=====
+    var isoMatch = s.match(/^(\d{4})[-\/.](\d{1,2})(?:[-\/.](\d{1,2}))?/);
+    if (isoMatch) {
+        var iy = parseInt(isoMatch[1], 10);
+        var im = parseInt(isoMatch[2], 10) || 1;
+        var id = parseInt(isoMatch[3], 10) || 1;
+        return { sortValue: iy * 10000 + im * 100 + id, display: s, era: 'modern', year: iy, month: im, day: id };
+    }
+    var cnDateMatch = s.match(/^(\d{4})年(\d{1,2})月(\d{1,2})日?/);
+    if (cnDateMatch) {
+        var cy = parseInt(cnDateMatch[1], 10);
+        var cm = parseInt(cnDateMatch[2], 10);
+        var cd = parseInt(cnDateMatch[3], 10);
+        return { sortValue: cy * 10000 + cm * 100 + cd, display: s, era: 'modern', year: cy, month: cm, day: cd };
+    }
+    var cnMonthMatch = s.match(/^(\d{4})年(\d{1,2})月$/);
+    if (cnMonthMatch) {
+        var my = parseInt(cnMonthMatch[1], 10);
+        var mm = parseInt(cnMonthMatch[2], 10);
+        return { sortValue: my * 10000 + mm * 100, display: s, era: 'modern', year: my, month: mm };
+    }
+
+    // 含季节/后缀的年份：前280年冬、755年春
+    var bcSuffixMatch = s.match(/(?:公元前|前)\s*(\d+(?:\.\d+)?)\s*年/);
+    if (bcSuffixMatch) {
+        var bcSuf = parseFloat(bcSuffixMatch[1]);
+        return { sortValue: -bcSuf, display: s, era: 'bc', year: bcSuf };
+    }
+    var adSuffixMatch = s.match(/(?:公元\s*)?(\d+(?:\.\d+)?)\s*年/);
+    if (adSuffixMatch) {
+        var adSuf = parseFloat(adSuffixMatch[1]);
+        return { sortValue: adSuf, display: s, era: 'ad', year: adSuf };
     }
 
     return { sortValue: null, display: s, era: 'unknown', raw: s };
@@ -511,6 +2139,11 @@ var MyView = /** @class */ (function (_super) {
         _this.appearCounts = {};
         _this.relationCounts = {};
         _this.charNames = [];
+        _this._showMoreTabs = false;
+        _this._plotLineFilter = '';
+        _this._timelineExpandedYears = {};
+        _this._timelineExpandedMonths = {};
+        _this._globalSearchText = '';
         return _this;
     }
     MyView.prototype.getViewType = function () { return VIEW_TYPE; };
@@ -540,24 +2173,64 @@ var MyView = /** @class */ (function (_super) {
         return '';
     };
 
-    MyView.prototype.render = function () {
-        if (this._rendering) {
-            return;
+    MyView.prototype.renderCompactTopBar = function (container) {
+        var self = this;
+        var bar = container.createEl('div', { cls: 'my-char-compact-top-bar' });
+
+        var expandBtn = bar.createEl('button', { text: '▼ 展开顶栏', cls: 'my-char-view-btn my-char-btn-xs my-char-top-toggle-btn' });
+        expandBtn.title = '展开标题、工具栏与 Tab';
+        expandBtn.addEventListener('click', async function () {
+            self.plugin.settings.topChromeCollapsed = false;
+            await self.plugin.saveSettings();
+            self.render();
+        });
+
+        ensureValidTab(this);
+        var tabNames = getVisibleTabs(this.plugin);
+        var tabSelect = bar.createEl('select', { cls: 'my-char-compact-tab-select' });
+        for (var i = 0; i < tabNames.length; i++) {
+            var opt = tabSelect.createEl('option', { text: tabNames[i].label, value: tabNames[i].id });
+            if (tabNames[i].id === self.tab) opt.selected = true;
         }
+        tabSelect.addEventListener('change', function () {
+            self.tab = tabSelect.value;
+            self.searchText = '';
+            self.selectedTag = '';
+            self.render();
+        });
+
+        bar.createEl('span', { text: getToolbarStatsText(this), cls: 'my-char-compact-stats' });
+
+        var refreshBtn = bar.createEl('button', { text: '🔄', cls: 'my-char-view-btn my-char-btn-xs' });
+        refreshBtn.title = '刷新数据';
+        refreshBtn.addEventListener('click', function () {
+            self.loadAllData().then(function () { self.render(); });
+        });
+    };
+
+    MyView.prototype.render = function () {
+        if (this._rendering) return;
         this._rendering = true;
-        
+
         var container = this.contentEl;
         container.empty();
         container.addClass('my-char-view-root');
-
         var self = this;
+        var topCollapsed = !!this.plugin.settings.topChromeCollapsed;
 
-        var headerRow = container.createEl('div', { cls: 'my-char-view-header' });
-        
+        if (topCollapsed) {
+            this.renderCompactTopBar(container);
+        }
+
+        var topChrome = container.createEl('div', { cls: 'my-char-top-chrome' + (topCollapsed ? ' is-collapsed' : '') });
+
+        var headerRow = topChrome.createEl('div', { cls: 'my-char-view-header' });
         headerRow.createEl('h2', { text: getViewTitle(this.plugin) });
-        
-        if (this.tab !== 'chars') {
-            var backBtn = headerRow.createEl('button', { text: '🏠 返回主页', cls: 'my-char-view-btn my-char-view-btn-secondary' });
+
+        var headerActions = headerRow.createEl('div', { cls: 'my-char-header-actions' });
+
+        if (this.tab !== 'chars' && this.tab !== 'dashboard') {
+            var backBtn = headerActions.createEl('button', { text: '🏠 返回主页', cls: 'my-char-view-btn my-char-view-btn-secondary my-char-btn-xs' });
             backBtn.addEventListener('click', function() {
                 self.tab = 'chars';
                 self.searchText = '';
@@ -566,31 +2239,41 @@ var MyView = /** @class */ (function (_super) {
             });
         }
 
-        var toolbar = container.createEl('div', { cls: 'my-char-view-toolbar' });
-
-        var refreshBtn = toolbar.createEl('button', { text: '🔄 刷新数据', cls: 'my-char-view-btn' });
-        refreshBtn.addEventListener('click', function() {
-            self.loadAllData().then(function() { self.render(); });
+        var collapseBtn = headerActions.createEl('button', {
+            text: '▲ 收起顶栏',
+            cls: 'my-char-view-btn my-char-view-btn-secondary my-char-btn-xs my-char-top-toggle-btn'
+        });
+        collapseBtn.title = '收起标题、工具栏与 Tab，腾出内容空间';
+        collapseBtn.addEventListener('click', async function () {
+            self.plugin.settings.topChromeCollapsed = true;
+            await self.plugin.saveSettings();
+            self.render();
         });
 
-        var applyConfigBtn = toolbar.createEl('button', { text: '应用字段设置', cls: 'my-char-view-btn my-char-view-btn-success' });
-        applyConfigBtn.addEventListener('click', function() {
-            self.loadAllData().then(function() { self.render(); });
-            new obsidian.Notice('已重新加载并应用字段设置');
-        });
+        var toolbar = topChrome.createEl('div', { cls: 'my-char-view-toolbar' });
+        toolbar.createEl('button', { text: '🔄 刷新数据', cls: 'my-char-view-btn' })
+            .addEventListener('click', function() { self.loadAllData().then(function() { self.render(); }); });
+        toolbar.createEl('button', { text: '🔍 搜索', cls: 'my-char-view-btn my-char-view-btn-secondary' })
+            .addEventListener('click', function() { self.tab = 'search'; self.render(); });
+        toolbar.createEl('button', { text: '应用字段设置', cls: 'my-char-view-btn my-char-view-btn-success' })
+            .addEventListener('click', function() {
+                self.loadAllData().then(function() { self.render(); });
+                new obsidian.Notice('已重新加载并应用字段设置');
+            });
+        toolbar.createEl('span', { text: getToolbarStatsText(this), cls: 'my-char-view-stats' });
 
-        toolbar.createEl('span', {
-            text: '人物:' + this.chars.length + ' | 阵营:' + this.factions.length + ' | 关系:' + this.relations.length,
-            cls: 'my-char-view-stats'
-        });
+        self.renderGlobalTimeBar(topChrome);
 
-        var tabs = container.createEl('div', { cls: 'my-char-view-tabs' });
+        var tabs = topChrome.createEl('div', { cls: 'my-char-view-tabs' });
         ensureValidTab(this);
-
         var tabNames = getVisibleTabs(this.plugin);
-
-        for (var i = 0; i < tabNames.length; i++) {
-            (function (tab) {
+        var tabSplit = novelExt.splitTabsForNovelUI(this.plugin, tabNames, this._showMoreTabs);
+        var tabsToRender = tabSplit.primary.slice();
+        if (tabSplit.compact && tabSplit.showMore) {
+            tabsToRender = tabsToRender.concat(tabSplit.secondary);
+        }
+        for (var i = 0; i < tabsToRender.length; i++) {
+            (function(tab) {
                 var btn = tabs.createEl('button', { text: tab.label });
                 btn.className = 'my-char-view-tab-btn' + (self.tab === tab.id ? ' is-active' : '');
                 btn.addEventListener('click', function() {
@@ -599,39 +2282,158 @@ var MyView = /** @class */ (function (_super) {
                     self.selectedTag = '';
                     self.render();
                 });
-            })(tabNames[i]);
+            })(tabsToRender[i]);
+        }
+        if (tabSplit.compact && tabSplit.secondary.length > 0) {
+            var moreBtn = tabs.createEl('button', { text: self._showMoreTabs ? '▲ 收起' : '▼ 更多功能' });
+            moreBtn.className = 'my-char-view-tab-btn my-char-tab-more';
+            moreBtn.addEventListener('click', function() {
+                self._showMoreTabs = !self._showMoreTabs;
+                self.render();
+            });
         }
 
         var content = container.createEl('div', { cls: 'my-char-view-content' });
-
-        if (this.chars.length === 0 && this.tab !== 'importexport') {
-            content.createEl('p', { text: '点击"刷新数据"加载文件', cls: 'my-char-view-empty' });
+        if (needsEmptyStateGuide(this)) {
+            this.renderEmptyStateGuide(content);
         } else {
             try {
                 this.renderCurrentTab(content);
             } catch (err) {
-                throw err;
+                console.error('渲染错误:', err);
+                content.createEl('p', { text: '渲染出错，请查看控制台', cls: 'my-char-view-empty' });
             }
         }
-        
         this._rendering = false;
+    };
+
+    MyView.prototype.renderEmptyStateGuide = function (container) {
+        var self = this;
+        container.empty();
+        var status = getDataSetupStatus(this);
+        var terms = getTermSet(this.plugin);
+        var guide = container.createEl('div', { cls: 'my-char-empty-guide' });
+
+        guide.createEl('h3', { text: '👋 欢迎使用「' + getViewTitle(this.plugin) + '」', cls: 'my-char-section-title' });
+        guide.createEl('p', {
+            text: '还没有检测到' + terms.entity + '或' + terms.timeline + '数据。跟着下面几步，几分钟就能用起来：',
+            cls: 'my-char-muted'
+        });
+
+        var steps = guide.createEl('div', { cls: 'my-char-empty-steps' });
+
+        var step1 = steps.createEl('div', { cls: 'my-char-empty-step' });
+        step1.createEl('div', { text: '1', cls: 'my-char-empty-step-num' });
+        var body1 = step1.createEl('div', { cls: 'my-char-empty-step-body' });
+        body1.createEl('strong', { text: '创建或指定数据文件' });
+        body1.createEl('p', {
+            text: '推荐：一键创建场景模板（含示例' + terms.entity + '、' + terms.timeline + '与文件夹结构）',
+            cls: 'my-char-muted'
+        });
+        var tplRow = body1.createEl('div', { cls: 'my-char-btn-group' });
+        var tplModes = [
+            { id: 'novel', label: '📖 小说' },
+            { id: 'diary', label: '📔 日记' },
+            { id: 'trpg', label: '🎲 跑团' },
+            { id: 'knowledge', label: '🧠 知识库' }
+        ];
+        for (var ti = 0; ti < tplModes.length; ti++) {
+            (function(mode) {
+                var btn = tplRow.createEl('button', { text: mode.label, cls: 'my-char-view-btn my-char-btn-sm' });
+                btn.addEventListener('click', async function() {
+                    btn.disabled = true;
+                    btn.textContent = '创建中…';
+                    try {
+                        var folder = await createScenarioTemplate(self.app, self.plugin, mode.id);
+                        if (folder) new obsidian.Notice('✅ 已创建模板：' + folder);
+                        await self.loadAllData();
+                        self.render();
+                    } catch (e) {
+                        console.error(e);
+                        new obsidian.Notice('创建失败，请查看控制台');
+                        btn.disabled = false;
+                        btn.textContent = mode.label;
+                    }
+                });
+            })(tplModes[ti]);
+        }
+        var settingsBtn = body1.createEl('button', { text: '⚙️ 手动配置路径', cls: 'my-char-btn-ghost my-char-btn-sm' });
+        settingsBtn.style.marginTop = '8px';
+        settingsBtn.addEventListener('click', function() {
+            self.app.setting.open();
+            self.app.setting.openTabById(self.plugin.manifest.id);
+        });
+
+        var pathBox = body1.createEl('div', { cls: 'my-char-empty-paths' });
+        pathBox.createEl('div', {
+            text: (status.charFileExists ? '✅' : '❌') + ' ' + terms.entity + '文件：' + status.charPath,
+            cls: status.charFileExists ? 'is-ok' : 'is-missing'
+        });
+        pathBox.createEl('div', {
+            text: (status.timelineFileExists ? '✅' : '❌') + ' ' + terms.timeline + '文件：' + status.timelinePath,
+            cls: status.timelineFileExists ? 'is-ok' : 'is-missing'
+        });
+        if (!status.charFileExists || !status.timelineFileExists) {
+            pathBox.createEl('p', {
+                text: '文件不存在时，可点击上方模板按钮自动创建，或在设置中修改路径后自行新建 Markdown 文件。',
+                cls: 'my-char-muted'
+            });
+        }
+
+        var step2 = steps.createEl('div', { cls: 'my-char-empty-step' });
+        step2.createEl('div', { text: '2', cls: 'my-char-empty-step-num' });
+        var body2 = step2.createEl('div', { cls: 'my-char-empty-step-body' });
+        body2.createEl('strong', { text: '刷新加载数据' });
+        body2.createEl('p', { text: '创建文件或修改设置后，点击刷新让插件读取最新内容。', cls: 'my-char-muted' });
+        body2.createEl('button', { text: '🔄 刷新数据', cls: 'my-char-view-btn my-char-btn-sm' })
+            .addEventListener('click', function() {
+                self.loadAllData().then(function() { self.render(); });
+            });
+
+        var step3 = steps.createEl('div', { cls: 'my-char-empty-step' });
+        step3.createEl('div', { text: '3', cls: 'my-char-empty-step-num' });
+        var body3 = step3.createEl('div', { cls: 'my-char-empty-step-body' });
+        body3.createEl('strong', { text: '开始录入' });
+        body3.createEl('p', {
+            text: '添加第一个' + terms.entity + '、记录' + terms.timeline + '事件、建立' + terms.relation + '——数据会自动写入 Markdown，Obsidian 里也能直接编辑。',
+            cls: 'my-char-muted'
+        });
+        var actionRow = body3.createEl('div', { cls: 'my-char-btn-group' });
+        actionRow.createEl('button', { text: '+ 添加' + terms.entity, cls: 'my-char-view-btn my-char-btn-sm' })
+            .addEventListener('click', function() { self.showQuickAddChar(); });
+        actionRow.createEl('button', { text: '+ 添加' + terms.event, cls: 'my-char-view-btn my-char-btn-sm' })
+            .addEventListener('click', function() { self.showQuickAddEvent(); });
+        actionRow.createEl('button', { text: '📋 看仪表盘', cls: 'my-char-btn-ghost my-char-btn-sm' })
+            .addEventListener('click', function() {
+                self.tab = 'dashboard';
+                self.render();
+            });
+
+        var tipBox = guide.createEl('div', { cls: 'my-char-empty-tip' });
+        tipBox.createEl('strong', { text: '💡 小提示' });
+        tipBox.createEl('p', {
+            text: '顶栏可「收起顶栏」腾出空间；时间线支持情节线与伏笔追踪；「🔍 全局搜索」可跨模块查找；「设定集导出」可生成完整文档。',
+            cls: 'my-char-muted'
+        });
     };
 
     MyView.prototype.renderCurrentTab = function (container) {
         container.empty();
         var tabContent = container.createEl('div');
         tabContent.className = 'tab-content';
-        tabContent.style.cssText = 'flex:1;overflow-y:auto;min-height:0;';
-        
+        /* tab-content styled in CSS */
+
         switch (this.tab) {
             case 'chars': this.renderChars(tabContent); break;
+            case 'search': this.renderGlobalSearch(tabContent); break;
             case 'factions': this.renderFactions(tabContent); break;
             case 'relations': this.renderRelations(tabContent); break;
+            case 'graph': this.renderGraph(tabContent); break;
             case 'timeline': this.renderTimeline(tabContent); break;
             case 'lifecycle': this.renderLifecycle(tabContent); break;
             case 'statistics': this.renderStatistics(tabContent); break;
             case 'dashboard': this.renderDashboard(tabContent); break;
-            case 'heatmap': this.renderHeatmap(tabContent); break;   
+            case 'heatmap': this.renderHeatmap(tabContent); break;
             case 'importexport': this.renderImportExport(tabContent); break;
             default: this.renderChars(tabContent);
         }
@@ -681,6 +2483,11 @@ var MyView = /** @class */ (function (_super) {
         }
         this.factions = savedData.factions || [];
         this.relations = savedData.relations || [];
+        var mdData = await novelExt.loadRelationsFromMd(this.plugin);
+        if (mdData && (mdData.relations.length > 0 || mdData.factions.length > 0)) {
+            this.factions = mdData.factions;
+            this.relations = mdData.relations;
+        }
 
         if (this.plugin.settings.customIntimacyLevels) {
             updateIntimacyLevels(this.plugin.settings.customIntimacyLevels);
@@ -723,47 +2530,14 @@ var MyView = /** @class */ (function (_super) {
     };
 
     MyView.prototype.parseChars = function (content) {
-        var chars = [];
-        var lines = content.split('\n');
-        var current = null;
-
-        for (var i = 0; i < lines.length; i++) {
-            var line = lines[i].trim();
-            if (!line) continue;
-          
-            if (line.startsWith('## ') && !line.startsWith('### ')) {
-                if (current && current.name) chars.push(current);
-                current = { name: line.substring(3).trim(), fields: {} };
-                continue;
-            }
-          
-            if (line.startsWith('# ')) continue;
-            if (line.startsWith('---')) continue;
-          
-            if (current) {
-                var text = line;
-                var hasDash = line.startsWith('- ');
-                if (hasDash) {
-                    text = line.substring(2);
-                }
-              
-                var sep = text.indexOf('：');
-                if (sep === -1) sep = text.indexOf(':');
-              
-                if (sep !== -1) {
-                    var key = text.substring(0, sep).trim();
-                    var value = text.substring(sep + 1).trim();
-                    if (value !== undefined) {
-                        current.fields[key] = value;
-                    }
-                }
-            }
-        }
-        if (current && current.name) chars.push(current);
-        return chars;
+        return parseCharsFromContent(content);
     };
 
     MyView.prototype.parseTimeline = function (content) {
+        return novelExt.parseTimelineExtended(content, this.plugin.settings);
+    };
+
+    MyView.prototype._parseTimelineLegacy = function (content) {
         var records = [];
         var lines = content.split('\n');
         var currentYear = '';
@@ -811,16 +2585,78 @@ var MyView = /** @class */ (function (_super) {
         return records;
     };
 
-    MyView.prototype.saveFactionsAndRelations = async function () {
-    await saveData(this.plugin, {
-        factions: this.factions,
-        relations: this.relations
-    });
-    // 🆕 同时保存亲密度变化历史
-    if (this.plugin.saveIntimacyHistory) {
-        await this.plugin.saveIntimacyHistory();
-    }
-};
+    MyView.prototype.saveFactionsAndRelations = async function (options) {
+        options = options || {};
+        await saveData(this.plugin, {
+            factions: this.factions,
+            relations: this.relations
+        });
+        await novelExt.saveRelationsToMd(this.plugin, this.factions, this.relations);
+        if (this.plugin.saveIntimacyHistory) {
+            await this.plugin.saveIntimacyHistory();
+        }
+        if (!options.skipGraphSync && this.plugin.settings.syncGraphOnSave !== false) {
+            try {
+                await syncGraphNotesToVault(this.plugin, this);
+            } catch (e) {
+                console.log('图谱同步失败:', e);
+            }
+        }
+    };
+
+    MyView.prototype.refreshRelationsIfVisible = function () {
+        if (this.tab === 'relations' && this._lastRelationsContainer) {
+            this.renderRelations(this._lastRelationsContainer);
+        }
+    };
+
+    MyView.prototype.renderGlobalTimeBar = function (container) {
+        var self = this;
+        var settings = this.plugin.settings;
+        var currentTimeStr = settings.currentTimePoint || '';
+        var bar = container.createEl('div', { cls: 'my-char-global-time-bar' });
+        bar.createEl('span', { text: '⏱️ 故事进度：', cls: 'my-char-time-label' });
+        var valueSpan = bar.createEl('span', {
+            text: currentTimeStr || '（未设置 — 在下方选择或输入）',
+            cls: 'my-char-time-value' + (currentTimeStr ? ' is-set' : '')
+        });
+        var select = bar.createEl('select', { cls: 'my-char-select' });
+        select.createEl('option', { text: '— 选择时间点 —', value: '' });
+        var points = novelExt.getTimelineTimePoints(this.timeline, settings);
+        for (var pi = 0; pi < points.length; pi++) {
+            var opt = select.createEl('option', { text: points[pi].label, value: points[pi].year });
+            if (points[pi].year === currentTimeStr) opt.selected = true;
+        }
+        select.addEventListener('change', async function() {
+            settings.currentTimePoint = select.value;
+            await self.plugin.saveSettings();
+            self.render();
+        });
+        var input = bar.createEl('input', { type: 'text', cls: 'my-char-input-inline' });
+        input.placeholder = '手动输入时间点';
+        input.style.maxWidth = '140px';
+        input.value = currentTimeStr;
+        input.addEventListener('keydown', async function(e) {
+            if (e.key === 'Enter') {
+                settings.currentTimePoint = input.value.trim();
+                await self.plugin.saveSettings();
+                self.render();
+            }
+        });
+        var nextBtn = bar.createEl('button', { text: '下一节点 ▶', cls: 'my-char-btn-ghost my-char-btn-xs' });
+        nextBtn.addEventListener('click', async function() {
+            var next = novelExt.getNextTimePoint(self.timeline, currentTimeStr);
+            settings.currentTimePoint = next;
+            await self.plugin.saveSettings();
+            new obsidian.Notice('时间点 → ' + next);
+            self.render();
+        });
+        var dashBtn = bar.createEl('button', { text: '📋 仪表盘', cls: 'my-char-btn-ghost my-char-btn-xs' });
+        dashBtn.addEventListener('click', function() {
+            self.tab = 'dashboard';
+            self.render();
+        });
+    };
 
     // ========== 人物视图 ==========
    MyView.prototype.renderChars = function (container) {
@@ -837,31 +2673,22 @@ var MyView = /** @class */ (function (_super) {
 
     // ===== 筛选横幅 =====
     if (this._activeFilter) {
-        var banner = container.createEl('div');
-        banner.style.cssText = 'display:flex;align-items:center;gap:12px;padding:10px 14px;margin-bottom:10px;background:#e8f4fd;border-radius:6px;border-left:4px solid #4a90e2;flex-wrap:wrap;';
-        
-        var iconSpan = banner.createEl('span', { text: this._activeFilter.label.split(' ')[0] });
-        iconSpan.style.cssText = 'font-size:18px;';
-        
-        var textSpan = banner.createEl('span');
-        textSpan.style.cssText = 'font-size:13px;font-weight:bold;color:#2c3e50;';
+        var banner = container.createEl('div', { cls: 'my-char-banner my-char-banner-info' });
+        var iconSpan = banner.createEl('span', { text: this._activeFilter.label.split(' ')[0], cls: 'my-char-banner-icon' });
+        var textSpan = banner.createEl('span', { cls: 'my-char-banner-text' });
         textSpan.textContent = this._activeFilter.label;
-        
         if (this._activeFilter.detail) {
-            var detailSpan = banner.createEl('span');
-            detailSpan.style.cssText = 'font-size:12px;color:#555;';
+            var detailSpan = banner.createEl('span', { cls: 'my-char-banner-detail' });
             detailSpan.textContent = this._activeFilter.detail;
         }
-        
-        var clearBtn = banner.createEl('button', { text: '✕ 清除筛选' });
-        clearBtn.style.cssText = 'margin-left:auto;padding:4px 14px;background:#e74c3c;color:white;border:none;border-radius:4px;cursor:pointer;font-size:12px;';
+        var bannerActions = banner.createEl('div', { cls: 'my-char-banner-actions' });
+        var clearBtn = bannerActions.createEl('button', { text: '✕ 清除筛选', cls: 'my-char-btn-danger my-char-btn-sm' });
         clearBtn.addEventListener('click', function() {
             self.clearActiveFilter();
         });
         
         if (this._deadAfterAppearDetails && this._deadAfterAppearDetails.length > 0) {
-            var detailBtn = banner.createEl('button', { text: '📋 查看详情' });
-            detailBtn.style.cssText = 'padding:4px 14px;background:#4a90e2;color:white;border:none;border-radius:4px;cursor:pointer;font-size:12px;';
+            var detailBtn = bannerActions.createEl('button', { text: '📋 查看详情', cls: 'my-char-view-btn my-char-btn-sm' });
             detailBtn.addEventListener('click', function() {
                 var msg = '⚠️ 已故后仍出场的人物详情：\n\n' + self._deadAfterAppearDetails.join('\n');
                 new obsidian.Notice(msg, 10000);
@@ -871,19 +2698,19 @@ var MyView = /** @class */ (function (_super) {
 
     // ===== 搜索栏 =====
     var searchBar = container.createEl('div');
-    searchBar.style.cssText = 'margin-bottom:10px;flex-shrink:0;';
+    searchBar.className = 'my-char-search-bar';
     
     var timeDisplay = searchBar.createEl('div');
-    timeDisplay.style.cssText = 'display:flex;align-items:center;gap:10px;margin-bottom:6px;flex-wrap:wrap;';
-    timeDisplay.createEl('span', { text: '⏱️ 当前时间点：' }).style.cssText = 'font-size:12px;font-weight:bold;color:#555;';
+    timeDisplay.className = 'my-char-time-row';
+    timeDisplay.createEl('span', { text: '⏱️ 当前时间点：', cls: 'my-char-time-label' });
     var timeValue = timeDisplay.createEl('span', { text: currentTimeStr || '（未设置）' });
-    timeValue.style.cssText = 'font-size:12px;color:' + (currentTimeStr ? '#4a90e2' : '#999') + ';font-weight:bold;';
+    timeValue.className = 'my-char-time-value' + (currentTimeStr ? ' is-set' : '');
     var setTimeBtn = timeDisplay.createEl('button', { text: '⚙️ 设置' });
-    setTimeBtn.style.cssText = 'padding:2px 10px;font-size:11px;border-radius:4px;border:1px solid #ddd;cursor:pointer;background:white;';
+    setTimeBtn.className = 'my-char-btn-ghost my-char-btn-xs';
     setTimeBtn.addEventListener('click', function() { self.app.setting.open(); self.app.setting.openTabById(self.plugin.manifest.id); });
 
     var searchInput = searchBar.createEl('input', { type: 'text', placeholder: '搜索人物名、身份、阵营、死亡...' });
-    searchInput.style.cssText = 'width:100%;padding:8px;border:1px solid var(--background-modifier-border);border-radius:4px;font-size:14px;box-sizing:border-box;';
+    searchInput.className = 'my-char-view-search';
     searchInput.value = this.searchText || '';
     searchInput.addEventListener('input', debounce(function() {
         self.searchText = searchInput.value;
@@ -894,10 +2721,14 @@ var MyView = /** @class */ (function (_super) {
         if (parentContainer) self.renderCurrentTab(parentContainer);
     }, 200));
 
+    var quickRow = container.createEl('div', { cls: 'my-char-quick-actions' });
+    quickRow.createEl('button', { text: '+ 快速添加人物', cls: 'my-char-view-btn my-char-btn-sm' })
+        .addEventListener('click', function() { self.showQuickAddChar(); });
+
     // ===== 状态筛选 =====
     var filterBar = container.createEl('div');
-    filterBar.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;padding:6px 10px;background:#f5f5f5;border-radius:6px;align-items:center;flex-shrink:0;';
-    filterBar.createEl('span', { text: '状态筛选：' }).style.cssText = 'font-size:12px;color:#666;font-weight:bold;';
+    filterBar.className = 'my-char-filter-bar';
+    filterBar.createEl('span', { text: '状态筛选：', cls: 'my-char-filter-label' });
 
     var statusOptions = [
         { id: 'all', label: '📋 全部' },
@@ -914,7 +2745,7 @@ var MyView = /** @class */ (function (_super) {
             var isActive = self._statusFilter === opt.id;
             var btn = filterBar.createEl('button', { text: opt.label });
             var activeColor = opt.id === 'all' ? '#4a90e2' : getStatusColor(opt.id);
-            btn.style.cssText = 'padding:3px 12px;border-radius:14px;border:1px solid #ddd;cursor:pointer;font-size:11px;background:' + (isActive ? activeColor : 'white') + ';color:' + (isActive ? 'white' : '#333') + ';';
+            setFilterChip(btn, isActive, activeColor);
             btn.addEventListener('click', function() {
                 self._statusFilter = opt.id;
                 if (self._activeFilter) {
@@ -924,8 +2755,7 @@ var MyView = /** @class */ (function (_super) {
                     var fb = filterButtons[j];
                     var fActive = fb.optId === self._statusFilter;
                     var fColor = fb.optId === 'all' ? '#4a90e2' : getStatusColor(fb.optId);
-                    fb.btn.style.background = fActive ? fColor : 'white';
-                    fb.btn.style.color = fActive ? 'white' : '#333';
+                    setFilterChip(fb.btn, fActive, fColor);
                 }
                 var parentContainer = container.parentElement;
                 if (parentContainer) self.renderCurrentTab(parentContainer);
@@ -938,8 +2768,8 @@ var MyView = /** @class */ (function (_super) {
     // ⭐ 新增：类型筛选（主角/配角/龙套）
     // ============================================================
     var typeFilterBar = container.createEl('div');
-    typeFilterBar.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;padding:6px 10px;background:#f0f4ff;border-radius:6px;align-items:center;flex-shrink:0;';
-    typeFilterBar.createEl('span', { text: '📌 类型筛选：' }).style.cssText = 'font-size:12px;color:#666;font-weight:bold;';
+    typeFilterBar.className = 'my-char-filter-bar my-char-filter-bar-accent';
+    typeFilterBar.createEl('span', { text: '📌 类型筛选：', cls: 'my-char-filter-label' });
 
     // 自动扫描所有人物，收集「类型」字段的值
     var typeSet = {};
@@ -990,8 +2820,8 @@ var MyView = /** @class */ (function (_super) {
         (function(opt) {
             var isActive = self._typeFilter === opt.id;
             var btn = typeFilterBar.createEl('button', { text: opt.label });
-            var activeColor = opt.id === 'all' ? '#6c5ce7' : '#6c5ce7';
-            btn.style.cssText = 'padding:3px 12px;border-radius:14px;border:1px solid #ddd;cursor:pointer;font-size:11px;background:' + (isActive ? activeColor : 'white') + ';color:' + (isActive ? 'white' : '#333') + ';';
+            var activeColor = '#6c5ce7';
+            setFilterChip(btn, isActive, activeColor);
             btn.addEventListener('click', function() {
                 self._typeFilter = opt.id;
                 if (self._activeFilter) {
@@ -1000,8 +2830,7 @@ var MyView = /** @class */ (function (_super) {
                 for (var j = 0; j < typeFilterButtons.length; j++) {
                     var fb = typeFilterButtons[j];
                     var fActive = fb.optId === self._typeFilter;
-                    fb.btn.style.background = fActive ? '#6c5ce7' : 'white';
-                    fb.btn.style.color = fActive ? 'white' : '#333';
+                    setFilterChip(fb.btn, fActive, '#6c5ce7');
                 }
                 var parentContainer = container.parentElement;
                 if (parentContainer) self.renderCurrentTab(parentContainer);
@@ -1012,12 +2841,12 @@ var MyView = /** @class */ (function (_super) {
 
     if (typeKeys.length === 0) {
         var hint = typeFilterBar.createEl('span', { text: '（暂无类型数据，请在人物文件中添加「类型」字段）' });
-        hint.style.cssText = 'font-size:11px;color:#999;margin-left:4px;';
+        hint.className = 'my-char-filter-hint';
     }
 
     // ===== 人物列表 =====
     var listContainer = container.createEl('div');
-    listContainer.style.cssText = 'flex:1;overflow-y:auto;';
+    listContainer.classList.add('my-char-scroll-list');
 
     var filtered = this.chars.slice();
 
@@ -1056,14 +2885,14 @@ var MyView = /** @class */ (function (_super) {
     var groupNames = Object.keys(groups).sort();
 
     if (groupNames.length === 0) {
-        listContainer.createEl('p', { text: '没有匹配的人物', cls: 'my-char-view-empty' }).style.cssText = 'text-align:center;color:#888;padding:30px;';
+        listContainer.createEl('p', { text: '没有匹配的人物', cls: 'my-char-view-empty' });
         return;
     }
 
     for (var gi = 0; gi < groupNames.length; gi++) {
         var gname = groupNames[gi];
         var members = groups[gname];
-        listContainer.createEl('h3', { text: gname + ' (' + members.length + '人)' }).style.cssText = 'margin:10px 0 6px;padding:6px 10px;background:#f0f4ff;border-radius:4px;font-size:14px;';
+        listContainer.createEl('h3', { text: gname + ' (' + members.length + '人)', cls: 'my-char-view-group-title' });
 
         for (var j = 0; j < members.length; j++) {
             var c = members[j];
@@ -1078,15 +2907,15 @@ var MyView = /** @class */ (function (_super) {
             var status = getCharStatusAtTime(this, c, currentTimeStr);
 
             var headerRow = card.createEl('div');
-            headerRow.style.cssText = 'display:flex;align-items:center;gap:6px;flex-wrap:wrap;';
+            headerRow.className = 'my-char-card-header';
             
             // 状态徽章
             var badge = headerRow.createEl('span', { text: getStatusLabel(status) });
-            badge.style.cssText = 'display:inline-block;padding:1px 8px;border-radius:10px;font-size:10px;font-weight:bold;color:white;background:' + getStatusColor(status) + ';';
+            setBadge(badge, getStatusColor(status));
             
             // 名字
             var titleEl = headerRow.createEl('strong');
-            titleEl.style.fontSize = '15px';
+            titleEl.className = 'my-char-card-title';
             titleEl.textContent = c.name;
             
             // 类型标签（如果有）
@@ -1107,7 +2936,7 @@ var MyView = /** @class */ (function (_super) {
                         break;
                     }
                 }
-                typeBadge.style.cssText = 'display:inline-block;padding:1px 8px;border-radius:10px;font-size:10px;font-weight:bold;color:white;background:' + typeColor + ';';
+                setBadge(typeBadge, typeColor, 'my-char-badge-type');
             }
             
             if (identity) {
@@ -1117,13 +2946,13 @@ var MyView = /** @class */ (function (_super) {
             }
             if (death) {
                 var deathEl = headerRow.createEl('span');
-                deathEl.style.cssText = 'background:var(--background-modifier-border);padding:1px 6px;border-radius:8px;font-size:10px;margin-left:4px;';
+                deathEl.className = 'my-char-death-tag';
                 deathEl.textContent = '💀' + death;
             }
 
             card.createEl('br');
             var timeMeta = card.createEl('small');
-            timeMeta.style.cssText = 'font-size:10px;color:#888;';
+            timeMeta.className = 'my-char-card-meta';
             var timeParts = [];
             var birth = this.getFieldValue(c, settings.birthFieldNames || '出生,出生时间');
             if (birth) timeParts.push('生: ' + birth);
@@ -1150,15 +2979,15 @@ var MyView = /** @class */ (function (_super) {
         var factionField = settings.factionFieldName || '阵营';
 
         var headerBar = container.createEl('div');
-        headerBar.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;flex-shrink:0;';
+        headerBar.className = 'my-char-faction-header';
 
-        headerBar.createEl('h3', { text: '阵营管理' }).style.cssText = 'margin:0;';
+        headerBar.createEl('h3', { text: '阵营管理' });
 
         var btnGroup = headerBar.createEl('div');
-        btnGroup.style.cssText = 'display:flex;gap:4px;flex-wrap:wrap;';
+        btnGroup.className = 'my-char-btn-group';
 
         var expandAllBtn = btnGroup.createEl('button', { text: '全部展开' });
-        expandAllBtn.style.cssText = 'padding:6px 10px;border:1px solid #ddd;border-radius:4px;cursor:pointer;font-size:12px;background:white;';
+        expandAllBtn.className = 'my-char-btn-ghost my-char-btn-sm';
         expandAllBtn.addEventListener('click', function () {
             for (var i = 0; i < self.factions.length; i++) {
                 self.expandedFactions[self.factions[i].name] = true;
@@ -1167,20 +2996,20 @@ var MyView = /** @class */ (function (_super) {
         });
 
         var collapseAllBtn = btnGroup.createEl('button', { text: '全部折叠' });
-        collapseAllBtn.style.cssText = 'padding:6px 10px;border:1px solid #ddd;border-radius:4px;cursor:pointer;font-size:12px;background:white;';
+        collapseAllBtn.className = 'my-char-btn-ghost my-char-btn-sm';
         collapseAllBtn.addEventListener('click', function () {
             self.expandedFactions = {};
             self.renderCurrentTab(container.parentElement);
         });
 
         var addBtn = btnGroup.createEl('button', { text: '+ 添加阵营' });
-        addBtn.style.cssText = 'padding:6px 12px;background:#4a90e2;color:white;border:none;border-radius:4px;cursor:pointer;font-size:12px;';
+        addBtn.className = 'my-char-view-btn my-char-btn-sm';
         addBtn.addEventListener('click', function () {
             self.showFactionDialog(null);
         });
 
         if (this.factions.length === 0) {
-            container.createEl('p', { text: '暂无阵营，点击上方按钮添加' }).style.cssText = 'text-align:center;color:#888;padding:20px;';
+            container.createEl('p', { text: '暂无阵营，点击上方按钮添加', cls: 'my-char-view-empty' });
             return;
         }
 
@@ -1195,45 +3024,38 @@ var MyView = /** @class */ (function (_super) {
                     }
                 }
 
-                var card = container.createEl('div');
-                card.style.cssText = 'margin:6px 0;border:1px solid #e0e0e0;border-radius:6px;background:white;overflow:hidden;';
+                var card = container.createEl('div', { cls: 'my-char-faction-card' });
                 if (faction.color) {
                     card.style.borderLeft = '4px solid ' + faction.color;
                 }
 
-                var header = card.createEl('div');
-                header.style.cssText = 'padding:12px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;background:' + (isExpanded ? '#fafafa' : 'white') + ';';
-                if (isExpanded) {
-                    header.style.borderBottom = '1px solid #eee';
-                }
+                var header = card.createEl('div', { cls: 'my-char-faction-card-header' + (isExpanded ? ' is-expanded' : '') });
 
                 var leftSide = header.createEl('div');
-                leftSide.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
+                leftSide.className = 'my-char-card-header';
 
-                var arrow = leftSide.createEl('span', { text: isExpanded ? '▼' : '▶' });
-                arrow.style.cssText = 'font-size:10px;color:#888;width:12px;';
+                var arrow = leftSide.createEl('span', { text: isExpanded ? '▼' : '▶', cls: 'my-char-muted' });
+                arrow.style.fontSize = '10px';
+                arrow.style.width = '12px';
 
-                leftSide.createEl('strong', { text: faction.name }).style.cssText = 'font-size:15px;';
+                leftSide.createEl('strong', { text: faction.name, cls: 'my-char-card-title' });
                 
                 if (faction.color) {
-                    var dot = leftSide.createEl('span');
-                    dot.style.cssText = 'display:inline-block;width:10px;height:10px;border-radius:50%;background:' + faction.color + ';';
+                    var dot = leftSide.createEl('span', { cls: 'my-char-color-dot' });
+                    dot.style.background = faction.color;
                 }
 
-                leftSide.createEl('span', { text: members.length + '人' }).style.cssText = 'font-size:12px;color:#888;';
+                leftSide.createEl('span', { text: members.length + '人', cls: 'my-char-muted' });
 
-                var rightSide = header.createEl('div');
-                rightSide.style.cssText = 'display:flex;gap:4px;';
+                var rightSide = header.createEl('div', { cls: 'my-char-btn-group' });
 
-                var editBtn = rightSide.createEl('button', { text: '编辑' });
-                editBtn.style.cssText = 'padding:3px 8px;border:1px solid #ddd;border-radius:3px;cursor:pointer;font-size:11px;background:white;';
+                var editBtn = rightSide.createEl('button', { text: '编辑', cls: 'my-char-btn-ghost my-char-btn-xs' });
                 editBtn.addEventListener('click', function (e) {
                     e.stopPropagation();
                     self.showFactionDialog(faction);
                 });
 
-                var delBtn = rightSide.createEl('button', { text: '删除' });
-                delBtn.style.cssText = 'padding:3px 8px;border:1px solid #ddd;border-radius:3px;cursor:pointer;font-size:11px;background:white;color:#e74c3c;';
+                var delBtn = rightSide.createEl('button', { text: '删除', cls: 'my-char-btn-danger my-char-btn-xs' });
                 delBtn.addEventListener('click', function (e) {
                     e.stopPropagation();
                     if (confirm('确定删除阵营 "' + faction.name + '"？')) {
@@ -1249,32 +3071,30 @@ var MyView = /** @class */ (function (_super) {
                 });
 
                 if (isExpanded) {
-                    var body = card.createEl('div');
-                    body.style.cssText = 'padding:8px;';
+                    var body = card.createEl('div', { cls: 'my-char-faction-card-body' });
 
                     if (faction.desc) {
-                        body.createEl('div', { text: faction.desc }).style.cssText = 'font-size:12px;color:#666;margin-bottom:8px;font-style:italic;padding:6px;background:#f9f9f9;border-radius:3px;';
+                        body.createEl('div', { text: faction.desc, cls: 'my-char-faction-desc' });
                     }
 
                     if (members.length === 0) {
-                        body.createEl('p', { text: '暂无人物属于此阵营' }).style.cssText = 'color:#aaa;font-size:12px;text-align:center;padding:10px;';
+                        body.createEl('p', { text: '暂无人物属于此阵营', cls: 'my-char-view-empty' });
                     } else {
                         for (var mi = 0; mi < members.length; mi++) {
                             var m = members[mi];
-                            var mRow = body.createEl('div');
-                            mRow.style.cssText = 'padding:6px 8px;margin:2px 0;border-bottom:1px solid #f5f5f5;cursor:pointer;font-size:13px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px;';
+                            var mRow = body.createEl('div', { cls: 'my-char-faction-member' });
 
                             var mLeft = mRow.createEl('div');
                             mLeft.createEl('strong', { text: m.name });
                             var mIdentity = self.getCharField(m, '身份');
                             if (mIdentity) {
-                                mLeft.createEl('small', { text: ' - ' + mIdentity }).style.cssText = 'color:#888;';
+                                mLeft.createEl('small', { text: ' - ' + mIdentity, cls: 'my-char-muted' });
                             }
 
                             var deathFieldNames = settings.deathFieldNames || '死亡,死亡时间';
                             var mDeath = self.getFieldValue(m, deathFieldNames);
                             if (mDeath) {
-                                mRow.createEl('span', { text: '💀 ' + mDeath }).style.cssText = 'font-size:10px;color:#999;background:#f0f0f0;padding:1px 6px;border-radius:8px;';
+                                mRow.createEl('span', { text: '💀 ' + mDeath, cls: 'my-char-death-tag' });
                             }
 
                             (function (charData) {
@@ -1307,19 +3127,20 @@ var MyView = /** @class */ (function (_super) {
     // ========== 关系视图 ==========
     MyView.prototype.renderRelations = function (container) {
         var self = this;
+        this._lastRelationsContainer = container;
         
         container.empty();
-        container.style.cssText = 'display:flex;flex-direction:column;height:100%;';
+        container.classList.add('my-char-flex-col');
         
         var toolbar = container.createEl('div');
-        toolbar.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin-bottom:15px;padding:10px;background:#f9f9f9;border-radius:8px;align-items:center;flex-shrink:0;';
+        toolbar.className = 'my-char-toolbar';
         
         var titleArea = toolbar.createEl('div');
-        titleArea.style.cssText = 'display:flex;align-items:center;gap:10px;';
-        titleArea.createEl('strong', { text: '人物关系' }).style.cssText = 'font-size:16px;';
-        
-        var addBtn = titleArea.createEl('button', { text: '+ 添加关系' });
-        addBtn.style.cssText = 'padding:4px 10px;background:#4a90e2;color:white;border:none;border-radius:4px;cursor:pointer;font-size:12px;';
+        titleArea.className = 'my-char-toolbar-title';
+        titleArea.createEl('strong', { text: getTerm(this.plugin, 'entity') + getTerm(this.plugin, 'relation') });
+
+        var addBtn = titleArea.createEl('button', { text: '+ 添加' + getTerm(this.plugin, 'relation') });
+        addBtn.className = 'my-char-view-btn my-char-btn-sm';
         addBtn.addEventListener('click', function () {
             if (self.chars.length < 2) {
                 new obsidian.Notice('至少需要两个人物');
@@ -1329,15 +3150,15 @@ var MyView = /** @class */ (function (_super) {
         });
 
         var statsSpan = toolbar.createEl('span', { text: '共 ' + this.relations.length + ' 条关系' });
-        statsSpan.style.cssText = 'margin-left:auto;color:#888;font-size:12px;';
+        statsSpan.className = 'my-char-toolbar-stats';
         
         var filterBar = container.createEl('div');
-        filterBar.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;padding:8px;background:#f5f5f5;border-radius:6px;align-items:center;flex-shrink:0;';
+        filterBar.className = 'my-char-filter-bar';
         
-        filterBar.createEl('span', { text: '筛选：' }).style.cssText = 'font-size:12px;color:#666;';
+        filterBar.createEl('span', { text: '筛选：', cls: 'my-char-filter-label' });
         
         var typeSelect = filterBar.createEl('select');
-        typeSelect.style.cssText = 'padding:4px 8px;border-radius:4px;border:1px solid #ddd;font-size:12px;';
+        typeSelect.className = 'my-char-select';
         typeSelect.add(createOption('all', '📋 全部类型'));
         
         var typeSet = {};
@@ -1361,7 +3182,7 @@ var MyView = /** @class */ (function (_super) {
         });
         
         var intimacySelect = filterBar.createEl('select');
-        intimacySelect.style.cssText = 'padding:4px 8px;border-radius:4px;border:1px solid #ddd;font-size:12px;';
+        intimacySelect.className = 'my-char-select';
         intimacySelect.add(createOption('all', '❤️ 全部亲密度'));
         for (var i = 0; i < INTIMACY_LEVELS.length; i++) {
             var lvl = INTIMACY_LEVELS[i];
@@ -1373,10 +3194,10 @@ var MyView = /** @class */ (function (_super) {
             self.renderRelations(container);
         });
         
-        filterBar.createEl('span', { text: '排序：' }).style.cssText = 'font-size:12px;color:#666;margin-left:8px;';
+        filterBar.createEl('span', { text: '排序：', cls: 'my-char-filter-label' });
         
         var sortSelect = filterBar.createEl('select');
-        sortSelect.style.cssText = 'padding:4px 8px;border-radius:4px;border:1px solid #ddd;font-size:12px;';
+        sortSelect.className = 'my-char-select';
         sortSelect.add(createOption('intimacy', '❤️ 亲密度降序'));
         sortSelect.add(createOption('intimacy_asc', '❤️ 亲密度升序'));
         sortSelect.add(createOption('type', '📌 按类型'));
@@ -1388,21 +3209,21 @@ var MyView = /** @class */ (function (_super) {
         });
         
         var viewModeBtn = filterBar.createEl('button', { text: this.relationViewMode === 'list' ? '📋 列表视图' : '📁 分组视图' });
-        viewModeBtn.style.cssText = 'padding:4px 10px;border-radius:4px;border:1px solid #ddd;background:white;cursor:pointer;font-size:12px;margin-left:auto;';
+        viewModeBtn.className = 'my-char-btn-ghost my-char-btn-sm'; viewModeBtn.style.marginLeft = 'auto';
         viewModeBtn.addEventListener('click', function() {
             self.relationViewMode = self.relationViewMode === 'list' ? 'group' : 'list';
             self.renderRelations(container);
         });
         
         var batchBtn = filterBar.createEl('button', { text: '⚡ 批量操作' });
-        batchBtn.style.cssText = 'padding:4px 10px;border-radius:4px;border:1px solid #ddd;background:#e67e22;color:white;cursor:pointer;font-size:12px;';
+        batchBtn.className = 'my-char-btn-warning my-char-btn-sm';
         batchBtn.addEventListener('click', function() {
             self.showBatchRelationDialog();
         });
         
         var contentArea = container.createEl('div');
         contentArea.className = 'relations-content-area';
-        contentArea.style.cssText = 'flex:1;overflow-y:auto;min-height:200px;padding-right:4px;';
+        /* relations-content-area in CSS */
         
         var filteredRelations = this.relations.slice();
         if (this.relationFilterType !== 'all') {
@@ -1421,7 +3242,7 @@ var MyView = /** @class */ (function (_super) {
         
         if (filteredRelations.length === 0) {
             var emptyMsg = contentArea.createEl('div');
-            emptyMsg.style.cssText = 'text-align:center;color:#888;padding:40px;';
+            emptyMsg.className = 'my-char-view-empty';
             emptyMsg.innerHTML = '📭 暂无关系数据<br><small>点击上方"添加关系"按钮添加</small>';
             this.renderAutoRelationsSuggestions(contentArea);
             return;
@@ -1467,40 +3288,40 @@ var MyView = /** @class */ (function (_super) {
         for (var i = 0; i < relations.length; i++) {
             (function(rel) {
                 var card = container.createEl('div');
-                card.style.cssText = 'padding:10px;margin:6px 0;border:1px solid #e0e0e0;border-radius:8px;background:white;';
-                card.style.borderLeft = '4px solid ' + getIntimacyColor(rel.intimacy || 0);
+                card.className = 'my-char-rel-card';
+                setRelAccent(card, getIntimacyColor(rel.intimacy || 0));
 
                 var mainLine = card.createEl('div');
-                mainLine.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
+                mainLine.className = 'my-char-rel-line';
                 var nameA = mainLine.createEl('strong', { text: rel.charA });
-                nameA.style.cssText = 'font-size:14px;cursor:pointer;color:#4a90e2;text-decoration:underline;';
+                nameA.className = 'my-char-link'; nameA.style.fontSize = '14px';
                 nameA.addEventListener('click', function() {
                     var cd = self.findChar(rel.charA);
                     if (cd) self.showCharDetail(cd);
                 });
 
                 var typeBadge = mainLine.createEl('span', { text: rel.type });
-                typeBadge.style.cssText = 'background:#4a90e2;color:white;padding:2px 10px;border-radius:12px;font-size:11px;';
+                typeBadge.className = 'my-char-badge-relation';
 
                 var intimacyLabel = getIntimacyLabel(rel.intimacy || 0);
                 var intimacyColor = getIntimacyColor(rel.intimacy || 0);
                 var intimacyBadge = mainLine.createEl('span', { text: '❤️ ' + intimacyLabel });
-                intimacyBadge.style.cssText = 'padding:2px 8px;border-radius:10px;font-size:10px;color:white;background:' + intimacyColor + ';';
+                setBadge(intimacyBadge, intimacyColor);
 
                 var nameB = mainLine.createEl('strong', { text: rel.charB });
-                nameB.style.cssText = 'font-size:14px;cursor:pointer;color:#4a90e2;text-decoration:underline;';
+                nameB.className = 'my-char-link'; nameB.style.fontSize = '14px';
                 nameB.addEventListener('click', function() {
                     var cd = self.findChar(rel.charB);
                     if (cd) self.showCharDetail(cd);
                 });
 
                 if (rel.desc) {
-                    card.createEl('div', { text: rel.desc }).style.cssText = 'font-size:12px;color:#666;margin-top:4px;margin-left:4px;';
+                    card.createEl('div', { text: rel.desc, cls: 'my-char-rel-desc' });
                 }
 
                 if (rel.startTime || rel.endTime) {
                     var timeRange = card.createEl('div');
-                    timeRange.style.cssText = 'font-size:10px;color:#888;margin-top:2px;margin-left:4px;';
+                    timeRange.className = 'my-char-rel-time';
                     var timeText = '';
                     if (rel.startTime) timeText += '📅 始于 ' + rel.startTime;
                     if (rel.endTime) timeText += (timeText ? ' · ' : '') + '⌛ 止于 ' + rel.endTime;
@@ -1510,17 +3331,14 @@ var MyView = /** @class */ (function (_super) {
                 var relHistory = getRelationHistory(self.plugin, rel.charA, rel.charB);
                 var historySummary = getChangeSummary(relHistory);
                 var summaryRow = card.createEl('div');
-                summaryRow.style.cssText = 'font-size:11px;color:#666;margin-top:6px;padding:4px 8px;background:#f8f9fa;border-radius:4px;';
+                summaryRow.className = 'my-char-rel-summary';
                 summaryRow.textContent = '📈 ' + historySummary;
-                if (relHistory.length > 0) {
-                    renderIntimacyCurveChart(card, relHistory, { width: 300, height: 56, compact: true });
-                }
 
                 var btnRow = card.createEl('div');
-                btnRow.style.cssText = 'display:flex;gap:4px;margin-top:8px;';
+                btnRow.className = 'my-char-rel-actions';
 
                 var editRelBtn = btnRow.createEl('button', { text: '编辑' });
-                editRelBtn.style.cssText = 'padding:2px 8px;border:1px solid #ddd;border-radius:3px;cursor:pointer;font-size:11px;background:white;';
+                editRelBtn.className = 'my-char-btn-ghost my-char-btn-xs';
                 editRelBtn.addEventListener('click', function(e) {
                     e.stopPropagation();
                     self.showRelationDialog(rel);
@@ -1528,7 +3346,7 @@ var MyView = /** @class */ (function (_super) {
 
                 // 🆕 新增：查看变化历史按钮
                 var historyBtn = btnRow.createEl('button', { text: '📊 历史' });
-                historyBtn.style.cssText = 'padding:2px 8px;border:1px solid #ddd;border-radius:3px;cursor:pointer;font-size:11px;background:white;color:#9b59b6;';
+                historyBtn.className = 'my-char-btn-ghost my-char-btn-xs'; historyBtn.style.color = 'var(--char-purple)';
                 historyBtn.addEventListener('click', function(e) {
                     e.stopPropagation();
                     self.showChangeHistory(rel);
@@ -1536,7 +3354,7 @@ var MyView = /** @class */ (function (_super) {
 
                 // 🆕 新增：记录变化按钮
                 var recordBtn = btnRow.createEl('button', { text: '📝 记录变化' });
-                recordBtn.style.cssText = 'padding:2px 8px;border:1px solid #ddd;border-radius:3px;cursor:pointer;font-size:11px;background:#4a90e2;color:white;';
+                recordBtn.className = 'my-char-view-btn my-char-btn-xs';
                 recordBtn.addEventListener('click', function(e) {
                     e.stopPropagation();
                     self.showRecordChange(rel, function() {
@@ -1545,7 +3363,7 @@ var MyView = /** @class */ (function (_super) {
                 });
 
                 var delRelBtn = btnRow.createEl('button', { text: '删除' });
-                delRelBtn.style.cssText = 'padding:2px 8px;border:1px solid #ddd;border-radius:3px;cursor:pointer;font-size:11px;background:white;color:#e74c3c;';
+                delRelBtn.className = 'my-char-btn-danger my-char-btn-xs';
                 delRelBtn.addEventListener('click', function(e) {
                     e.stopPropagation();
                     if (confirm('确定删除 ' + rel.charA + ' 与 ' + rel.charB + ' 的「' + rel.type + '」关系？')) {
@@ -1576,14 +3394,14 @@ var MyView = /** @class */ (function (_super) {
             var typeRels = typeGroups[type];
             
             var groupHeader = container.createEl('div');
-            groupHeader.style.cssText = 'margin-top:15px;margin-bottom:8px;padding:6px 12px;background:#e8f0fe;border-radius:6px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;';
+            groupHeader.className = 'my-char-rel-group-header';
             
             if (this.expandedRelationGroups[type] === undefined) this.expandedRelationGroups[type] = true;
             var arrow = groupHeader.createEl('span', { text: this.expandedRelationGroups[type] ? '▼' : '▶' });
-            arrow.style.cssText = 'font-size:10px;color:#888;margin-right:6px;';
+            arrow.className = 'my-char-muted'; arrow.style.fontSize = '10px'; arrow.style.marginRight = '6px';
             
-            groupHeader.createEl('strong', { text: type }).style.cssText = 'font-size:14px;';
-            groupHeader.createEl('span', { text: typeRels.length + '条' }).style.cssText = 'font-size:12px;color:#888;';
+            groupHeader.createEl('strong', { text: type });
+            groupHeader.createEl('span', { text: typeRels.length + '条', cls: 'my-char-muted' });
             
             var sumIntimacy = 0;
             for (var i = 0; i < typeRels.length; i++) {
@@ -1591,7 +3409,7 @@ var MyView = /** @class */ (function (_super) {
             }
             var avgIntimacy = typeRels.length > 0 ? (sumIntimacy / typeRels.length).toFixed(1) : 0;
             var avgLabel = getIntimacyLabel(Math.round(avgIntimacy));
-            groupHeader.createEl('span', { text: '平均: ' + avgLabel }).style.cssText = 'font-size:10px;color:#666;margin-left:8px;';
+            groupHeader.createEl('span', { text: '平均: ' + avgLabel, cls: 'my-char-muted' }); groupHeader.lastChild.style.fontSize = '10px'; groupHeader.lastChild.style.marginLeft = '8px';
             
             groupHeader.addEventListener('click', (function(t) {
                 return function() {
@@ -1602,7 +3420,7 @@ var MyView = /** @class */ (function (_super) {
             
             if (this.expandedRelationGroups[type]) {
                 var groupBody = container.createEl('div');
-                groupBody.style.cssText = 'margin-left:16px;margin-bottom:10px;';
+                groupBody.className = 'my-char-section'; groupBody.style.marginLeft = '16px';
                 
                 var sortedRels = typeRels.slice().sort(function(a, b) {
                     return (b.intimacy || 0) - (a.intimacy || 0);
@@ -1611,22 +3429,22 @@ var MyView = /** @class */ (function (_super) {
                 for (var i = 0; i < sortedRels.length; i++) {
                     (function(rel) {
                     var subCard = groupBody.createEl('div');
-                    subCard.style.cssText = 'padding:6px 10px;margin:3px 0;border-left:3px solid ' + getIntimacyColor(rel.intimacy || 0) + ';background:#fafafa;border-radius:4px;';
+                    subCard.className = 'my-char-rel-subcard'; setRelAccent(subCard, getIntimacyColor(rel.intimacy || 0));
 
                     var subLine = subCard.createEl('div');
-                    subLine.style.cssText = 'display:flex;align-items:center;gap:6px;flex-wrap:wrap;';
+                    subLine.className = 'my-char-rel-line';
 
                     var nameA = subLine.createEl('span', { text: rel.charA });
-                    nameA.style.cssText = 'cursor:pointer;color:#4a90e2;text-decoration:underline;font-size:13px;';
+                    nameA.className = 'my-char-link'; nameA.style.fontSize = '13px';
                     nameA.addEventListener('click', function() {
                         var cd = self.findChar(rel.charA);
                         if (cd) self.showCharDetail(cd);
                     });
 
-                    subLine.createEl('span', { text: '→' }).style.cssText = 'color:#999;font-size:11px;';
+                    subLine.createEl('span', { text: '→', cls: 'my-char-muted' }); subLine.lastChild.style.fontSize = '11px';
 
                     var nameB = subLine.createEl('span', { text: rel.charB });
-                    nameB.style.cssText = 'cursor:pointer;color:#4a90e2;text-decoration:underline;font-size:13px;';
+                    nameB.className = 'my-char-link'; nameB.style.fontSize = '13px';
                     nameB.addEventListener('click', function() {
                         var cd = self.findChar(rel.charB);
                         if (cd) self.showCharDetail(cd);
@@ -1634,27 +3452,24 @@ var MyView = /** @class */ (function (_super) {
 
                     var intimacyLabel = getIntimacyLabel(rel.intimacy || 0);
                     var intimacyColor = getIntimacyColor(rel.intimacy || 0);
-                    subLine.createEl('span', { text: '❤️ ' + intimacyLabel }).style.cssText = 'font-size:9px;padding:1px 6px;border-radius:8px;color:white;background:' + intimacyColor + ';';
+                    setBadge(subLine.createEl('span', { text: '❤️ ' + intimacyLabel }), intimacyColor); subLine.lastChild.style.fontSize = '9px';
 
                     var relHistory = getRelationHistory(self.plugin, rel.charA, rel.charB);
                     var historySummary = getChangeSummary(relHistory);
                     var summarySpan = subCard.createEl('div');
-                    summarySpan.style.cssText = 'font-size:10px;color:#888;margin-top:4px;';
+                    summarySpan.className = 'my-char-rel-summary'; summarySpan.style.fontSize = '10px';
                     summarySpan.textContent = '📈 ' + historySummary;
-                    if (relHistory.length > 0) {
-                        renderIntimacyCurveChart(subCard, relHistory, { width: 260, height: 48, compact: true });
-                    }
 
                     var actRow = subCard.createEl('div');
-                    actRow.style.cssText = 'display:flex;gap:4px;margin-top:4px;';
+                    actRow.className = 'my-char-rel-actions';
                     var histBtn = actRow.createEl('button', { text: '📊 历史' });
-                    histBtn.style.cssText = 'padding:1px 6px;border:1px solid #ddd;border-radius:3px;cursor:pointer;font-size:9px;background:white;color:#9b59b6;';
+                    histBtn.className = 'my-char-btn-ghost my-char-btn-xs'; histBtn.style.color = 'var(--char-purple)';
                     histBtn.addEventListener('click', function(e) {
                         e.stopPropagation();
                         self.showChangeHistory(rel);
                     });
                     var recBtn = actRow.createEl('button', { text: '📝 记录变化' });
-                    recBtn.style.cssText = 'padding:1px 6px;border:1px solid #ddd;border-radius:3px;cursor:pointer;font-size:9px;background:#4a90e2;color:white;';
+                    recBtn.className = 'my-char-view-btn my-char-btn-xs';
                     recBtn.addEventListener('click', function(e) {
                         e.stopPropagation();
                         self.showRecordChange(rel, function() {
@@ -1662,12 +3477,26 @@ var MyView = /** @class */ (function (_super) {
                         });
                     });
 
+                    var delRelBtn = actRow.createEl('button', { text: '删除' });
+                    delRelBtn.className = 'my-char-btn-danger my-char-btn-xs';
+                    delRelBtn.addEventListener('click', function(e) {
+                        e.stopPropagation();
+                        if (confirm('确定删除 ' + rel.charA + ' 与 ' + rel.charB + ' 的「' + rel.type + '」关系？')) {
+                            var realIdx = self.relations.indexOf(rel);
+                            if (realIdx !== -1) {
+                                self.relations.splice(realIdx, 1);
+                                self.saveFactionsAndRelations();
+                                self.render();
+                            }
+                        }
+                    });
+
                     if (rel.desc) {
-                        subCard.createEl('div', { text: rel.desc }).style.cssText = 'font-size:11px;color:#888;margin-top:2px;margin-left:4px;';
+                        subCard.createEl('div', { text: rel.desc, cls: 'my-char-rel-desc' });
                     }
 
                     var editIcon = subCard.createEl('span', { text: '✏️' });
-                    editIcon.style.cssText = 'float:right;cursor:pointer;opacity:0.5;font-size:11px;';
+                    editIcon.className = 'my-char-muted'; editIcon.style.float = 'right'; editIcon.style.cursor = 'pointer'; editIcon.style.opacity = '0.5'; editIcon.style.fontSize = '11px';
                     editIcon.addEventListener('click', function(e) {
                         e.stopPropagation();
                         self.showRelationDialog(rel);
@@ -1676,6 +3505,186 @@ var MyView = /** @class */ (function (_super) {
                 }
             }
         }
+    };
+
+    MyView.prototype.renderGraph = function(container) {
+        var self = this;
+        var terms = getTermSet(this.plugin);
+        container.empty();
+        container.addClass('my-char-graph-root');
+
+        var toolbar = container.createEl('div', { cls: 'my-char-graph-toolbar' });
+        toolbar.createEl('span', { text: '🕸️ ' + terms.relation + '网络', cls: 'my-char-graph-title' });
+
+        var syncBtn = toolbar.createEl('button', { text: '🔄 同步到 Obsidian 图谱', cls: 'my-char-view-btn' });
+        syncBtn.style.fontSize = '12px';
+        syncBtn.addEventListener('click', function() {
+            syncGraphNotesToVault(self.plugin, self).then(function(res) {
+                new obsidian.Notice(formatGraphSyncNotice(res));
+                self.renderGraph(container);
+            });
+        });
+
+        var globalGraphBtn = toolbar.createEl('button', { text: '🌐 打开原生全局图谱', cls: 'my-char-view-btn-secondary' });
+        globalGraphBtn.style.fontSize = '12px';
+        globalGraphBtn.addEventListener('click', function() {
+            var folder = getGraphNotesFolder(self.plugin);
+            openObsidianGlobalGraph(self.app, folder).then(function() {
+                new obsidian.Notice('已在 Obsidian 原生图谱中打开（筛选：' + folder + '）');
+            });
+        });
+
+        var hint = toolbar.createEl('span', { text: '推荐用原生图谱拖拽探索；下方为简易预览' });
+        hint.className = 'my-char-view-muted';
+        hint.style.fontSize = '11px';
+
+        if (this.chars.length === 0) {
+            container.createEl('p', { text: '暂无' + terms.entity + '数据', cls: 'my-char-view-empty' });
+            return;
+        }
+
+        var syncScopeBar = container.createEl('div', { cls: 'my-char-graph-sync-scope' });
+        syncScopeBar.createEl('span', { text: '📌 图谱同步类型：', cls: 'my-char-filter-label' });
+
+        var modeSelect = syncScopeBar.createEl('select', { cls: 'my-char-select' });
+        modeSelect.style.fontSize = '12px';
+        modeSelect.add(createOption('all', '全部类型'));
+        modeSelect.add(createOption('selected', '仅选中类型'));
+        modeSelect.value = isGraphSyncModeSelected(this.plugin) ? 'selected' : 'all';
+        modeSelect.addEventListener('change', async function() {
+            self.plugin.settings.graphSyncMode = modeSelect.value;
+            if (modeSelect.value === 'selected' && (!self.plugin.settings.graphSyncTypes || self.plugin.settings.graphSyncTypes.length === 0)) {
+                var allTypes = collectCharTypesForGraph(self);
+                self.plugin.settings.graphSyncTypes = allTypes.map(function(t) { return t.label; });
+            }
+            await self.plugin.saveSettings();
+            self.renderGraph(container);
+        });
+
+        var typeOptions = collectCharTypesForGraph(this);
+        var selectedTypes = this.plugin.settings.graphSyncTypes || [];
+        var typeCheckboxWrap = container.createEl('div', { cls: 'my-char-graph-type-checks' });
+        if (typeOptions.length === 0) {
+            typeCheckboxWrap.createEl('span', { text: '（暂无类型数据，请在人物文件中添加「类型」字段）', cls: 'my-char-view-muted' });
+        } else {
+            for (var ti = 0; ti < typeOptions.length; ti++) {
+                (function(opt) {
+                    var label = typeCheckboxWrap.createEl('label', { cls: 'my-char-graph-type-check' });
+                    var cb = label.createEl('input', { type: 'checkbox' });
+                    cb.checked = !isGraphSyncModeSelected(self.plugin) || selectedTypes.indexOf(opt.label) !== -1;
+                    cb.disabled = !isGraphSyncModeSelected(self.plugin);
+                    label.createEl('span', { text: opt.label + ' (' + opt.count + ')' });
+                    cb.addEventListener('change', async function() {
+                        var list = (self.plugin.settings.graphSyncTypes || []).slice();
+                        var idx = list.indexOf(opt.label);
+                        if (cb.checked && idx === -1) list.push(opt.label);
+                        if (!cb.checked && idx !== -1) list.splice(idx, 1);
+                        self.plugin.settings.graphSyncTypes = list;
+                        self.plugin.settings.graphSyncMode = 'selected';
+                        await self.plugin.saveSettings();
+                        self.renderGraph(container);
+                    });
+                })(typeOptions[ti]);
+            }
+        }
+
+        var graphChars = getCharsForGraphSync(this.plugin, this);
+        var graphFolder = getGraphNotesFolder(this.plugin);
+        var folderHint = container.createEl('div', { cls: 'my-char-graph-legend' });
+        folderHint.textContent = getGraphSyncSummaryText(this.plugin, this) + ' · 图谱节点目录：' + graphFolder + ' · ' + graphChars.length + ' 个节点，' + this.relations.length + ' 条' + terms.relation;
+
+        container.createEl('div', { cls: 'my-char-view-muted', text: '▼ 简易预览（环形布局，点击节点打开 Obsidian 本地图谱）' }).style.margin = '8px 0 4px';
+
+        var wrap = container.createEl('div', { cls: 'my-char-graph-canvas-wrap' });
+        var width = Math.max(480, wrap.clientWidth || 600);
+        var height = Math.max(400, Math.min(600, width * 0.75));
+
+        var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('width', '100%');
+        svg.setAttribute('height', String(height));
+        svg.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+        svg.classList.add('my-char-graph-svg');
+
+        var n = graphChars.length;
+        if (n === 0) {
+            container.createEl('p', { text: '当前同步范围内没有' + terms.entity + '，请调整类型筛选后重试', cls: 'my-char-view-empty' });
+            return;
+        }
+        var cx = width / 2, cy = height / 2;
+        var radius = Math.min(width, height) * 0.36;
+        var nodePositions = {};
+        var graphCharNames = {};
+        for (var gi = 0; gi < graphChars.length; gi++) {
+            graphCharNames[graphChars[gi].name] = true;
+        }
+        for (var i = 0; i < n; i++) {
+            var angle = (2 * Math.PI * i) / n - Math.PI / 2;
+            nodePositions[graphChars[i].name] = {
+                x: cx + radius * Math.cos(angle),
+                y: cy + radius * Math.sin(angle),
+                char: graphChars[i]
+            };
+        }
+
+        var edgeGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        for (var ri = 0; ri < this.relations.length; ri++) {
+            var rel = this.relations[ri];
+            if (!graphCharNames[rel.charA] || !graphCharNames[rel.charB]) continue;
+            var pa = nodePositions[rel.charA], pb = nodePositions[rel.charB];
+            if (!pa || !pb) continue;
+            var line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+            line.setAttribute('x1', String(pa.x));
+            line.setAttribute('y1', String(pa.y));
+            line.setAttribute('x2', String(pb.x));
+            line.setAttribute('y2', String(pb.y));
+            line.setAttribute('stroke', getIntimacyColor(rel.intimacy || 0));
+            line.setAttribute('stroke-width', '2');
+            line.setAttribute('stroke-opacity', '0.55');
+            line.setAttribute('class', 'my-char-graph-edge');
+            edgeGroup.appendChild(line);
+        }
+        svg.appendChild(edgeGroup);
+
+        var nodeGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        var names = Object.keys(nodePositions);
+        for (var ni = 0; ni < names.length; ni++) {
+            (function(name) {
+                var pos = nodePositions[name];
+                var faction = self.getCharField(pos.char, self.plugin.settings.factionFieldName || '阵营');
+                var nodeColor = '#4a90e2';
+                for (var fi = 0; fi < self.factions.length; fi++) {
+                    if (self.factions[fi].name === faction) {
+                        nodeColor = self.factions[fi].color || nodeColor;
+                        break;
+                    }
+                }
+                var g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+                g.setAttribute('class', 'my-char-graph-node');
+                g.style.cursor = 'pointer';
+                var circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                circle.setAttribute('cx', String(pos.x));
+                circle.setAttribute('cy', String(pos.y));
+                circle.setAttribute('r', '18');
+                circle.setAttribute('fill', nodeColor);
+                circle.setAttribute('stroke', 'var(--background-primary, #fff)');
+                circle.setAttribute('stroke-width', '2');
+                g.appendChild(circle);
+                var label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                label.setAttribute('x', String(pos.x));
+                label.setAttribute('y', String(pos.y + 32));
+                label.setAttribute('text-anchor', 'middle');
+                label.setAttribute('font-size', '11');
+                label.setAttribute('fill', 'var(--text-normal, #333)');
+                label.textContent = name.length > 6 ? name.substring(0, 5) + '…' : name;
+                g.appendChild(label);
+                g.addEventListener('click', function() {
+                    openLocalGraphForEntity(self.app, self.plugin, self, name);
+                });
+                nodeGroup.appendChild(g);
+            })(names[ni]);
+        }
+        svg.appendChild(nodeGroup);
+        wrap.appendChild(svg);
     };
     
     MyView.prototype.renderAutoRelationsSuggestions = function(container) {
@@ -1697,8 +3706,8 @@ var MyView = /** @class */ (function (_super) {
         
         if (newAutoRels.length > 0) {
             var suggestDiv = container.createEl('div');
-            suggestDiv.style.cssText = 'margin-top:20px;border-top:2px solid #e0e0e0;padding-top:12px;';
-            suggestDiv.createEl('div', { text: '💡 建议添加的关系（基于共同出场次数）' }).style.cssText = 'font-size:12px;color:#888;margin-bottom:8px;';
+            suggestDiv.className = 'my-char-section'; suggestDiv.style.borderTop = '2px solid var(--char-border)'; suggestDiv.style.paddingTop = '12px';
+            suggestDiv.createEl('div', { text: '💡 建议添加的关系（基于共同出场次数）', cls: 'my-char-muted' }); suggestDiv.lastChild.style.marginBottom = '8px';
             
             newAutoRels.sort(function(a, b) { return b.count - a.count; });
             var showCount = Math.min(10, newAutoRels.length);
@@ -1706,10 +3715,10 @@ var MyView = /** @class */ (function (_super) {
             for (var i = 0; i < showCount; i++) {
                 var rel = newAutoRels[i];
                 var card = suggestDiv.createEl('div');
-                card.style.cssText = 'padding:6px 10px;margin:4px 0;border:1px dashed #ddd;border-radius:6px;background:#fafafa;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;';
+                card.className = 'my-char-rel-subcard'; card.style.borderStyle = 'dashed'; card.style.display = 'flex'; card.style.alignItems = 'center'; card.style.justifyContent = 'space-between';
                 card.innerHTML = '<div><strong>' + rel.charA + '</strong> <span style="color:#888;">↔</span> <strong>' + rel.charB + '</strong><br><small style="color:#888;">共同出现 ' + rel.count + ' 次</small></div>';
                 var addBtn = card.createEl('button', { text: '+ 添加关系' });
-                addBtn.style.cssText = 'padding:2px 10px;border:1px solid #4a90e2;border-radius:3px;cursor:pointer;font-size:11px;background:white;color:#4a90e2;';
+                addBtn.className = 'my-char-btn-ghost my-char-btn-xs'; addBtn.style.color = 'var(--char-accent)'; addBtn.style.borderColor = 'var(--char-accent)';
                 addBtn.addEventListener('click', (function(rd) {
                     return function(e) {
                         e.stopPropagation();
@@ -1725,11 +3734,11 @@ var MyView = /** @class */ (function (_super) {
             }
             
             if (newAutoRels.length > 10) {
-                suggestDiv.createEl('div', { text: '...还有 ' + (newAutoRels.length - 10) + ' 条建议' }).style.cssText = 'font-size:11px;color:#aaa;text-align:center;padding:4px;';
+                suggestDiv.createEl('div', { text: '...还有 ' + (newAutoRels.length - 10) + ' 条建议', cls: 'my-char-muted' }); suggestDiv.lastChild.style.textAlign = 'center';
             }
             
             var addAllBtn = suggestDiv.createEl('button', { text: '📌 一键添加所有建议关系' });
-            addAllBtn.style.cssText = 'margin-top:8px;padding:4px 12px;background:#27ae60;color:white;border:none;border-radius:4px;cursor:pointer;font-size:11px;width:100%;';
+            addAllBtn.className = 'my-char-btn-success my-char-btn-block'; addAllBtn.style.marginTop = '8px'; addAllBtn.style.fontSize = '11px';
             addAllBtn.addEventListener('click', function() {
                 var addedCount = 0;
                 for (var i = 0; i < newAutoRels.length; i++) {
@@ -1823,6 +3832,351 @@ var MyView = /** @class */ (function (_super) {
         return this.charMap[name] || null;
     };
 
+    MyView.prototype.buildSettingCollectionMarkdown = function () {
+        var self = this;
+        var terms = getTermSet(this.plugin);
+        var title = getViewTitle(this.plugin);
+        var now = new Date().toLocaleString();
+        var currentTime = this.plugin.settings.currentTimePoint || '（未设置）';
+        var lines = [];
+        lines.push('# 📚 ' + title + ' · 设定集');
+        lines.push('');
+        lines.push('> 生成时间：' + now);
+        lines.push('> 当前故事进度：' + currentTime);
+        lines.push('> ' + terms.entity + ' ' + this.chars.length + ' · ' + terms.relation + ' ' + this.relations.length + ' · ' + terms.faction + ' ' + this.factions.length + ' · ' + terms.event + ' ' + this.timeline.length);
+        lines.push('');
+
+        lines.push('## 👥 ' + terms.entity + '一览');
+        lines.push('');
+        if (this.chars.length === 0) {
+            lines.push('（暂无数据）');
+        } else {
+            for (var ci = 0; ci < this.chars.length; ci++) {
+                var c = this.chars[ci];
+                lines.push('### ' + c.name);
+                var status = getCharStatusAtTime(this, c, currentTime === '（未设置）' ? '' : currentTime);
+                lines.push('- 状态：' + getStatusLabel(status));
+                var fields = c.fields || {};
+                for (var fk in fields) {
+                    if (fields.hasOwnProperty(fk) && fields[fk]) {
+                        lines.push('- ' + fk + '：' + fields[fk]);
+                    }
+                }
+                lines.push('');
+            }
+        }
+
+        lines.push('## 🏰 ' + terms.faction);
+        lines.push('');
+        if (this.factions.length === 0) {
+            lines.push('（暂无）');
+        } else {
+            for (var fi = 0; fi < this.factions.length; fi++) {
+                var f = this.factions[fi];
+                lines.push('- **' + f.name + '**' + (f.desc ? '：' + f.desc : ''));
+            }
+        }
+        lines.push('');
+
+        lines.push('## 🔗 ' + terms.relation + '表');
+        lines.push('');
+        if (this.relations.length === 0) {
+            lines.push('（暂无）');
+        } else {
+            lines.push('| A | B | 类型 | 亲密度 | 描述 |');
+            lines.push('| --- | --- | --- | --- | --- |');
+            for (var ri = 0; ri < this.relations.length; ri++) {
+                var r = this.relations[ri];
+                lines.push('| ' + r.charA + ' | ' + r.charB + ' | ' + (r.type || '') + ' | ' + (r.intimacy || 0) + ' | ' + (r.desc || '').replace(/\|/g, '\\|') + ' |');
+            }
+        }
+        lines.push('');
+
+        lines.push('## 📅 ' + terms.timeline);
+        lines.push('');
+        if (this.timeline.length === 0) {
+            lines.push('（暂无）');
+        } else {
+            var lastYear = '';
+            for (var ti = 0; ti < this.timeline.length; ti++) {
+                var evt = this.timeline[ti];
+                if (evt.year !== lastYear) {
+                    lines.push('');
+                    lines.push('### ' + evt.year);
+                    lastYear = evt.year;
+                }
+                var tagPart = evt.tag ? '[' + evt.tag + '] ' : '';
+                var meta = '';
+                if (evt.plotLine) meta += ' | 情节线:' + evt.plotLine;
+                if (evt.plotStatus) meta += ' | 状态:' + evt.plotStatus;
+                if (evt.chapterNote) meta += ' | 笔记:' + evt.chapterNote;
+                var monthPart = evt.month && evt.month !== '未标注' ? '（' + evt.month + '）' : '';
+                lines.push('- ' + tagPart + evt.event + monthPart + meta);
+            }
+        }
+        lines.push('');
+
+        var unredeemed = novelExt.getUnredeemedPlotLines(this.timeline);
+        lines.push('## 🧵 未回收伏笔 / 情节线');
+        lines.push('');
+        if (unredeemed.length === 0) {
+            lines.push('✅ 暂无未回收情节线');
+        } else {
+            for (var ui = 0; ui < unredeemed.length; ui++) {
+                var g = unredeemed[ui];
+                lines.push('- **' + g.plotLine + '** · ' + (g.latestStatus || '进行中') + ' · ' + g.events.length + ' 个节点');
+            }
+        }
+        lines.push('');
+
+        var warnings = novelExt.validatePlotLines(this.timeline);
+        if (warnings.length > 0) {
+            lines.push('## ⚠️ 伏笔逻辑提醒');
+            lines.push('');
+            for (var wi = 0; wi < warnings.length; wi++) {
+                lines.push('- ' + warnings[wi].message);
+            }
+            lines.push('');
+        }
+
+        lines.push('---');
+        lines.push('*由「人物关系谱系」插件自动生成*');
+        return lines.join('\n');
+    };
+
+    MyView.prototype.buildPrintPreviewBodyHtml = function () {
+        var terms = getTermSet(this.plugin);
+        var title = getViewTitle(this.plugin);
+        var now = new Date().toLocaleString();
+        var currentTime = this.plugin.settings.currentTimePoint || '（未设置）';
+        var parts = [];
+        parts.push('<h1>📚 ' + title + ' · 设定集</h1>');
+        parts.push('<p class="meta">生成时间：' + now + '</p>');
+        parts.push('<p class="meta">当前故事进度：' + currentTime + '</p>');
+        parts.push('<p class="meta">' + terms.entity + ' ' + this.chars.length + ' · ' + terms.relation + ' ' + this.relations.length + ' · ' + terms.faction + ' ' + this.factions.length + ' · ' + terms.event + ' ' + this.timeline.length + '</p>');
+
+        parts.push('<h2>👥 ' + terms.entity + '</h2><ul>');
+        for (var ci = 0; ci < this.chars.length; ci++) {
+            var c = this.chars[ci];
+            var fields = c.fields || {};
+            var extras = [];
+            for (var fk in fields) {
+                if (fields.hasOwnProperty(fk) && fields[fk]) extras.push(fk + '：' + fields[fk]);
+            }
+            parts.push('<li><strong>' + c.name + '</strong>' + (extras.length ? ' — ' + extras.slice(0, 3).join('；') : '') + '</li>');
+        }
+        parts.push('</ul>');
+
+        parts.push('<h2>🔗 ' + terms.relation + '</h2>');
+        if (this.relations.length > 0) {
+            parts.push('<table><tr><th>A</th><th>B</th><th>类型</th><th>亲密度</th></tr>');
+            for (var ri = 0; ri < this.relations.length; ri++) {
+                var r = this.relations[ri];
+                parts.push('<tr><td>' + r.charA + '</td><td>' + r.charB + '</td><td>' + (r.type || '') + '</td><td>' + (r.intimacy || 0) + '</td></tr>');
+            }
+            parts.push('</table>');
+        }
+
+        parts.push('<h2>📅 ' + terms.timeline + '</h2><ul>');
+        var lastY = '';
+        for (var ti = 0; ti < this.timeline.length; ti++) {
+            var evt = this.timeline[ti];
+            if (evt.year !== lastY) {
+                parts.push('<li class="year-mark"><strong>' + evt.year + '</strong></li>');
+                lastY = evt.year;
+            }
+            var tag = evt.tag ? '<span class="tag">[' + evt.tag + ']</span> ' : '';
+            var plot = evt.plotLine ? ' <em>(' + evt.plotLine + (evt.plotStatus ? '·' + evt.plotStatus : '') + ')</em>' : '';
+            parts.push('<li>' + tag + evt.event + plot + '</li>');
+        }
+        parts.push('</ul>');
+
+        var unredeemed = novelExt.getUnredeemedPlotLines(this.timeline);
+        parts.push('<h2>🧵 未回收伏笔</h2><ul>');
+        if (unredeemed.length === 0) {
+            parts.push('<li>✅ 暂无</li>');
+        } else {
+            for (var ui = 0; ui < unredeemed.length; ui++) {
+                parts.push('<li><strong>' + unredeemed[ui].plotLine + '</strong> · ' + (unredeemed[ui].latestStatus || '进行中') + '</li>');
+            }
+        }
+        parts.push('</ul>');
+        return parts.join('');
+    };
+
+    MyView.prototype.getPrintPreviewStyles = function () {
+        return '.my-char-print-doc{font-family:var(--font-interface,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif);color:var(--text-normal,#222);line-height:1.55;font-size:13px;}' +
+            '.my-char-print-doc h1{font-size:22px;border-bottom:2px solid #6c5ce7;padding-bottom:8px;margin:0 0 12px;}' +
+            '.my-char-print-doc h2{font-size:15px;margin-top:22px;color:#4a7fd4;border-left:4px solid #4a7fd4;padding-left:8px;}' +
+            '.my-char-print-doc .meta{color:var(--text-muted,#666);font-size:12px;margin:3px 0;}' +
+            '.my-char-print-doc ul{list-style:none;padding:0;margin:6px 0;}' +
+            '.my-char-print-doc li{padding:3px 0 3px 10px;border-left:2px solid #e0e0e0;margin:2px 0;}' +
+            '.my-char-print-doc .year-mark{border-left-color:#6c5ce7;margin-top:10px;}' +
+            '.my-char-print-doc .tag{background:#4a7fd4;color:#fff;font-size:10px;padding:1px 6px;border-radius:8px;}' +
+            '.my-char-print-doc table{width:100%;border-collapse:collapse;margin:8px 0;font-size:12px;}' +
+            '.my-char-print-doc td,.my-char-print-doc th{border:1px solid #ddd;padding:5px 8px;text-align:left;}';
+    };
+
+    MyView.prototype.buildPrintPreviewHtml = function () {
+        var title = getViewTitle(this.plugin);
+        var body = this.buildPrintPreviewBodyHtml();
+        var screenCss = this.getPrintPreviewStyles();
+        var printCss = 'body{font-family:"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;max-width:820px;margin:24px auto;padding:0 20px 40px;color:#222;line-height:1.55;font-size:13px;}' +
+            'h1{font-size:22px;border-bottom:2px solid #6c5ce7;padding-bottom:8px;}' +
+            'h2{font-size:15px;margin-top:22px;color:#4a7fd4;border-left:4px solid #4a7fd4;padding-left:8px;}' +
+            '.meta{color:#666;font-size:12px;margin:3px 0;}ul{list-style:none;padding:0;margin:6px 0;}' +
+            'li{padding:3px 0 3px 10px;border-left:2px solid #e0e0e0;margin:2px 0;}.year-mark{border-left-color:#6c5ce7;margin-top:10px;}' +
+            '.tag{background:#4a7fd4;color:#fff;font-size:10px;padding:1px 6px;border-radius:8px;}' +
+            'table{width:100%;border-collapse:collapse;margin:8px 0;font-size:12px;}td,th{border:1px solid #ddd;padding:5px 8px;text-align:left;}';
+        return '<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + title + ' · 设定集</title><style>' + printCss + '</style></head><body>' + body + '</body></html>';
+    };
+
+    MyView.prototype.showPrintPreview = function () {
+        new PrintPreviewModal(this.app, this).open();
+    };
+
+    MyView.prototype.exportSettingCollection = function (saveToVault) {
+        var self = this;
+        var md = this.buildSettingCollectionMarkdown();
+        var fname = '设定集-' + new Date().toISOString().slice(0, 10) + '.md';
+        if (saveToVault) {
+            var folder = (this.plugin.settings.charFolder || '').trim();
+            novelExt.saveTextToVault(this.app, folder, fname, md).then(function(path) {
+                new obsidian.Notice('✅ 已保存到 ' + path);
+            });
+        } else {
+            novelExt.downloadTextFile(md, fname, 'text/markdown;charset=utf-8');
+            new obsidian.Notice('✅ 设定集已下载');
+        }
+    };
+
+    MyView.prototype.renderGlobalSearch = function (container) {
+        var self = this;
+        container.empty();
+        container.classList.add('my-char-scroll-section');
+        var terms = getTermSet(this.plugin);
+
+        container.createEl('h3', { text: '🔍 全局搜索', cls: 'my-char-section-title' });
+        container.createEl('p', {
+            text: '同时搜索' + terms.entity + '、' + terms.relation + '、' + terms.timeline + '与情节线，点击结果可跳转。',
+            cls: 'my-char-muted'
+        }).style.margin = '0 0 12px';
+
+        var searchBar = container.createEl('div', { cls: 'my-char-search-bar' });
+        var input = searchBar.createEl('input', {
+            type: 'text',
+            placeholder: '输入姓名、事件、情节线、阵营…',
+            cls: 'my-char-view-search'
+        });
+        input.value = this._globalSearchText || '';
+        input.focus();
+
+        var debouncedSearch = debounce(function() {
+            self._globalSearchText = input.value;
+            self.renderGlobalSearch(container);
+        }, 250);
+        input.addEventListener('input', debouncedSearch);
+        input.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') {
+                self._globalSearchText = input.value;
+                self.renderGlobalSearch(container);
+            }
+        });
+
+        var q = (this._globalSearchText || '').trim();
+        if (!q) {
+            container.createEl('p', { text: '输入关键词开始搜索', cls: 'my-char-view-empty' });
+            return;
+        }
+
+        var results = performGlobalSearch(this, q);
+        var total = results.chars.length + results.relations.length + results.timeline.length + results.plotLines.length + results.factions.length;
+        container.createEl('p', { text: '找到 ' + total + ' 条相关结果（关键词：「' + q + '」）', cls: 'my-char-muted' }).style.margin = '0 0 12px';
+
+        function renderSection(title, count, renderFn) {
+            if (count === 0) return;
+            var sec = container.createEl('div', { cls: 'my-char-search-section' });
+            sec.createEl('h4', { text: title + '（' + count + '）', cls: 'my-char-subsection-title' });
+            renderFn(sec);
+        }
+
+        renderSection('👥 ' + terms.entity, results.chars.length, function(sec) {
+            for (var i = 0; i < results.chars.length; i++) {
+                (function(c) {
+                    var row = sec.createEl('div', { cls: 'my-char-search-row' });
+                    row.createEl('strong', { text: c.name, cls: 'my-char-view-link' });
+                    var fields = c.fields || {};
+                    var hint = fields['身份'] || fields['类型'] || fields['阵营'] || '';
+                    if (hint) row.createEl('span', { text: ' · ' + hint, cls: 'my-char-muted' });
+                    row.addEventListener('click', function() { self.showCharDetail(c); });
+                })(results.chars[i]);
+            }
+        });
+
+        renderSection('🔗 ' + terms.relation, results.relations.length, function(sec) {
+            for (var i = 0; i < results.relations.length; i++) {
+                (function(r) {
+                    var row = sec.createEl('div', { cls: 'my-char-search-row' });
+                    row.textContent = r.charA + ' ↔ ' + r.charB + ' · ' + (r.type || '关系') + (r.desc ? ' — ' + r.desc.substring(0, 40) : '');
+                    row.addEventListener('click', function() {
+                        self.tab = 'relations';
+                        self.render();
+                    });
+                })(results.relations[i]);
+            }
+        });
+
+        renderSection('📅 ' + terms.timeline, results.timeline.length, function(sec) {
+            for (var i = 0; i < Math.min(results.timeline.length, 30); i++) {
+                (function(evt) {
+                    var row = sec.createEl('div', { cls: 'my-char-search-row' });
+                    row.textContent = '[' + evt.year + '] ' + (evt.tag ? '[' + evt.tag + '] ' : '') + evt.event.substring(0, 60);
+                    row.addEventListener('click', function() {
+                        self.tab = 'timeline';
+                        if (evt.plotLine) self._plotLineFilter = evt.plotLine;
+                        self._yearSearchText = evt.year;
+                        self.render();
+                        self.showEditEvent(evt);
+                    });
+                })(results.timeline[i]);
+            }
+            if (results.timeline.length > 30) {
+                sec.createEl('p', { text: '…还有 ' + (results.timeline.length - 30) + ' 条，请缩小关键词', cls: 'my-char-muted' });
+            }
+        });
+
+        renderSection('🧵 情节线', results.plotLines.length, function(sec) {
+            for (var i = 0; i < results.plotLines.length; i++) {
+                (function(g) {
+                    var row = sec.createEl('div', { cls: 'my-char-search-row' });
+                    row.textContent = g.plotLine + ' · ' + (g.latestStatus || '进行中') + ' · ' + g.events.length + ' 节点';
+                    row.addEventListener('click', function() {
+                        self.tab = 'timeline';
+                        self._plotLineFilter = g.plotLine;
+                        self.render();
+                    });
+                })(results.plotLines[i]);
+            }
+        });
+
+        renderSection('🏰 ' + terms.faction, results.factions.length, function(sec) {
+            for (var i = 0; i < results.factions.length; i++) {
+                (function(f) {
+                    var row = sec.createEl('div', { cls: 'my-char-search-row' });
+                    row.textContent = f.name + (f.desc ? ' — ' + f.desc.substring(0, 40) : '');
+                    row.addEventListener('click', function() {
+                        self.tab = 'factions';
+                        self.render();
+                    });
+                })(results.factions[i]);
+            }
+        });
+
+        if (total === 0) {
+            container.createEl('p', { text: '没有找到匹配「' + q + '」的内容', cls: 'my-char-view-empty' });
+        }
+    };
+
     MyView.prototype.buildAutoRelations = function () {
         var relations = {};
         for (var i = 0; i < this.timeline.length; i++) {
@@ -1893,31 +4247,94 @@ var MyView = /** @class */ (function (_super) {
         modal.open();
     };
 
+function isTimelineYearExpanded(view, year, yearIndex, totalYears) {
+    if (view._timelineExpandedYears && view._timelineExpandedYears.hasOwnProperty(year)) {
+        return !!view._timelineExpandedYears[year];
+    }
+    if (view._yearSearchText || view._plotLineFilter || view.selectedTag) return true;
+    if (totalYears <= 3) return true;
+    return yearIndex === 0;
+}
+
+function isTimelineMonthExpanded(view, year, month, yearExpanded, eventCount) {
+    var key = year + '\x00' + month;
+    if (view._timelineExpandedMonths && view._timelineExpandedMonths.hasOwnProperty(key)) {
+        return !!view._timelineExpandedMonths[key];
+    }
+    if (!yearExpanded) return false;
+    if (view._yearSearchText || view._plotLineFilter || view.selectedTag) return true;
+    return eventCount <= 8;
+}
+
+function setTimelineYearExpanded(view, year, expanded) {
+    if (!view._timelineExpandedYears) view._timelineExpandedYears = {};
+    view._timelineExpandedYears[year] = expanded;
+}
+
+function setTimelineMonthExpanded(view, year, month, expanded) {
+    if (!view._timelineExpandedMonths) view._timelineExpandedMonths = {};
+    view._timelineExpandedMonths[year + '\x00' + month] = expanded;
+}
+
+function expandAllTimelineGroups(view, yearGroups) {
+    if (!view._timelineExpandedYears) view._timelineExpandedYears = {};
+    if (!view._timelineExpandedMonths) view._timelineExpandedMonths = {};
+    var years = Object.keys(yearGroups);
+    for (var yi = 0; yi < years.length; yi++) {
+        var y = years[yi];
+        view._timelineExpandedYears[y] = true;
+        var monthGroups = {};
+        for (var i = 0; i < yearGroups[y].length; i++) {
+            var m = yearGroups[y][i].month || '未标注';
+            monthGroups[m] = true;
+        }
+        for (var mk in monthGroups) {
+            if (monthGroups.hasOwnProperty(mk)) {
+                view._timelineExpandedMonths[y + '\x00' + mk] = true;
+            }
+        }
+    }
+}
+
+function collapseAllTimelineGroups(view, yearGroups) {
+    if (!view._timelineExpandedYears) view._timelineExpandedYears = {};
+    if (!view._timelineExpandedMonths) view._timelineExpandedMonths = {};
+    var years = Object.keys(yearGroups);
+    for (var yi = 0; yi < years.length; yi++) {
+        var y = years[yi];
+        view._timelineExpandedYears[y] = false;
+        for (var i = 0; i < yearGroups[y].length; i++) {
+            var m = yearGroups[y][i].month || '未标注';
+            view._timelineExpandedMonths[y + '\x00' + m] = false;
+        }
+    }
+}
+
     // ========== 时间线视图 ==========
 MyView.prototype.renderTimeline = function (container) {
     var self = this;
     container.empty();
-    container.style.cssText = 'padding:10px;overflow-y:auto;';
+    container.classList.add('my-char-scroll-section');
 
     // ===== 年份搜索框 =====
     var searchToolbar = container.createEl('div');
-    searchToolbar.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;padding:8px 12px;background:#f5f5f5;border-radius:6px;align-items:center;flex-shrink:0;';
-    searchToolbar.createEl('span', { text: '📅 年份搜索：' }).style.cssText = 'font-size:12px;color:#666;font-weight:bold;';
+    searchToolbar.className = 'my-char-filter-bar';
+    searchToolbar.createEl('span', { text: '📅 年份搜索：', cls: 'my-char-filter-label' });
 
     var yearInput = searchToolbar.createEl('input', { type: 'text' });
-    yearInput.style.cssText = 'flex:1;min-width:120px;padding:6px 10px;border:1px solid #ddd;border-radius:4px;font-size:13px;';
+    yearInput.className = 'my-char-input-inline'; yearInput.style.flex = '1'; yearInput.style.minWidth = '120px';
     yearInput.placeholder = '输入年份/年号/关键词搜索';
     yearInput.value = this._yearSearchText || '';
 
     var searchBtn = searchToolbar.createEl('button', { text: '🔍 搜索' });
-    searchBtn.style.cssText = 'padding:6px 14px;background:#4a90e2;color:white;border:none;border-radius:4px;cursor:pointer;font-size:12px;';
+    searchBtn.className = 'my-char-view-btn my-char-btn-sm';
     searchBtn.addEventListener('click', function() {
         self._yearSearchText = yearInput.value.trim();
         self.renderTimeline(container);
     });
 
     var clearBtn = searchToolbar.createEl('button', { text: '✕ 清除' });
-    clearBtn.style.cssText = 'padding:6px 14px;background:#e74c3c;color:white;border:none;border-radius:4px;cursor:pointer;font-size:12px;';
+    clearBtn.className = 'my-char-btn-danger my-char-btn-sm';
     clearBtn.addEventListener('click', function() {
         self._yearSearchText = '';
         yearInput.value = '';
@@ -1933,12 +4350,12 @@ MyView.prototype.renderTimeline = function (container) {
 
     // ===== 标签管理 =====
     var tagToolbar = container.createEl('div');
-    tagToolbar.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;padding:10px;background:#f5f5f5;border-radius:6px;align-items:center;flex-shrink:0;';
+    tagToolbar.className = 'my-char-filter-bar';
 
-    tagToolbar.createEl('span', { text: '🏷️ 标签管理：' }).style.cssText = 'font-weight:bold;font-size:13px;color:#555;';
+    tagToolbar.createEl('span', { text: '🏷️ 标签管理：', cls: 'my-char-filter-label' });
 
     var tagManageBtn = tagToolbar.createEl('button', { text: '✏️ 管理标签' });
-    tagManageBtn.style.cssText = 'padding:4px 12px;background:#9b59b6;color:white;border:none;border-radius:4px;cursor:pointer;font-size:12px;';
+    tagManageBtn.className = 'my-char-btn-purple my-char-btn-sm';
     tagManageBtn.addEventListener('click', function() {
         var modal = new EventTagModal(self.plugin.app, self.plugin, function() {
             self.loadAllData().then(function() {
@@ -1948,22 +4365,25 @@ MyView.prototype.renderTimeline = function (container) {
         modal.open();
     });
 
+    tagToolbar.createEl('button', { text: '+ 快速添加事件', cls: 'my-char-view-btn my-char-btn-sm' })
+        .addEventListener('click', function() { self.showQuickAddEvent(); });
+
     var currentTags = getEventTags(this.plugin);
     if (currentTags.length > 0) {
         var tagDisplay = tagToolbar.createEl('div');
-        tagDisplay.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin-left:8px;';
+        tagDisplay.className = 'my-char-chip-list'; tagDisplay.style.marginLeft = '8px';
         for (var i = 0; i < currentTags.length; i++) {
             var tag = currentTags[i];
             var chip = tagDisplay.createEl('span', { text: tag.label });
-            chip.style.cssText = 'padding:2px 8px;border-radius:12px;font-size:11px;color:white;background:' + tag.color + ';';
+            chip.className = 'my-char-tag-chip'; chip.style.setProperty('--tag-bg', tag.color); chip.style.background = tag.color;
         }
     }
 
     var filterBar = container.createEl('div');
-    filterBar.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-bottom:15px;padding:8px;background:#f9f9f9;border-radius:6px;flex-shrink:0;';
+    filterBar.className = 'my-char-filter-bar';
 
     var allBtn = filterBar.createEl('button', { text: '全部' });
-    allBtn.style.cssText = 'padding:4px 12px;border-radius:16px;border:1px solid #ddd;cursor:pointer;background:' + (this.selectedTag === '' ? '#4a90e2' : 'white') + ';color:' + (this.selectedTag === '' ? 'white' : '#333') + ';';
+    setFilterChip(allBtn, this.selectedTag === '', '#4a90e2');
     allBtn.addEventListener('click', function() {
         self.selectedTag = '';
         self.renderTimeline(container);
@@ -1972,7 +4392,7 @@ MyView.prototype.renderTimeline = function (container) {
     for (var i = 0; i < currentTags.length; i++) {
         (function(tag) {
             var btn = filterBar.createEl('button', { text: tag.label });
-            btn.style.cssText = 'padding:4px 12px;border-radius:16px;border:1px solid #ddd;cursor:pointer;background:' + (self.selectedTag === tag.value ? tag.color : 'white') + ';color:' + (self.selectedTag === tag.value ? 'white' : '#333') + ';';
+            setFilterChip(btn, self.selectedTag === tag.value, tag.color);
             btn.addEventListener('click', function() {
                 self.selectedTag = tag.value;
                 self.renderTimeline(container);
@@ -1980,8 +4400,53 @@ MyView.prototype.renderTimeline = function (container) {
         })(currentTags[i]);
     }
 
+    var plotLines = {};
+    for (var pli = 0; pli < this.timeline.length; pli++) {
+        if (this.timeline[pli].plotLine) plotLines[this.timeline[pli].plotLine] = true;
+    }
+    var plotKeys = Object.keys(plotLines).sort();
+    if (plotKeys.length > 0) {
+        var plotBar = container.createEl('div', { cls: 'my-char-filter-bar my-char-filter-bar-accent' });
+        plotBar.createEl('span', { text: '🧵 情节线：', cls: 'my-char-filter-label' });
+        var allPlotBtn = plotBar.createEl('button', { text: '全部' });
+        setFilterChip(allPlotBtn, !this._plotLineFilter, '#6c5ce7');
+        allPlotBtn.addEventListener('click', function() {
+            self._plotLineFilter = '';
+            self.renderTimeline(container);
+        });
+        for (var pk = 0; pk < plotKeys.length; pk++) {
+            (function(pl) {
+                var pbtn = plotBar.createEl('button', { text: pl });
+                setFilterChip(pbtn, self._plotLineFilter === pl, '#6c5ce7');
+                pbtn.addEventListener('click', function() {
+                    self._plotLineFilter = pl;
+                    self.renderTimeline(container);
+                });
+            })(plotKeys[pk]);
+        }
+        var unredeemedLines = novelExt.getUnredeemedPlotLines(this.timeline);
+        if (unredeemedLines.length > 0) {
+            plotBar.createEl('span', {
+                text: '⚠ ' + unredeemedLines.length + ' 条未回收线',
+                cls: 'my-char-filter-hint'
+            });
+        }
+    }
+
+    self.renderPlotWarnings(container, this._plotLineFilter || '');
+
+    if (this._plotLineFilter) {
+        self.renderPlotLineTrack(container, this._plotLineFilter);
+    }
+
     // ===== 筛选数据 =====
     var filteredTimeline = this.timeline;
+
+    if (this._plotLineFilter) {
+        filteredTimeline = filteredTimeline.filter(function(e) {
+            return e.plotLine === self._plotLineFilter;
+        });
+    }
 
     if (this.selectedTag) {
         filteredTimeline = filteredTimeline.filter(function(e) {
@@ -2018,7 +4483,7 @@ MyView.prototype.renderTimeline = function (container) {
         var emptyMsg = '暂无时间线事件';
         if (this.selectedTag) emptyMsg = '没有匹配标签的事件';
         if (this._yearSearchText) emptyMsg = '没有匹配 "' + this._yearSearchText + '" 的事件';
-        container.createEl('p', { text: emptyMsg }).style.cssText = 'text-align:center;color:#888;padding:40px;';
+        container.createEl('p', { text: emptyMsg, cls: 'my-char-view-empty' });
         return;
     }
 
@@ -2031,14 +4496,43 @@ MyView.prototype.renderTimeline = function (container) {
 
     var years = Object.keys(yearGroups).sort().reverse();
 
-    for (var yi = 0; yi < years.length; yi++) {
-        var year = years[yi];
-        var records = yearGroups[year];
-        var yearNode = container.createEl('div');
-        yearNode.style.cssText = 'margin-bottom:15px;';
+    var foldBar = container.createEl('div', { cls: 'my-char-timeline-fold-bar' });
+    foldBar.createEl('span', { text: '时间点：', cls: 'my-char-filter-label' });
+    foldBar.createEl('button', { text: '▼ 全部展开', cls: 'my-char-btn-ghost my-char-btn-xs' })
+        .addEventListener('click', function() {
+            expandAllTimelineGroups(self, yearGroups);
+            self.renderTimeline(container);
+        });
+    foldBar.createEl('button', { text: '▶ 全部收起', cls: 'my-char-btn-ghost my-char-btn-xs' })
+        .addEventListener('click', function() {
+            collapseAllTimelineGroups(self, yearGroups);
+            self.renderTimeline(container);
+        });
+    foldBar.createEl('span', {
+        text: years.length + ' 个时间点 · ' + filteredTimeline.length + ' 条事件',
+        cls: 'my-char-filter-hint'
+    });
 
-        yearNode.createEl('h3', { text: year })
-            .style.cssText = 'margin:0 0 8px;padding:4px 10px;background:#f0f4ff;border-radius:4px;display:inline-block;font-size:15px;';
+    for (var yi = 0; yi < years.length; yi++) {
+        (function(year, yi, records) {
+        var yearExpanded = isTimelineYearExpanded(self, year, yi, years.length);
+        var yearNode = container.createEl('div', { cls: 'my-char-timeline-year' });
+
+        var yearHeader = yearNode.createEl('div', { cls: 'my-char-timeline-year-header' + (yearExpanded ? ' is-expanded' : '') });
+        yearHeader.createEl('span', { text: yearExpanded ? '▼' : '▶', cls: 'my-char-timeline-toggle' });
+        yearHeader.createEl('span', { text: year, cls: 'my-char-timeline-year-title' });
+        yearHeader.createEl('span', { text: records.length + ' 条', cls: 'my-char-timeline-count' });
+        if (records[0] && records[0].volume) {
+            yearHeader.createEl('span', { text: records[0].volume, cls: 'my-char-timeline-volume' });
+        }
+        yearHeader.addEventListener('click', function() {
+            setTimelineYearExpanded(self, year, !yearExpanded);
+            self.renderTimeline(container);
+        });
+
+        if (!yearExpanded) return;
+
+        var yearBody = yearNode.createEl('div', { cls: 'my-char-timeline-year-body' });
 
         var monthGroups = {};
         for (var i = 0; i < records.length; i++) {
@@ -2049,36 +4543,76 @@ MyView.prototype.renderTimeline = function (container) {
 
         var months = Object.keys(monthGroups);
         for (var mi = 0; mi < months.length; mi++) {
-            var month = months[mi];
-            var events = monthGroups[month];
-            var monthNode = yearNode.createEl('div');
-            monthNode.style.cssText = 'margin-left:16px;margin-bottom:8px;';
+            (function(month, events) {
+            var monthExpanded = isTimelineMonthExpanded(self, year, month, yearExpanded, events.length);
+            var showMonthHeader = month !== '未标注' || months.length > 1;
+            var monthNode = yearBody.createEl('div', { cls: 'my-char-timeline-month' });
 
-            monthNode.createEl('div', { text: month })
-                .style.cssText = 'font-size:13px;color:#666;margin-bottom:4px;font-weight:bold;';
+            if (showMonthHeader) {
+                var monthHeader = monthNode.createEl('div', { cls: 'my-char-timeline-month-header' + (monthExpanded ? ' is-expanded' : '') });
+                monthHeader.createEl('span', { text: monthExpanded ? '▼' : '▶', cls: 'my-char-timeline-toggle' });
+                monthHeader.createEl('span', { text: month, cls: 'my-char-timeline-month-label' });
+                monthHeader.createEl('span', { text: events.length + ' 条', cls: 'my-char-timeline-count' });
+                monthHeader.addEventListener('click', function() {
+                    setTimelineMonthExpanded(self, year, month, !monthExpanded);
+                    setTimelineYearExpanded(self, year, true);
+                    self.renderTimeline(container);
+                });
+            } else {
+                monthExpanded = true;
+            }
+
+            if (!monthExpanded) return;
+
+            var monthBody = monthNode.createEl('div', { cls: 'my-char-timeline-month-body' });
 
             for (var ei = 0; ei < events.length; ei++) {
-                var eventDiv = monthNode.createEl('div');
-                var tagColor = events[ei].tag ? getTagColor(self.plugin, events[ei].tag) : '#4a90e2';
-                eventDiv.style.cssText = 'padding:4px 8px;margin:2px 0;border-left:2px solid ' + tagColor + ';font-size:13px;line-height:1.6;';
+                (function(eventData) {
+                var tagColor = eventData.tag ? getTagColor(self.plugin, eventData.tag) : '#4a90e2';
+                var eventDiv = monthBody.createEl('div', { cls: 'my-char-timeline-event my-char-timeline-event-editable' });
+                eventDiv.title = '点击编辑';
+                eventDiv.style.setProperty('--event-accent', tagColor);
+                eventDiv.style.borderLeftColor = tagColor;
 
-                if (events[ei].tag) {
-                    var tagSpan = eventDiv.createEl('span', { text: getTagLabel(self.plugin, events[ei].tag) });
-                    tagSpan.style.cssText = 'background:' + tagColor + ';color:white;padding:0px 6px;border-radius:10px;font-size:10px;margin-right:6px;';
+                if (eventData.tag) {
+                    var tagSpan = eventDiv.createEl('span', { text: getTagLabel(self.plugin, eventData.tag), cls: 'my-char-tag-chip my-char-tag-chip-inline' });
+                    tagSpan.style.background = tagColor;
                 }
 
-                var eventText = events[ei].event;
-                for (var ci = 0; ci < this.chars.length; ci++) {
-                    var cn = this.chars[ci].name;
+                var eventBody = eventDiv.createEl('span', { cls: 'my-char-timeline-event-text' });
+                var eventText = eventData.event;
+                for (var ci = 0; ci < self.chars.length; ci++) {
+                    var cn = self.chars[ci].name;
                     if (eventText.indexOf(cn) !== -1) {
                         eventText = eventText.split(cn).join(
-                            '<span class="clink" data-name="' + cn + '" style="color:#4a90e2;cursor:pointer;font-weight:bold;text-decoration:underline;">' + cn + '</span>'
+                            '<span class="clink my-char-link" data-name="' + cn + '">' + cn + '</span>'
                         );
                     }
                 }
-                eventDiv.innerHTML += eventText;
+                eventBody.innerHTML = eventText;
+
+                if (eventData.plotLine) {
+                    var plotText = eventData.plotLine + (eventData.plotStatus ? '(' + eventData.plotStatus + ')' : '');
+                    eventDiv.createEl('span', { text: plotText, cls: 'my-char-plot-chip my-char-plot-chip-inline' });
+                }
+                if (eventData.chapterNote) {
+                    var noteSpan = eventDiv.createEl('span', { text: eventData.chapterNote, cls: 'my-char-link my-char-timeline-note-link' });
+                    noteSpan.addEventListener('click', function(e) {
+                        e.stopPropagation();
+                        var nm = eventData.chapterNote.match(/\[\[([^\]|]+)/);
+                        if (nm) self.app.workspace.openLinkText(nm[1], '');
+                    });
+                }
+
+                eventDiv.addEventListener('click', function(e) {
+                    if (e.target.closest('.clink') || e.target.closest('.my-char-timeline-note-link')) return;
+                    self.showEditEvent(eventData);
+                });
+                })(events[ei]);
             }
+            })(months[mi], monthGroups[months[mi]]);
         }
+        })(years[yi], yi, yearGroups[years[yi]]);
     }
 
     var links = container.querySelectorAll('.clink');
@@ -2099,12 +4633,13 @@ MyView.prototype.renderTimeline = function (container) {
     MyView.prototype.renderLifecycle = function (container) {
         var self = this;
         container.empty();
-        container.style.cssText = 'padding:10px;overflow-y:auto;';
+        container.classList.add('my-char-scroll-section');
 
-        container.createEl('h3', { text: '⏳ 人物生命周期' }).style.cssText = 'margin:0 0 8px;';
+        container.createEl('h3', { text: '⏳ 人物生命周期', cls: 'my-char-section-title' });
         container.createEl('p', {
-            text: '支持公元前/公元时间排序。出生、首次出场、死亡字段可在设置中配置。时间格式示例：公元前280年、前100年、280年、公元100年'
-        }).style.cssText = 'font-size:11px;color:var(--text-muted);margin:0 0 12px;';
+            text: '支持公元前/公元时间排序。出生、首次出场、死亡字段可在设置中配置。时间格式示例：公元前280年、前100年、280年、公元100年',
+            cls: 'my-char-muted'
+        }).style.margin = '0 0 12px';
 
         var toolbar = container.createEl('div', { cls: 'my-char-lifecycle-toolbar' });
         toolbar.createEl('span', { text: '排序依据：' }).style.fontSize = '12px';
@@ -2243,7 +4778,7 @@ MyView.prototype.renderTimeline = function (container) {
                     placeMarker(lc.firstAppearParsed, 'my-char-lifecycle-marker-appear', '首次出场');
                     placeMarker(lc.deathParsed, 'my-char-lifecycle-marker-death', '死亡');
                 } else {
-                    track.createEl('span', { text: '无时间数据' }).style.cssText = 'font-size:11px;color:var(--text-muted);padding:4px 8px;';
+                    track.createEl('span', { text: '无时间数据', cls: 'my-char-muted' });
                 }
 
                 var labels = row.createEl('div', { cls: 'my-char-lifecycle-labels' });
@@ -2258,13 +4793,14 @@ MyView.prototype.renderTimeline = function (container) {
     // ========== 统计视图 ==========
     MyView.prototype.renderStatistics = function (container) {
         var self = this;
+        var terms = getTermSet(this.plugin);
         container.empty();
-        container.style.cssText = 'padding:10px;overflow-y:auto;';
+        container.classList.add('my-char-scroll-section');
 
-        container.createEl('h3', { text: '📊 数据统计' }).style.cssText = 'margin:0 0 15px;';
+        container.createEl('h3', { text: '📊 数据统计', cls: 'my-char-section-title' });
 
         var statsGrid = container.createEl('div');
-        statsGrid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;margin-bottom:20px;';
+        statsGrid.className = 'my-char-stats-grid';
 
         var totalChars = this.chars.length;
         var totalEvents = this.timeline.length;
@@ -2272,22 +4808,22 @@ MyView.prototype.renderTimeline = function (container) {
         var totalFactions = this.factions.length;
 
         var cards = [
-            { label: '人物', value: totalChars, icon: '👥', color: '#4a90e2' },
-            { label: '事件', value: totalEvents, icon: '📅', color: '#2ecc71' },
-            { label: '关系', value: totalRels, icon: '🔗', color: '#e74c3c' },
-            { label: '阵营', value: totalFactions, icon: '🏰', color: '#9b59b6' }
+            { label: terms.entity, value: totalChars, icon: '👥', color: '#4a90e2' },
+            { label: terms.event, value: totalEvents, icon: '📅', color: '#2ecc71' },
+            { label: terms.relation, value: totalRels, icon: '🔗', color: '#e74c3c' },
+            { label: terms.faction, value: totalFactions, icon: '🏰', color: '#9b59b6' }
         ];
 
         for (var i = 0; i < cards.length; i++) {
-            var card = statsGrid.createEl('div');
-            card.style.cssText = 'background:white;border-radius:8px;padding:12px;text-align:center;border:1px solid #e0e0e0;';
-            card.innerHTML = '<div style="font-size:24px;">' + cards[i].icon + '</div>' +
-                '<div style="font-size:22px;font-weight:bold;color:' + cards[i].color + ';">' + cards[i].value + '</div>' +
-                '<div style="font-size:11px;color:#888;">' + cards[i].label + '</div>';
+            var card = statsGrid.createEl('div', { cls: 'my-char-view-stat-card' });
+            card.className = 'my-char-stat-card';
+            card.innerHTML = '<div class="my-char-stat-icon">' + cards[i].icon + '</div>' +
+                '<div class="my-char-stat-value" style="color:' + cards[i].color + ';">' + cards[i].value + '</div>' +
+                '<div class="my-char-stat-label">' + escapeHtml(cards[i].label) + '</div>';
         }
 
         if (this.relations.length > 0) {
-            container.createEl('h4', { text: '❤️ 亲密度分布' }).style.cssText = 'margin:15px 0 8px;font-size:14px;';
+            container.createEl('h4', { text: '❤️ 亲密度分布', cls: 'my-char-subsection-title' });
             var intimacyCounts = {};
             for (var i = 0; i < INTIMACY_LEVELS.length; i++) {
                 intimacyCounts[INTIMACY_LEVELS[i].value] = 0;
@@ -2298,7 +4834,7 @@ MyView.prototype.renderTimeline = function (container) {
             }
             
             var intimacyChart = container.createEl('div');
-            intimacyChart.style.cssText = 'background:#f9f9f9;border-radius:6px;padding:12px;margin-bottom:15px;';
+            intimacyChart.className = 'my-char-chart-panel';
             
             for (var i = 0; i < INTIMACY_LEVELS.length; i++) {
                 var lvl = INTIMACY_LEVELS[i];
@@ -2306,15 +4842,15 @@ MyView.prototype.renderTimeline = function (container) {
                 if (cnt === 0 && this.relations.length === 0) continue;
                 var percent = (cnt / (this.relations.length || 1)) * 100;
                 var row = intimacyChart.createEl('div');
-                row.style.cssText = 'margin:5px 0;display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
-                row.createEl('span', { text: lvl.label }).style.cssText = 'width:60px;font-size:11px;color:' + lvl.color + ';font-weight:bold;';
+                row.className = 'my-char-chart-row';
+                row.createEl('span', { text: lvl.label, cls: 'my-char-filter-label' }); row.lastChild.style.width = '60px'; row.lastChild.style.color = lvl.color;
                 var bar = row.createEl('div');
-                bar.style.cssText = 'height:16px;background:' + lvl.color + ';border-radius:8px;width:' + percent + '%;max-width:150px;';
-                row.createEl('span', { text: cnt + '个' }).style.cssText = 'font-size:11px;color:#666;';
+                bar.className = 'my-char-chart-bar'; bar.style.background = lvl.color; bar.style.width = percent + '%'; bar.style.maxWidth = '150px';
+                row.createEl('span', { text: cnt + '个', cls: 'my-char-muted' });
             }
         }
 
-        container.createEl('h4', { text: '🏷️ 事件标签分布' }).style.cssText = 'margin:15px 0 8px;font-size:14px;';
+        container.createEl('h4', { text: '🏷️ 事件标签分布', cls: 'my-char-subsection-title' });
         var tagCounts = {};
         for (var i = 0; i < this.timeline.length; i++) {
             var tag = this.timeline[i].tag || '其他';
@@ -2322,7 +4858,7 @@ MyView.prototype.renderTimeline = function (container) {
         }
         
         var tagContainer = container.createEl('div');
-        tagContainer.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin-bottom:15px;';
+        tagContainer.className = 'my-char-chip-list'; tagContainer.style.marginBottom = '15px';
         
         var sortedTags = Object.keys(tagCounts).sort(function(a,b) {
             return tagCounts[b] - tagCounts[a];
@@ -2334,11 +4870,11 @@ MyView.prototype.renderTimeline = function (container) {
             var percent = totalEvents > 0 ? Math.round((cnt / totalEvents) * 100) : 0;
             var tagChip = tagContainer.createEl('div');
             var tagColor = getTagColor(this.plugin, tag);
-            tagChip.style.cssText = 'padding:6px 12px;border-radius:20px;font-size:12px;color:white;background:' + tagColor + ';display:flex;align-items:center;gap:6px;';
+            tagChip.className = 'my-char-tag-chip'; tagChip.style.background = tagColor; tagChip.style.padding = '6px 12px'; tagChip.style.display = 'inline-flex'; tagChip.style.alignItems = 'center'; tagChip.style.gap = '6px';
             tagChip.innerHTML = getTagLabel(this.plugin, tag) + ' <strong style="font-size:14px;">' + cnt + '</strong> <span style="font-size:10px;opacity:0.8;">(' + percent + '%)</span>';
         }
 
-        container.createEl('h4', { text: '🏆 出场排行榜' }).style.cssText = 'margin:15px 0 8px;font-size:14px;';
+        container.createEl('h4', { text: '🏆 出场排行榜', cls: 'my-char-subsection-title' });
         var sortedAppear = Object.keys(this.appearCounts).map(function(k) {
             return { name: k, count: self.appearCounts[k] || 0 };
         }).filter(function(c) { return c.count > 0; }).sort(function(a, b) { return b.count - a.count; }).slice(0, 10);
@@ -2348,7 +4884,7 @@ MyView.prototype.renderTimeline = function (container) {
         var medals = ['🥇', '🥈', '🥉'];
         for (var i = 0; i < sortedAppear.length; i++) {
             var row = rankList.createEl('div');
-            row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;padding:6px 8px;border-bottom:1px solid #eee;';
+            row.className = 'my-char-rank-row';
             var medal = i < 3 ? medals[i] : (i + 1) + '.';
             var nameSpan = row.createEl('span');
             nameSpan.createEl('span', { text: medal + ' ' });
@@ -2364,7 +4900,7 @@ MyView.prototype.renderTimeline = function (container) {
             countBadge.style.padding = '2px 8px';
         }
 
-        container.createEl('h4', { text: '📈 年份事件趋势' }).style.cssText = 'margin:15px 0 8px;font-size:14px;';
+        container.createEl('h4', { text: '📈 年份事件趋势', cls: 'my-char-subsection-title' });
         var yearCounts = {};
         for (var i = 0; i < this.timeline.length; i++) {
             var y = this.timeline[i].year;
@@ -2377,25 +4913,55 @@ MyView.prototype.renderTimeline = function (container) {
         }
 
         var chartDiv = container.createEl('div');
-        chartDiv.style.cssText = 'background:#f9f9f9;border-radius:6px;padding:12px;overflow-x:auto;';
+        chartDiv.className = 'my-char-chart-panel'; chartDiv.style.overflowX = 'auto';
         var chartInner = chartDiv.createEl('div');
-        chartInner.style.cssText = 'min-width:300px;';
+        chartInner.style.minWidth = '300px';
         
         for (var i = 0; i < years.length; i++) {
             var y = years[i];
             var cnt = yearCounts[y];
             var barWidth = (cnt / maxCount) * 100;
             var row = chartInner.createEl('div');
-            row.style.cssText = 'margin:6px 0;display:flex;align-items:center;gap:8px;';
-            row.createEl('span', { text: y }).style.cssText = 'width:70px;font-size:12px;font-weight:bold;';
+            row.className = 'my-char-chart-row';
+            row.createEl('span', { text: y, cls: 'my-char-filter-label' }); row.lastChild.style.width = '70px';
             var bar = row.createEl('div');
-            bar.style.cssText = 'height:22px;background:linear-gradient(90deg,var(--interactive-accent),#6c5ce7);border-radius:4px;';
+            bar.className = 'my-char-chart-bar'; bar.style.height = '22px'; bar.style.background = 'linear-gradient(90deg,var(--char-accent),var(--char-purple))';
             bar.style.width = Math.max(barWidth, 4) + '%';
-            row.createEl('span', { text: cnt + '件' }).style.cssText = 'font-size:11px;color:#666;min-width:40px;';
+            row.createEl('span', { text: cnt + '件', cls: 'my-char-muted' }); row.lastChild.style.minWidth = '40px';
+        }
+
+        var charsWithRelations = {};
+        for (var ri = 0; ri < this.relations.length; ri++) {
+            charsWithRelations[this.relations[ri].charA] = true;
+            charsWithRelations[this.relations[ri].charB] = true;
+        }
+        var isolatedNames = [];
+        for (var ci = 0; ci < this.chars.length; ci++) {
+            if (!charsWithRelations[this.chars[ci].name]) isolatedNames.push(this.chars[ci].name);
+        }
+        if (isolatedNames.length > 0) {
+            container.createEl('h4', { text: '⚠️ 孤立' + terms.entity + '（无任何' + terms.relation + '）', cls: 'my-char-subsection-title' });
+            var isoPanel = container.createEl('div', { cls: 'my-char-view-panel my-char-isolated-panel' });
+            isoPanel.createEl('p', { text: '共 ' + isolatedNames.length + ' 个' + terms.entity + '尚未建立' + terms.relation + '，建议补充关联。', cls: 'my-char-muted' });
+            var isoList = isoPanel.createEl('div');
+            isoList.className = 'my-char-chip-list';
+            for (var ii = 0; ii < isolatedNames.length; ii++) {
+                (function(nm) {
+                    var chip = isoList.createEl('span', { text: nm, cls: 'my-char-view-link' });
+                    chip.className = 'my-char-iso-chip';
+                    chip.addEventListener('click', function() {
+                        var cd = self.findChar(nm);
+                        if (cd) self.showCharDetail(cd);
+                    });
+                })(isolatedNames[ii]);
+            }
+            var isoBtn = isoPanel.createEl('button', { text: '查看全部孤立' + terms.entity, cls: 'my-char-view-btn' });
+            isoBtn.className = 'my-char-view-btn my-char-btn-sm'; isoBtn.style.marginTop = '10px';
+            isoBtn.addEventListener('click', function() { self.showIsolatedChars(); });
         }
 
         var reportBtn = container.createEl('button', { text: '📄 导出统计报告 (Markdown)' });
-        reportBtn.style.cssText = 'margin-top:20px;padding:8px 16px;background:#9b59b6;color:white;border:none;border-radius:4px;cursor:pointer;width:100%;';
+        reportBtn.className = 'my-char-btn-purple my-char-btn-block';
         reportBtn.addEventListener('click', function() {
             var report = '# 关系谱统计报告\n\n';
             report += '> 生成时间：' + new Date().toLocaleString() + '\n\n';
@@ -2442,14 +5008,14 @@ MyView.prototype.renderTimeline = function (container) {
     MyView.prototype.renderImportExport = function (container) {
         var self = this;
         container.empty();
-        container.style.cssText = 'padding:10px;overflow-y:auto;';
+        container.classList.add('my-char-scroll-section');
 
-        container.createEl('h3', { text: '💾 数据导入/导出' }).style.cssText = 'margin:0 0 15px;';
+        container.createEl('h3', { text: '💾 数据导入/导出', cls: 'my-char-section-title' });
 
         var exportDiv = container.createEl('div');
-        exportDiv.style.cssText = 'background:#f9f9f9;border-radius:8px;padding:15px;margin-bottom:20px;';
+        exportDiv.className = 'my-char-panel';
 
-        exportDiv.createEl('h4', { text: '导出数据' }).style.cssText = 'margin:0 0 10px;font-size:14px;';
+        exportDiv.createEl('h4', { text: '导出数据', cls: 'my-char-subsection-title' }); exportDiv.lastChild.style.margin = '0 0 10px';
 
         var exportData = {
             version: '1.2.0',
@@ -2463,14 +5029,14 @@ MyView.prototype.renderTimeline = function (container) {
         };
 
         var exportJSONBtn = exportDiv.createEl('button', { text: '📄 导出为 JSON' });
-        exportJSONBtn.style.cssText = 'padding:8px 16px;background:#4a90e2;color:white;border:none;border-radius:4px;cursor:pointer;margin-right:10px;';
+        exportJSONBtn.className = 'my-char-view-btn'; exportJSONBtn.style.marginRight = '10px';
         exportJSONBtn.addEventListener('click', function() {
             exportToJSON(exportData, 'char-relation-data.json');
             new obsidian.Notice('导出成功');
         });
 
         var exportCSVBtn = exportDiv.createEl('button', { text: '📊 导出关系为 CSV' });
-        exportCSVBtn.style.cssText = 'padding:8px 16px;background:#27ae60;color:white;border:none;border-radius:4px;cursor:pointer;';
+        exportCSVBtn.className = 'my-char-btn-success';
         exportCSVBtn.addEventListener('click', function() {
             var csvRows = [['人物A', '人物B', '关系类型', '亲密度', '开始时间', '结束时间', '描述']];
             for (var i = 0; i < self.relations.length; i++) {
@@ -2492,16 +5058,31 @@ MyView.prototype.renderTimeline = function (container) {
             new obsidian.Notice('导出成功');
         });
 
-        var importDiv = container.createEl('div');
-        importDiv.style.cssText = 'background:#f9f9f9;border-radius:8px;padding:15px;';
+        var settingDiv = container.createEl('div', { cls: 'my-char-panel' });
+        settingDiv.createEl('h4', { text: '📚 设定集导出', cls: 'my-char-subsection-title' });
+        settingDiv.createEl('p', {
+            text: '将' + getTermSet(this.plugin).entity + '、' + getTermSet(this.plugin).relation + '、' + getTermSet(this.plugin).timeline + '、未回收伏笔等整合为一份文档，便于分享或归档。',
+            cls: 'my-char-muted'
+        }).style.margin = '0 0 10px';
 
-        importDiv.createEl('h4', { text: '导入数据' }).style.cssText = 'margin:0 0 10px;font-size:14px;';
+        var settingBtnRow = settingDiv.createEl('div', { cls: 'my-char-btn-group' });
+        settingBtnRow.createEl('button', { text: '📄 下载设定集 Markdown', cls: 'my-char-view-btn' })
+            .addEventListener('click', function() { self.exportSettingCollection(false); });
+        settingBtnRow.createEl('button', { text: '💾 保存到 vault', cls: 'my-char-btn-success' })
+            .addEventListener('click', function() { self.exportSettingCollection(true); });
+        settingBtnRow.createEl('button', { text: '🖨️ 打印预览', cls: 'my-char-btn-purple' })
+            .addEventListener('click', function() { self.showPrintPreview(); });
+
+        var importDiv = container.createEl('div');
+        importDiv.className = 'my-char-panel';
+
+        importDiv.createEl('h4', { text: '导入数据', cls: 'my-char-subsection-title' }); importDiv.lastChild.style.margin = '0 0 10px';
 
         var fileInput = importDiv.createEl('input', { type: 'file', accept: '.json' });
-        fileInput.style.cssText = 'margin-bottom:10px;';
+        fileInput.style.marginBottom = '10px';
 
         var importBtn = importDiv.createEl('button', { text: '📂 导入 JSON 文件' });
-        importBtn.style.cssText = 'padding:8px 16px;background:#e67e22;color:white;border:none;border-radius:4px;cursor:pointer;';
+        importBtn.className = 'my-char-btn-warning';
         importBtn.addEventListener('click', function() {
             if (!fileInput.files || fileInput.files.length === 0) {
                 new obsidian.Notice('请选择文件');
@@ -2524,8 +5105,201 @@ MyView.prototype.renderTimeline = function (container) {
             });
         });
 
-        var warning = importDiv.createEl('p', { text: '⚠️ 注意：导入会覆盖现有的阵营和关系数据（人物和时间线不会被覆盖）' });
-        warning.style.cssText = 'color:#e67e22;font-size:11px;margin-top:10px;';
+        var warning = importDiv.createEl('p', { text: '⚠️ 注意：导入会覆盖现有的阵营和关系数据（人物和时间线不会被覆盖）。关系/阵营也会同步到「关系与阵营.md」' });
+        warning.className = 'my-char-muted'; warning.style.color = 'var(--color-orange, #e67e22)'; warning.style.marginTop = '10px';
+    };
+
+    // ========== 快速录入 ==========
+    MyView.prototype.showQuickAddChar = function () {
+        var self = this;
+        var modal = new QuickAddCharModal(this.app, this.plugin, function(data) {
+            novelExt.appendCharToMd(self.app, self.plugin, data.name, data.fields).then(function() {
+                return self.loadAllData({ silent: true });
+            }).then(function() {
+                self.render();
+                new obsidian.Notice('✅ 已添加人物：' + data.name);
+            });
+        });
+        modal.open();
+    };
+
+    MyView.prototype.showQuickAddEvent = function () {
+        var self = this;
+        var modal = new QuickAddEventModal(this.app, this.plugin, this, function(evt) {
+            novelExt.appendEventToMd(self.app, self.plugin, evt).then(function() {
+                return self.loadAllData({ silent: true });
+            }).then(function() {
+                return novelExt.syncFirstAppearFromEvent(self.app, self.plugin, self, evt);
+            }).then(function(syncResult) {
+                var notice = '✅ 已添加事件';
+                var duration = 3000;
+                if (syncResult && syncResult.synced && syncResult.synced.length > 0) {
+                    notice = '✅ 已添加事件，并同步首次出场：' + syncResult.synced.join('、');
+                    return self.loadAllData({ silent: true }).then(function() {
+                        return { notice: notice, duration: duration };
+                    });
+                }
+                if (syncResult && syncResult.mismatched && syncResult.mismatched.length > 0) {
+                    var m0 = syncResult.mismatched[0];
+                    notice = '✅ 已添加事件 · ⚠ ' + m0.name + ' 首次出场不一致，见仪表盘';
+                    duration = 5000;
+                }
+                return { notice: notice, duration: duration };
+            }).then(function(result) {
+                self.render();
+                if (result && result.notice) new obsidian.Notice(result.notice, result.duration);
+            });
+        });
+        modal.open();
+    };
+
+    MyView.prototype.showEditEvent = function (existingEvent) {
+        var self = this;
+        if (existingEvent._lineIndex == null) {
+            new obsidian.Notice('无法定位该事件，请刷新数据后重试');
+            return;
+        }
+        var modal = new QuickAddEventModal(this.app, this.plugin, this, function(newEvt) {
+            novelExt.updateEventInMd(self.app, self.plugin, existingEvent, newEvt).then(function() {
+                return self.loadAllData({ silent: true });
+            }).then(function() {
+                return novelExt.syncFirstAppearFromEvent(self.app, self.plugin, self, newEvt);
+            }).then(function(syncResult) {
+                var notice = '✅ 已更新事件';
+                var duration = 3000;
+                if (syncResult && syncResult.synced && syncResult.synced.length > 0) {
+                    notice = '✅ 已更新事件，并同步首次出场：' + syncResult.synced.join('、');
+                    return self.loadAllData({ silent: true }).then(function() {
+                        return { notice: notice, duration: duration };
+                    });
+                }
+                if (syncResult && syncResult.mismatched && syncResult.mismatched.length > 0) {
+                    var m0 = syncResult.mismatched[0];
+                    notice = '✅ 已更新事件 · ⚠ ' + m0.name + ' 首次出场不一致，见仪表盘';
+                    duration = 5000;
+                }
+                return { notice: notice, duration: duration };
+            }).then(function(result) {
+                self.render();
+                if (result && result.notice) new obsidian.Notice(result.notice, result.duration);
+            });
+        }, existingEvent, function(evt) {
+            novelExt.deleteEventFromMd(self.app, self.plugin, evt._lineIndex).then(function() {
+                return self.loadAllData({ silent: true });
+            }).then(function() {
+                self.render();
+                new obsidian.Notice('已删除事件');
+            });
+        });
+        modal.open();
+    };
+
+    MyView.prototype.fixFirstAppearIssue = async function (issue, useTimelineValue) {
+        var fieldName = this.plugin.settings.firstAppearFieldName || '首次出场';
+        if (issue.type === 'missing_on_char' || (issue.type === 'mismatch' && useTimelineValue)) {
+            var val = issue.suggested || issue.timelineValue;
+            var ok = await novelExt.setCharFieldInMd(this.app, this.plugin, issue.charName, fieldName, val);
+            if (!ok) {
+                new obsidian.Notice('写入失败，未找到人物：' + issue.charName);
+                return;
+            }
+            await this.loadAllData({ silent: true });
+            this.render();
+            new obsidian.Notice('✅ 已写入「' + issue.charName + '」首次出场：' + val);
+        } else if (issue.type === 'mismatch') {
+            var cd = this.findChar(issue.charName);
+            if (cd) this.showCharDetail(cd);
+            else new obsidian.Notice('未找到人物：' + issue.charName);
+        } else if (issue.type === 'missing_on_timeline') {
+            this.tab = 'timeline';
+            this._yearSearchText = issue.charValue || '';
+            this.render();
+            new obsidian.Notice('请在时间线添加 [出场] 事件：' + issue.charName);
+        }
+    };
+
+    MyView.prototype.fixAllMissingFirstAppear = async function () {
+        var issues = novelExt.auditFirstAppearSync(this).filter(function(i) { return i.type === 'missing_on_char'; });
+        if (!issues.length) {
+            new obsidian.Notice('没有需要补全的首次出场');
+            return;
+        }
+        var fieldName = this.plugin.settings.firstAppearFieldName || '首次出场';
+        var count = 0;
+        for (var i = 0; i < issues.length; i++) {
+            var ok = await novelExt.setCharFieldInMd(this.app, this.plugin, issues[i].charName, fieldName, issues[i].suggested);
+            if (ok) count++;
+        }
+        await this.loadAllData({ silent: true });
+        this.render();
+        new obsidian.Notice('✅ 已补全 ' + count + ' 个人物的首次出场');
+    };
+
+    MyView.prototype.renderPlotLineTrack = function (container, plotLineName) {
+        var self = this;
+        var group = novelExt.getPlotLineGroup(this.timeline, plotLineName);
+        if (!group || group.events.length === 0) return;
+
+        var trackPanel = container.createEl('div', { cls: 'my-char-plot-track-panel' });
+        trackPanel.createEl('div', {
+            text: '🧵 情节线：' + plotLineName + (group.isRedeemed ? '（已回收 ✓）' : '（进行中 · ' + (group.latestStatus || '未标注') + '）'),
+            cls: 'my-char-plot-track-title'
+        });
+
+        var track = trackPanel.createEl('div', { cls: 'my-char-plot-track' });
+        for (var i = 0; i < group.events.length; i++) {
+            (function(evt, idx) {
+                if (idx > 0) {
+                    track.createEl('div', { cls: 'my-char-plot-track-line' });
+                }
+                var node = track.createEl('div', { cls: 'my-char-plot-track-node' });
+                if (evt.plotStatus === '回收') node.classList.add('is-done');
+                else if (evt.plotStatus === '推进') node.classList.add('is-active');
+                else if (evt.plotStatus === '埋设') node.classList.add('is-seed');
+                else node.classList.add('is-plain');
+                var loc = evt.year + (evt.month && evt.month !== '未标注' ? '·' + evt.month : '');
+                node.createEl('div', { text: loc, cls: 'my-char-plot-track-loc' });
+                var statusLabel = evt.plotStatus || '—';
+                node.createEl('div', { text: statusLabel, cls: 'my-char-plot-track-status' });
+                var summary = evt.event.length > 18 ? evt.event.substring(0, 18) + '…' : evt.event;
+                node.createEl('div', { text: summary, cls: 'my-char-plot-track-event' });
+                node.title = evt.event;
+                node.addEventListener('click', function() { self.showEditEvent(evt); });
+            })(group.events[i], i);
+        }
+    };
+
+    MyView.prototype.renderPlotWarnings = function (container, plotLineFilter) {
+        var self = this;
+        var allWarnings = novelExt.validatePlotLines(this.timeline);
+        var warnings = plotLineFilter
+            ? allWarnings.filter(function(w) { return w.plotLine === plotLineFilter; })
+            : allWarnings;
+        if (warnings.length === 0) return;
+
+        var warnPanel = container.createEl('div', { cls: 'my-char-banner my-char-banner-warn my-char-plot-warn-panel' });
+        warnPanel.createEl('span', { text: '⚠️', cls: 'my-char-banner-icon' });
+        var warnTextWrap = warnPanel.createEl('div', { cls: 'my-char-plot-warn-body' });
+        warnTextWrap.createEl('div', {
+            text: '伏笔逻辑提醒（' + warnings.length + ' 条）',
+            cls: 'my-char-banner-text'
+        });
+        var warnBody = warnTextWrap.createEl('div', { cls: 'my-char-plot-warn-list' });
+        var showCount = Math.min(5, warnings.length);
+        for (var wi = 0; wi < showCount; wi++) {
+            (function(w) {
+                var row = warnBody.createEl('div', { cls: 'my-char-plot-warn-item' + (w.severity === 'high' ? ' is-high' : '') });
+                row.textContent = w.message;
+                if (w.event) {
+                    row.style.cursor = 'pointer';
+                    row.title = '点击编辑相关事件';
+                    row.addEventListener('click', function() { self.showEditEvent(w.event); });
+                }
+            })(warnings[wi]);
+        }
+        if (warnings.length > showCount) {
+            warnBody.createEl('div', { text: '…还有 ' + (warnings.length - showCount) + ' 条', cls: 'my-char-muted' });
+        }
     };
 
     // ========== 人物详情弹窗 ==========
@@ -2566,6 +5340,235 @@ MyView.prototype.renderTimeline = function (container) {
     return MyView;
 }(obsidian.ItemView));
 
+// ========== 快速添加人物弹窗 ==========
+var QuickAddCharModal = /** @class */ (function (_super) {
+    __extends(QuickAddCharModal, _super);
+    function QuickAddCharModal(app, plugin, onSubmit) {
+        var _this = _super.call(this, app) || this;
+        _this.plugin = plugin;
+        _this.onSubmit = onSubmit;
+        return _this;
+    }
+    QuickAddCharModal.prototype.onOpen = function () {
+        var self = this;
+        var el = this.contentEl;
+        el.className = 'my-char-modal-body';
+        el.createEl('h3', { text: '+ 快速添加人物', cls: 'my-char-section-title' });
+        var nameRow = el.createEl('div', { cls: 'my-char-form-row' });
+        nameRow.createEl('label', { text: '姓名 *', cls: 'my-char-form-label' });
+        var nameInput = nameRow.createEl('input', { type: 'text', cls: 'my-char-form-input' });
+        var fields = [
+            { key: '类型', placeholder: '主角 / 配角 / 龙套' },
+            { key: '身份', placeholder: '身份描述' },
+            { key: '阵营', placeholder: '所属阵营' },
+            { key: '首次出场', placeholder: '如：第一卷第三章' },
+            { key: '章节笔记', placeholder: '如：[[第三章]]' }
+        ];
+        var inputs = {};
+        for (var i = 0; i < fields.length; i++) {
+            var row = el.createEl('div', { cls: 'my-char-form-row' });
+            row.createEl('label', { text: fields[i].key, cls: 'my-char-form-label' });
+            var inp = row.createEl('input', { type: 'text', cls: 'my-char-form-input' });
+            inp.placeholder = fields[i].placeholder;
+            inputs[fields[i].key] = inp;
+        }
+        var saveBtn = el.createEl('button', { text: '添加', cls: 'my-char-view-btn' });
+        saveBtn.addEventListener('click', function() {
+            if (!nameInput.value.trim()) { new obsidian.Notice('请输入姓名'); return; }
+            var f = {};
+            for (var k in inputs) { if (inputs[k].value.trim()) f[k] = inputs[k].value.trim(); }
+            self.onSubmit({ name: nameInput.value.trim(), fields: f });
+            self.close();
+        });
+    };
+    QuickAddCharModal.prototype.onClose = function () { this.contentEl.empty(); };
+    return QuickAddCharModal;
+}(obsidian.Modal));
+
+// ========== 设定集打印预览弹窗（Obsidian 内，无需浏览器弹窗）==========
+var PrintPreviewModal = /** @class */ (function (_super) {
+    __extends(PrintPreviewModal, _super);
+    function PrintPreviewModal(app, view) {
+        var _this = _super.call(this, app) || this;
+        _this.view = view;
+        return _this;
+    }
+    PrintPreviewModal.prototype.onOpen = function () {
+        var self = this;
+        var el = this.contentEl;
+        el.empty();
+        el.className = 'my-char-modal-body my-char-print-modal';
+        el.createEl('h3', { text: '🖨️ 设定集打印预览', cls: 'my-char-section-title' });
+        el.createEl('p', {
+            text: '在 Obsidian 内预览。点击「打印」后，在系统对话框中选择打印机或「另存为 PDF」。',
+            cls: 'my-char-muted'
+        }).style.margin = '0 0 10px';
+
+        var toolbar = el.createEl('div', { cls: 'my-char-print-toolbar' });
+        toolbar.createEl('button', { text: '🖨️ 打印 / 另存为 PDF', cls: 'my-char-view-btn' })
+            .addEventListener('click', function() { self.triggerPrint(); });
+        toolbar.createEl('button', { text: '关闭', cls: 'my-char-btn-ghost my-char-btn-sm' })
+            .addEventListener('click', function() { self.close(); });
+
+        var scroll = el.createEl('div', { cls: 'my-char-print-scroll' });
+        var doc = scroll.createEl('div', { cls: 'my-char-print-doc' });
+        doc.innerHTML = this.view.buildPrintPreviewBodyHtml();
+
+        var styleEl = el.createEl('style');
+        styleEl.textContent = this.view.getPrintPreviewStyles();
+    };
+    PrintPreviewModal.prototype.triggerPrint = function () {
+        var html = this.view.buildPrintPreviewHtml();
+        var iframe = document.createElement('iframe');
+        iframe.setAttribute('aria-hidden', 'true');
+        iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:none;opacity:0;pointer-events:none;';
+        document.body.appendChild(iframe);
+        var iwin = iframe.contentWindow;
+        var idoc = iframe.contentDocument || (iwin && iwin.document);
+        if (!idoc || !iwin) {
+            document.body.removeChild(iframe);
+            new obsidian.Notice('打印初始化失败，请重试');
+            return;
+        }
+        idoc.open();
+        idoc.write(html);
+        idoc.close();
+        window.setTimeout(function() {
+            try {
+                iwin.focus();
+                iwin.print();
+            } catch (e) {
+                console.error(e);
+                new obsidian.Notice('打印失败：' + e.message);
+            }
+            window.setTimeout(function() {
+                if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+            }, 1000);
+        }, 300);
+    };
+    PrintPreviewModal.prototype.onClose = function () {
+        this.contentEl.empty();
+    };
+    return PrintPreviewModal;
+}(obsidian.Modal));
+
+// ========== 快速添加/编辑事件弹窗 ==========
+var QuickAddEventModal = /** @class */ (function (_super) {
+    __extends(QuickAddEventModal, _super);
+    function QuickAddEventModal(app, plugin, view, onSubmit, existingEvent, onDelete) {
+        var _this = _super.call(this, app) || this;
+        _this.plugin = plugin;
+        _this.view = view;
+        _this.onSubmit = onSubmit;
+        _this.existingEvent = existingEvent || null;
+        _this.onDelete = onDelete || null;
+        return _this;
+    }
+    QuickAddEventModal.prototype.onOpen = function () {
+        var self = this;
+        var el = this.contentEl;
+        el.className = 'my-char-modal-body';
+        var isEdit = !!this.existingEvent;
+        var evt = this.existingEvent;
+        el.createEl('h3', { text: isEdit ? '✏️ 编辑事件' : '+ 快速添加事件', cls: 'my-char-section-title' });
+        var mode = this.plugin.settings.timelineMode || 'auto';
+        var volumeInput, yearInput, monthInput;
+        if (mode === 'chapter' || mode === 'auto') {
+            var volRow = el.createEl('div', { cls: 'my-char-form-row' });
+            volRow.createEl('label', { text: '卷/部（可选）', cls: 'my-char-form-label' });
+            volumeInput = volRow.createEl('input', { type: 'text', cls: 'my-char-form-input' });
+            volumeInput.placeholder = '如：第一卷·北境';
+            if (isEdit && evt.volume) volumeInput.value = evt.volume;
+        }
+        var yearRow = el.createEl('div', { cls: 'my-char-form-row' });
+        yearRow.createEl('label', { text: mode === 'chapter' ? '章节 *' : '年份/章节 *', cls: 'my-char-form-label' });
+        yearInput = yearRow.createEl('input', { type: 'text', cls: 'my-char-form-input' });
+        yearInput.placeholder = mode === 'chapter' ? '第三章' : '公元前300年';
+        if (isEdit) yearInput.value = evt.year || '';
+        var monthRow = el.createEl('div', { cls: 'my-char-form-row' });
+        monthRow.createEl('label', { text: '场景/月份（可选）', cls: 'my-char-form-label' });
+        monthInput = monthRow.createEl('input', { type: 'text', cls: 'my-char-form-input' });
+        if (isEdit && evt.month && evt.month !== '未标注') monthInput.value = evt.month;
+        var tagRow = el.createEl('div', { cls: 'my-char-form-row' });
+        tagRow.createEl('label', { text: '标签', cls: 'my-char-form-label' });
+        var tagSelect = tagRow.createEl('select', { cls: 'my-char-select' });
+        tagSelect.createEl('option', { text: '（无）', value: '' });
+        var tags = getEventTags(this.plugin);
+        for (var ti = 0; ti < tags.length; ti++) {
+            var topt = tagSelect.createEl('option', { text: tags[ti].label, value: tags[ti].value });
+            if (isEdit && evt.tag === tags[ti].value) topt.selected = true;
+        }
+        var appearHint = tagRow.createEl('div', { cls: 'my-char-muted' });
+        appearHint.style.cssText = 'font-size:12px;margin-top:4px;display:none;';
+        var fieldLabel = this.plugin.settings.firstAppearFieldName || '首次出场';
+        function updateAppearHint() {
+            if (novelExt.isAppearTimelineTag(tagSelect.value)) {
+                appearHint.textContent = '💡 [出场] 标签会写入事件内提及人物的「' + fieldLabel + '」字段';
+                appearHint.style.display = 'block';
+            } else {
+                appearHint.style.display = 'none';
+            }
+        }
+        updateAppearHint();
+        tagSelect.addEventListener('change', updateAppearHint);
+        var eventRow = el.createEl('div', { cls: 'my-char-form-row' });
+        eventRow.createEl('label', { text: '事件内容 *', cls: 'my-char-form-label' });
+        var eventInput = eventRow.createEl('textarea', { cls: 'my-char-form-input' });
+        eventInput.rows = 3;
+        if (isEdit) eventInput.value = evt.event || '';
+        var plotRow = el.createEl('div', { cls: 'my-char-form-row' });
+        plotRow.createEl('label', { text: '情节线', cls: 'my-char-form-label' });
+        var plotInput = plotRow.createEl('input', { type: 'text', cls: 'my-char-form-input' });
+        plotInput.placeholder = '如：主线-A、感情线';
+        if (isEdit && evt.plotLine) plotInput.value = evt.plotLine;
+        var statusRow = el.createEl('div', { cls: 'my-char-form-row' });
+        statusRow.createEl('label', { text: '伏笔状态', cls: 'my-char-form-label' });
+        var statusSelect = statusRow.createEl('select', { cls: 'my-char-select' });
+        statusSelect.createEl('option', { text: '（无）', value: '' });
+        for (var si = 0; si < novelExt.PLOT_STATUSES.length; si++) {
+            var sopt = statusSelect.createEl('option', { text: novelExt.PLOT_STATUSES[si], value: novelExt.PLOT_STATUSES[si] });
+            if (isEdit && evt.plotStatus === novelExt.PLOT_STATUSES[si]) sopt.selected = true;
+        }
+        var noteRow = el.createEl('div', { cls: 'my-char-form-row' });
+        noteRow.createEl('label', { text: '章节笔记链接', cls: 'my-char-form-label' });
+        var noteInput = noteRow.createEl('input', { type: 'text', cls: 'my-char-form-input' });
+        noteInput.placeholder = '[[第三章]]';
+        if (isEdit && evt.chapterNote) noteInput.value = evt.chapterNote;
+
+        var btnRow = el.createEl('div', { cls: 'my-char-form-actions' });
+        var saveBtn = btnRow.createEl('button', { text: isEdit ? '💾 保存修改' : '添加到时间线', cls: 'my-char-view-btn' });
+        saveBtn.style.flex = '1';
+        saveBtn.addEventListener('click', function() {
+            if (!yearInput.value.trim() || !eventInput.value.trim()) {
+                new obsidian.Notice('请填写章节/年份和事件内容');
+                return;
+            }
+            self.onSubmit({
+                volume: volumeInput ? volumeInput.value.trim() : '',
+                year: yearInput.value.trim(),
+                month: monthInput.value.trim() || '未标注',
+                tag: tagSelect.value,
+                event: eventInput.value.trim(),
+                plotLine: plotInput.value.trim(),
+                plotStatus: statusSelect.value,
+                chapterNote: noteInput.value.trim()
+            });
+            self.close();
+        });
+        if (isEdit && this.onDelete) {
+            var deleteBtn = btnRow.createEl('button', { text: '🗑 删除', cls: 'my-char-btn-danger my-char-btn-sm' });
+            deleteBtn.addEventListener('click', function() {
+                if (confirm('确定删除这条时间线事件？此操作不可撤销。')) {
+                    self.onDelete(self.existingEvent);
+                    self.close();
+                }
+            });
+        }
+    };
+    QuickAddEventModal.prototype.onClose = function () { this.contentEl.empty(); };
+    return QuickAddEventModal;
+}(obsidian.Modal));
+
 // ========== 阵营编辑弹窗 ==========
 var FactionModal = /** @class */ (function (_super) {
     __extends(FactionModal, _super);
@@ -2578,7 +5581,7 @@ var FactionModal = /** @class */ (function (_super) {
 
     FactionModal.prototype.onOpen = function () {
         var el = this.contentEl;
-        el.style.cssText = 'padding:20px;';
+        el.className = 'my-char-modal-body';
 
         el.createEl('h3', { text: this.faction ? '编辑阵营' : '添加阵营' });
 
@@ -2587,8 +5590,8 @@ var FactionModal = /** @class */ (function (_super) {
         var descValue = this.faction ? this.faction.desc || '' : '';
 
         var nameRow = el.createEl('div');
-        nameRow.style.cssText = 'margin:10px 0;';
-        nameRow.createEl('label', { text: '阵营名称' }).style.cssText = 'display:block;font-weight:bold;margin-bottom:4px;';
+        nameRow.className = 'my-char-form-row';
+        nameRow.createEl('label', { text: '阵营名称', cls: 'my-char-form-label' });
         var nameInput = nameRow.createEl('input', { type: 'text', value: nameValue });
         nameInput.style.cssText = 'width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;box-sizing:border-box;';
         nameInput.addEventListener('input', function () { nameValue = nameInput.value; });
@@ -2642,6 +5645,7 @@ var RelationModal = /** @class */ (function (_super) {
 
     RelationModal.prototype.onOpen = function () {
         var el = this.contentEl;
+        el.addClass('my-char-modal-body');
         el.style.cssText = 'padding:20px;max-height:70vh;overflow-y:auto;';
 
         el.createEl('h3', { text: this.prefill ? '编辑人物关系' : '添加人物关系' });
@@ -2707,39 +5711,45 @@ var RelationModal = /** @class */ (function (_super) {
         var rowStart = el.createEl('div');
         rowStart.style.cssText = 'margin:10px 0;';
         rowStart.createEl('label', { text: '关系开始时间（可选）' }).style.cssText = 'display:block;font-weight:bold;margin-bottom:4px;';
-        var startInput = rowStart.createEl('input', { type: 'text', value: startTime, placeholder: '如：301年春、登基后' });
-        startInput.style.cssText = 'width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;box-sizing:border-box;';
-        startInput.addEventListener('input', function () { startTime = startInput.value; });
+        var startInput = rowStart.createEl('input', { type: 'text', cls: 'my-char-form-input', placeholder: '如：301年春、登基后' });
+        startInput.value = startTime || '';
 
         var rowEnd = el.createEl('div');
         rowEnd.style.cssText = 'margin:10px 0;';
         rowEnd.createEl('label', { text: '关系结束时间（可选）' }).style.cssText = 'display:block;font-weight:bold;margin-bottom:4px;';
-        var endInput = rowEnd.createEl('input', { type: 'text', value: endTime, placeholder: '如：305年秋、决裂后' });
-        endInput.style.cssText = 'width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;box-sizing:border-box;';
-        endInput.addEventListener('input', function () { endTime = endInput.value; });
+        var endInput = rowEnd.createEl('input', { type: 'text', cls: 'my-char-form-input', placeholder: '如：305年秋、决裂后' });
+        endInput.value = endTime || '';
 
         var rowDesc = el.createEl('div');
         rowDesc.style.cssText = 'margin:10px 0;';
         rowDesc.createEl('label', { text: '描述（可选）' }).style.cssText = 'display:block;font-weight:bold;margin-bottom:4px;';
-        var descInput = rowDesc.createEl('textarea', { value: desc });
-        descInput.style.cssText = 'width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;height:60px;box-sizing:border-box;';
-        descInput.addEventListener('input', function () { desc = descInput.value; });
+        var descInput = rowDesc.createEl('textarea', { cls: 'my-char-form-input' });
+        descInput.style.height = '60px';
+        descInput.value = desc || '';
 
         var btnRow = el.createEl('div');
         btnRow.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:15px;';
 
         var self = this;
-        var saveBtn = btnRow.createEl('button', { text: '保存' });
+        var saveBtn = btnRow.createEl('button', { text: '保存', type: 'button' });
         saveBtn.style.cssText = 'padding:8px 16px;background:#4a90e2;color:white;border:none;border-radius:4px;cursor:pointer;';
         saveBtn.addEventListener('click', function () {
             if (!charA || !charB) { new obsidian.Notice('请选择人物'); return; }
             if (charA === charB) { new obsidian.Notice('不能选同一个人'); return; }
             if (!type) { new obsidian.Notice('请选择关系类型'); return; }
-            self.onSubmit({ charA: charA, charB: charB, type: type, desc: desc.trim(), intimacy: intimacy, startTime: startTime, endTime: endTime });
+            self.onSubmit({
+                charA: charA,
+                charB: charB,
+                type: type,
+                desc: descInput.value.trim(),
+                intimacy: intimacy,
+                startTime: startInput.value.trim(),
+                endTime: endInput.value.trim()
+            });
             self.close();
         });
 
-        var cancelBtn = btnRow.createEl('button', { text: '取消' });
+        var cancelBtn = btnRow.createEl('button', { text: '取消', type: 'button' });
         cancelBtn.style.cssText = 'padding:8px 16px;border:1px solid #ddd;border-radius:4px;cursor:pointer;background:white;';
         cancelBtn.addEventListener('click', function () { self.close(); });
     };
@@ -2888,9 +5898,23 @@ var DetailModal = /** @class */ (function (_super) {
     DetailModal.prototype.onOpen = function () {
         var self = this;
         var el = this.contentEl;
-        el.style.cssText = 'padding:20px;max-height:70vh;overflow-y:auto;min-width:300px;';
+        el.empty();
+        el.className = 'my-char-modal-body';
+        if (this._editMode === undefined) this._editMode = false;
+        this._fieldInputs = {};
 
-        el.createEl('h2', { text: this.charData.name }).style.cssText = 'margin:0 0 15px;border-bottom:2px solid var(--interactive-accent);padding-bottom:6px;';
+        var headerRow = el.createEl('div', { cls: 'my-char-detail-header' });
+        headerRow.createEl('h2', { text: this.charData.name, cls: 'my-char-section-title' });
+        var editBtn = headerRow.createEl('button', { text: '✏️ 编辑', cls: 'my-char-btn-ghost my-char-btn-sm' });
+        editBtn.addEventListener('click', function() {
+            self._editMode = !self._editMode;
+            editBtn.textContent = self._editMode ? '取消编辑' : '✏️ 编辑';
+            self.onOpen();
+        });
+        if (this._editMode) {
+            this.renderEditForm(el);
+            return;
+        }
 
         var infoDiv = el.createEl('div', { cls: 'my-char-detail-panel' });
 
@@ -3033,10 +6057,20 @@ var DetailModal = /** @class */ (function (_super) {
             el.createEl('h3', { text: '时间线出场 (' + this.events.length + '次)' }).style.cssText = 'margin:12px 0 6px;font-size:15px;';
             var showCount = Math.min(50, this.events.length);
             for (var i = 0; i < showCount; i++) {
-                var item = el.createEl('div');
-                item.style.cssText = 'padding:4px 8px;margin:2px 0;background:#fafafa;border-radius:3px;font-size:12px;';
-                item.createEl('small', { text: '[' + this.events[i].year + ' ' + this.events[i].month + '] ' }).style.color = '#999';
-                item.createEl('span', { text: this.events[i].event });
+                var item = el.createEl('div', { cls: 'my-char-timeline-event' });
+                var loc = this.events[i].volume ? this.events[i].volume + ' / ' : '';
+                item.createEl('small', { text: '[' + loc + this.events[i].year + ' ' + this.events[i].month + '] ' }).style.color = '#999';
+                var evtSpan = item.createEl('span');
+                evtSpan.textContent = this.events[i].event;
+                if (this.events[i].chapterNote) {
+                    item.createEl('span', { text: ' → ' + this.events[i].chapterNote, cls: 'my-char-link' })
+                        .addEventListener('click', (function(note) {
+                            return function() {
+                                var m = note.match(/\[\[([^\]|]+)/);
+                                if (m) self.app.workspace.openLinkText(m[1], '');
+                            };
+                        })(this.events[i].chapterNote));
+                }
             }
             if (this.events.length > 50) {
                 el.createEl('p', { text: '...还有 ' + (this.events.length - 50) + ' 条' }).style.cssText = 'color:#888;font-size:12px;';
@@ -3046,6 +6080,43 @@ var DetailModal = /** @class */ (function (_super) {
         var closeBtn = el.createEl('button', { text: '关闭', cls: 'my-char-view-btn' });
         closeBtn.style.cssText = 'margin-top:15px;width:100%;';
         closeBtn.addEventListener('click', function () { self.close(); });
+    };
+
+    DetailModal.prototype.renderEditForm = function(el) {
+        var self = this;
+        var form = el.createEl('div', { cls: 'my-char-detail-panel' });
+        var fields = Object.assign({}, this.charData.fields);
+        var defaultKeys = ['身份', '类型', '阵营', '首次出场', '出生', '亲密人物', '章节笔记'];
+        for (var dk = 0; dk < defaultKeys.length; dk++) {
+            if (!fields[defaultKeys[dk]]) fields[defaultKeys[dk]] = '';
+        }
+        this._fieldInputs = {};
+        for (var key in fields) {
+            if (!fields.hasOwnProperty(key)) continue;
+            var row = form.createEl('div', { cls: 'my-char-form-row' });
+            row.createEl('label', { text: key, cls: 'my-char-form-label' });
+            var inp = row.createEl('input', { type: 'text', cls: 'my-char-form-input' });
+            inp.value = fields[key] || '';
+            this._fieldInputs[key] = inp;
+        }
+        var addRow = form.createEl('div', { cls: 'my-char-form-row' });
+        addRow.createEl('label', { text: '新增字段名', cls: 'my-char-form-label' });
+        var newKeyInput = addRow.createEl('input', { type: 'text', cls: 'my-char-form-input', placeholder: '如：外貌、性格' });
+        var newValInput = addRow.createEl('input', { type: 'text', cls: 'my-char-form-input', placeholder: '字段值' });
+        var saveBtn = el.createEl('button', { text: '💾 保存到人物索引', cls: 'my-char-view-btn my-char-btn-block' });
+        saveBtn.addEventListener('click', async function() {
+            var out = {};
+            for (var k in self._fieldInputs) {
+                if (self._fieldInputs[k].value.trim()) out[k] = self._fieldInputs[k].value.trim();
+            }
+            if (newKeyInput.value.trim()) out[newKeyInput.value.trim()] = newValInput.value.trim();
+            await novelExt.updateCharInMd(self.app, self.view.plugin, self.charData.name, out);
+            await self.view.loadAllData({ silent: true });
+            self.charData = self.view.findChar(self.charData.name) || self.charData;
+            self._editMode = false;
+            new obsidian.Notice('✅ 人物信息已保存');
+            self.onOpen();
+        });
     };
 
     DetailModal.prototype.onClose = function () { this.contentEl.empty(); };
@@ -3515,18 +6586,218 @@ var SettingTab = /** @class */ (function (_super) {
         el.createEl('h2', { text: '人物关系谱系 - 设置' });
 
 el.createEl('p', { 
-    text: '💡 插件会自动读取你当前打开的文件夹下的「人物索引.md」和「时间线.md」' 
-}).style.cssText = 'background:#f0f7ff;padding:12px 16px;border-radius:6px;border-left:3px solid #4a90e2;margin-bottom:15px;';
+    text: '💡 不同场景 = 不同文件夹。指定「数据文件夹」后，插件读取该文件夹下的 md 文件；留空则跟随当前打开的笔记所在文件夹。' 
+}).style.cssText = 'background:var(--background-secondary);padding:12px 16px;border-radius:6px;border-left:3px solid var(--interactive-accent);margin-bottom:15px;font-size:13px;';
+
+        new obsidian.Setting(el)
+            .setName('实体数据文件夹')
+            .setDesc('如：小说世界、生活日记、知识库（留空=当前笔记文件夹）')
+            .addText(function(text) {
+                text.setPlaceholder('小说世界')
+                    .setValue(self.plugin.settings.charFolder || '')
+                    .onChange(async function(value) {
+                        self.plugin.settings.charFolder = value.trim();
+                        await self.plugin.saveSettings();
+                        self.updatePathHint();
+                    });
+            });
+
+        new obsidian.Setting(el)
+            .setName('实体索引文件名')
+            .setDesc('默认：人物索引.md（知识场景可用 概念索引.md）')
+            .addText(function(text) {
+                text.setPlaceholder('人物索引.md')
+                    .setValue(self.plugin.settings.charFile || '人物索引.md')
+                    .onChange(async function(value) {
+                        self.plugin.settings.charFile = value.trim() || '人物索引.md';
+                        await self.plugin.saveSettings();
+                        self.updatePathHint();
+                    });
+            });
+
+        new obsidian.Setting(el)
+            .setName('时间线数据文件夹')
+            .setDesc('通常与实体文件夹相同；也可单独指定')
+            .addText(function(text) {
+                text.setPlaceholder('（默认同实体文件夹）')
+                    .setValue(self.plugin.settings.timelineFolder || '')
+                    .onChange(async function(value) {
+                        self.plugin.settings.timelineFolder = value.trim();
+                        await self.plugin.saveSettings();
+                        self.updatePathHint();
+                    });
+            });
+
+        new obsidian.Setting(el)
+            .setName('时间线文件名')
+            .setDesc('默认：时间线.md（日记可用 日记时间线.md）')
+            .addText(function(text) {
+                text.setPlaceholder('时间线.md')
+                    .setValue(self.plugin.settings.timelineFile || '时间线.md')
+                    .onChange(async function(value) {
+                        self.plugin.settings.timelineFile = value.trim() || '时间线.md';
+                        await self.plugin.saveSettings();
+                        self.updatePathHint();
+                    });
+            });
+
+        new obsidian.Setting(el)
+            .setName('Obsidian 图谱节点文件夹')
+            .setDesc('同步生成的独立笔记存放位置（含 [[双向链接]]，供原生图谱使用）')
+            .addText(function(text) {
+                text.setPlaceholder('（默认：数据文件夹/关系图谱节点）')
+                    .setValue(self.plugin.settings.graphNotesFolder || '')
+                    .onChange(async function(value) {
+                        self.plugin.settings.graphNotesFolder = value.trim();
+                        await self.plugin.saveSettings();
+                        self.updatePathHint();
+                    });
+            });
+
+        new obsidian.Setting(el)
+            .setName('保存时自动同步图谱')
+            .setDesc('编辑关系/阵营后，自动更新「关系图谱节点」中的笔记与双向链接')
+            .addToggle(function(toggle) {
+                toggle.setValue(self.plugin.settings.syncGraphOnSave !== false);
+                toggle.onChange(async function(value) {
+                    self.plugin.settings.syncGraphOnSave = value;
+                    await self.plugin.saveSettings();
+                });
+            });
+
+        new obsidian.Setting(el)
+            .setName('图谱同步范围')
+            .setDesc('选择哪些人物「类型」同步到 Obsidian 原生图谱（如只同步主角、配角，跳过龙套）')
+            .addDropdown(function(dropdown) {
+                dropdown.addOption('all', '全部类型');
+                dropdown.addOption('selected', '仅同步选中的类型');
+                dropdown.setValue(self.plugin.settings.graphSyncMode || 'all');
+                dropdown.onChange(async function(value) {
+                    self.plugin.settings.graphSyncMode = value;
+                    await self.plugin.saveSettings();
+                    self.display();
+                });
+            });
+
+        var graphTypePanel = el.createEl('div', { cls: 'my-char-graph-sync-settings' });
+        if (isGraphSyncModeSelected(self.plugin)) {
+            graphTypePanel.createEl('p', { text: '勾选要同步到原生图谱的人物类型（基于人物文件中的「类型」字段）：' })
+                .style.cssText = 'font-size:12px;color:var(--text-muted);margin:0 0 8px;';
+            loadCharsForGraphSettings(self.app, self.plugin).then(function(chars) {
+                graphTypePanel.empty();
+                graphTypePanel.createEl('p', { text: '勾选要同步到原生图谱的人物类型（基于人物文件中的「类型」字段）：' })
+                    .style.cssText = 'font-size:12px;color:var(--text-muted);margin:0 0 8px;';
+                if (!chars || chars.length === 0) {
+                    graphTypePanel.createEl('p', { text: '暂无人物数据，请先打开视图刷新或检查人物索引文件路径。' })
+                        .style.cssText = 'font-size:12px;color:var(--text-muted);';
+                    return;
+                }
+                var mockView = { chars: chars };
+                var typeOptions = collectCharTypesForGraph(mockView);
+                var selected = self.plugin.settings.graphSyncTypes || [];
+                var checksWrap = graphTypePanel.createEl('div', { cls: 'my-char-graph-type-checks' });
+                for (var ti = 0; ti < typeOptions.length; ti++) {
+                    (function(opt) {
+                        var label = checksWrap.createEl('label', { cls: 'my-char-graph-type-check' });
+                        var cb = label.createEl('input', { type: 'checkbox' });
+                        cb.checked = selected.indexOf(opt.label) !== -1;
+                        label.createEl('span', { text: opt.label + ' (' + opt.count + ')' });
+                        cb.addEventListener('change', async function() {
+                            var list = (self.plugin.settings.graphSyncTypes || []).slice();
+                            var idx = list.indexOf(opt.label);
+                            if (cb.checked && idx === -1) list.push(opt.label);
+                            if (!cb.checked && idx !== -1) list.splice(idx, 1);
+                            self.plugin.settings.graphSyncTypes = list;
+                            self.plugin.settings.graphSyncMode = 'selected';
+                            await self.plugin.saveSettings();
+                        });
+                    })(typeOptions[ti]);
+                }
+                var quickRow = graphTypePanel.createEl('div');
+                quickRow.style.cssText = 'display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;';
+                var selectAllBtn = quickRow.createEl('button', { text: '全选' });
+                selectAllBtn.className = 'mod-cta';
+                selectAllBtn.style.fontSize = '11px';
+                selectAllBtn.addEventListener('click', async function() {
+                    self.plugin.settings.graphSyncTypes = typeOptions.map(function(t) { return t.label; });
+                    await self.plugin.saveSettings();
+                    self.display();
+                });
+                var clearBtn = quickRow.createEl('button', { text: '清空' });
+                clearBtn.style.fontSize = '11px';
+                clearBtn.addEventListener('click', async function() {
+                    self.plugin.settings.graphSyncTypes = [];
+                    await self.plugin.saveSettings();
+                    self.display();
+                });
+            });
+        } else {
+            graphTypePanel.createEl('p', { text: '当前为「全部类型」模式，所有人物都会同步到原生图谱。' })
+                .style.cssText = 'font-size:12px;color:var(--text-muted);margin:0 0 12px;';
+        }
+
+        el.createEl('h3', { text: '📦 一键创建场景模板' }).style.cssText = 'margin-top:20px;font-size:14px;font-weight:bold;';
+        el.createEl('p', { text: '在库中创建独立文件夹 + 示例 md + 图谱节点，并自动切换数据源路径。' })
+            .style.cssText = 'font-size:12px;color:var(--text-muted);margin:0 0 10px;';
+
+        var tplRow = el.createEl('div');
+        tplRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin-bottom:15px;';
+        var tplModes = [
+            { id: 'novel', label: '📖 小说' },
+            { id: 'diary', label: '📔 日记' },
+            { id: 'trpg', label: '🎲 跑团' },
+            { id: 'knowledge', label: '🧠 知识库' }
+        ];
+        for (var tmi = 0; tmi < tplModes.length; tmi++) {
+            (function(m) {
+                var btn = tplRow.createEl('button', { text: m.label });
+                btn.className = 'mod-cta';
+                btn.style.cssText = 'padding:8px 14px;border-radius:6px;cursor:pointer;font-size:12px;';
+                btn.addEventListener('click', async function() {
+                    if (!confirm('将在库根目录创建「' + SCENARIO_TEMPLATES[m.id].folder + '」文件夹及示例文件，是否继续？')) return;
+                    var folder = await createScenarioTemplate(self.app, self.plugin, m.id);
+                    if (folder) {
+                        new obsidian.Notice('✅ 已创建「' + folder + '」并切换数据源');
+                        self.updatePathHint();
+                        self.display();
+                    }
+                });
+            })(tplModes[tmi]);
+        }
+
+        var syncGraphBtn = el.createEl('button', { text: '🔄 立即同步到 Obsidian 图谱' });
+        syncGraphBtn.style.cssText = 'margin-bottom:15px;padding:8px 16px;background:var(--interactive-accent);color:var(--text-on-accent);border:none;border-radius:4px;cursor:pointer;width:100%;';
+        syncGraphBtn.addEventListener('click', async function() {
+            var leaves = self.app.workspace.getLeavesOfType(VIEW_TYPE);
+            if (leaves.length === 0) {
+                new obsidian.Notice('请先打开人物关系视图并刷新数据');
+                return;
+            }
+            var view = leaves[0].view;
+            await view.loadAllData();
+            var res = await syncGraphNotesToVault(self.plugin, view);
+            new obsidian.Notice(formatGraphSyncNotice(res));
+        });
+
+        var openGraphBtn = el.createEl('button', { text: '🌐 打开 Obsidian 原生全局图谱' });
+        openGraphBtn.style.cssText = 'margin-bottom:15px;padding:8px 16px;background:var(--background-modifier-border);color:var(--text-normal);border:none;border-radius:4px;cursor:pointer;width:100%;';
+        openGraphBtn.addEventListener('click', async function() {
+            await openObsidianGlobalGraph(self.app, getGraphNotesFolder(self.plugin));
+        });
+
+        el.createEl('hr');
 
         var pathHint = el.createEl('div');
-        pathHint.style.cssText = 'margin:10px 0 15px;padding:10px;background:#f0f4ff;border-radius:6px;font-size:12px;color:#333;border-left:3px solid #4a90e2;';
+        pathHint.style.cssText = 'margin:10px 0 15px;padding:10px;background:var(--background-secondary);border-radius:6px;font-size:12px;color:var(--text-normal);border-left:3px solid var(--interactive-accent);';
         
         this.updatePathHint = function() {
             var charFullPath = getCharFullPath(this.plugin);
             var timelineFullPath = getTimelineFullPath(this.plugin);
+            var graphFolder = getGraphNotesFolder(this.plugin);
             pathHint.innerHTML = '📍 <strong>当前完整路径</strong><br>' +
-                '• 👥 人物文件：<code style="background:#e0e0e0;padding:2px 4px;border-radius:3px;">' + charFullPath + '</code><br>' +
-                '• 📅 时间线文件：<code style="background:#e0e0e0;padding:2px 4px;border-radius:3px;">' + timelineFullPath + '</code>';
+                '• 实体文件：<code style="background:var(--background-modifier-border);padding:2px 4px;border-radius:3px;">' + charFullPath + '</code><br>' +
+                '• 时间线文件：<code style="background:var(--background-modifier-border);padding:2px 4px;border-radius:3px;">' + timelineFullPath + '</code><br>' +
+                '• 图谱节点：<code style="background:var(--background-modifier-border);padding:2px 4px;border-radius:3px;">' + graphFolder + '</code>';
         }.bind(this);
         this.updatePathHint();
 
@@ -3800,6 +7071,65 @@ var MyPlugin = /** @class */ (function (_super) {
             }.bind(this)
         });
 
+        this.addCommand({
+            id: 'sync-graph-notes',
+            name: '同步关系到 Obsidian 原生图谱',
+            callback: async function () {
+                var leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE);
+                if (leaves.length === 0) {
+                    new obsidian.Notice('请先打开人物关系视图');
+                    return;
+                }
+                var view = leaves[0].view;
+                await view.loadAllData();
+                var res = await syncGraphNotesToVault(this, view);
+                new obsidian.Notice('✅ 已同步 ' + res.count + ' 个图谱节点');
+            }.bind(this)
+        });
+
+        this.addCommand({
+            id: 'open-native-graph',
+            name: '打开 Obsidian 原生关系图谱',
+            callback: async function () {
+                await openObsidianGlobalGraph(this.app, getGraphNotesFolder(this));
+            }.bind(this)
+        });
+
+        this.addCommand({
+            id: 'open-global-search',
+            name: '打开全局搜索',
+            callback: function () {
+                openCharViewAndRun(this.app, function(view) {
+                    view.tab = 'search';
+                    view.render();
+                });
+            }.bind(this)
+        });
+
+        this.addCommand({
+            id: 'export-setting-collection',
+            name: '导出设定集 Markdown',
+            callback: function () {
+                openCharViewAndRun(this.app, function(view) {
+                    view.loadAllData().then(function() {
+                        view.exportSettingCollection(false);
+                    });
+                });
+            }.bind(this)
+        });
+
+        this.addCommand({
+            id: 'print-setting-preview',
+            name: '打开设定集打印预览',
+            callback: function () {
+                openCharViewAndRun(this.app, function(view) {
+                    view.loadAllData().then(function() {
+                        view.showPrintPreview();
+                    });
+                });
+            }.bind(this)
+        });
+
         var pluginRef = this;
         this.registerEvent(this.app.vault.on('modify', function(file) {
             var charPath = getCharFullPath(pluginRef);
@@ -3856,7 +7186,24 @@ var MyPlugin = /** @class */ (function (_super) {
             intimateFieldName: '亲密人物',
             preset: 'default',
             customEventTags: [],
-            customIntimacyLevels: ''
+            customIntimacyLevels: '',
+            graphNotesFolder: '',
+            syncGraphOnSave: true,
+            graphSyncMode: 'all',
+            graphSyncTypes: [],
+            useCaseMode: 'novel',
+            hiddenTabs: [],
+            viewTitle: '',
+            termLabels: {},
+            tabLabels: {},
+            currentTimePoint: '',
+            novelCompactUI: true,
+            topChromeCollapsed: false,
+            timelineMode: 'auto',
+            syncRelationsToMd: true,
+            syncFirstAppearOnEvent: true,
+            relationMetaFile: '关系与阵营.md',
+            novelTagPreset: 'gudai'
         };
         this.settings = Object.assign({}, defaults, await this.loadData());
     };
@@ -3891,14 +7238,25 @@ function getRelationHistory(plugin, charA, charB) {
     });
 }
 
-// 按时间排序（从旧到新）
+function getRecordSortValue(record) {
+    var parsed = parseHistoricalDate(record.timestamp);
+    if (parsed && parsed.sortValue !== null) return parsed.sortValue;
+    if (record.eventYear) {
+        var ep = parseHistoricalDate(record.eventYear);
+        if (ep && ep.sortValue !== null) return ep.sortValue;
+    }
+    return null;
+}
+
+// 按时间排序（从旧到新；无法解析的时间排到最后）
 function sortHistoryByTime(history) {
     return history.slice().sort(function(a, b) {
-        var ta = parseHistoricalDate(a.timestamp);
-        var tb = parseHistoricalDate(b.timestamp);
-        var va = ta && ta.sortValue !== null ? ta.sortValue : 0;
-        var vb = tb && tb.sortValue !== null ? tb.sortValue : 0;
-        return va - vb;
+        var va = getRecordSortValue(a);
+        var vb = getRecordSortValue(b);
+        if (va !== null && vb !== null) return va - vb;
+        if (va !== null) return -1;
+        if (vb !== null) return 1;
+        return (a.recordDate || '').localeCompare(b.recordDate || '');
     });
 }
 
@@ -3926,8 +7284,10 @@ function getChangeSummary(history) {
     if (!history || history.length === 0) return '无变化记录';
     var sorted = sortHistoryByTime(history);
     var latest = sorted[sorted.length - 1];
-    var total = history.length;
+    var changes = getChangeRecordsOnly(history);
+    var total = changes.length;
     var label = getIntimacyLabel(latest.newValue);
+    if (total === 0) return '已设起点，当前: ' + label;
     return '共' + total + '次变化，当前: ' + label;
 }
 
@@ -3940,21 +7300,248 @@ function addIntimacyRecord(plugin, record) {
     ensureIntimacyHistory(plugin).push(record);
 }
 
+function removeIntimacyRecord(plugin, recordId) {
+    var history = ensureIntimacyHistory(plugin);
+    var idx = history.findIndex(function(h) { return h.id === recordId; });
+    if (idx !== -1) history.splice(idx, 1);
+    return idx !== -1;
+}
+
+function recalcRelationIntimacyFromHistory(plugin, relation) {
+    var history = getRelationHistory(plugin, relation.charA, relation.charB);
+    if (history.length === 0) return relation.intimacy;
+    var sorted = sortHistoryByTime(history);
+    var latest = sorted[sorted.length - 1];
+    relation.intimacy = latest.newValue;
+    return relation.intimacy;
+}
+
+function isBaselineRecord(record) {
+    return record.changeReason === '初始值设定';
+}
+
+function getBaselineValue(sorted) {
+    for (var i = 0; i < sorted.length; i++) {
+        if (isBaselineRecord(sorted[i])) return sorted[i].newValue;
+    }
+    return sorted.length > 0 ? sorted[0].oldValue : 0;
+}
+
+function getChangeRecordsOnly(history) {
+    return history.filter(function(h) { return !isBaselineRecord(h); });
+}
+
+function buildTimelineEventOptions(view, charA, charB) {
+    var timeline = view.timeline || [];
+    var related = [];
+    var other = [];
+    for (var i = 0; i < timeline.length; i++) {
+        var evt = timeline[i];
+        var appeared = findCharsInEvent(evt.event, view.charNames || []);
+        var hasA = appeared.indexOf(charA) !== -1;
+        var hasB = appeared.indexOf(charB) !== -1;
+        var item = {
+            timelineIndex: i,
+            volume: evt.volume,
+            year: evt.year,
+            month: evt.month,
+            event: evt.event,
+            tag: evt.tag || '',
+            isRelated: hasA && hasB
+        };
+        if (item.isRelated) related.push(item);
+        else other.push(item);
+    }
+    function sortEvents(list) {
+        list.sort(function(a, b) {
+            var ay = parseHistoricalDate(a.year);
+            var by = parseHistoricalDate(b.year);
+            var av = ay && ay.sortValue !== null ? ay.sortValue : 0;
+            var bv = by && by.sortValue !== null ? by.sortValue : 0;
+            return bv - av;
+        });
+    }
+    sortEvents(related);
+    sortEvents(other);
+    return related.concat(other);
+}
+
+function createTimelineEventPicker(parent, view, charA, charB, onSelect) {
+    var allEvents = buildTimelineEventOptions(view, charA, charB);
+    var selectedEvt = null;
+    var wrap = parent.createEl('div');
+    wrap.style.cssText = 'border:1px solid #e0e0e0;border-radius:6px;overflow:hidden;background:white;';
+
+    var searchRow = wrap.createEl('div');
+    searchRow.style.cssText = 'padding:6px 8px;border-bottom:1px solid #eee;background:#fafafa;';
+    var searchInput = searchRow.createEl('input', { type: 'text', cls: 'my-char-form-input' });
+    searchInput.placeholder = '搜索事件（支持全文）…';
+    searchInput.style.cssText = 'width:100%;box-sizing:border-box;font-size:12px;';
+
+    var hint = wrap.createEl('div');
+    hint.style.cssText = 'padding:4px 10px;font-size:10px;color:#999;background:#fafafa;border-bottom:1px solid #eee;';
+    var relatedCount = 0;
+    for (var ri = 0; ri < allEvents.length; ri++) {
+        if (allEvents[ri].isRelated) relatedCount++;
+    }
+    hint.textContent = relatedCount > 0
+        ? '⭐ 优先显示两人共同出场的事件（' + relatedCount + ' 条），共 ' + allEvents.length + ' 条'
+        : '共 ' + allEvents.length + ' 条事件，输入关键词筛选';
+
+    var list = wrap.createEl('div');
+    list.style.cssText = 'max-height:220px;overflow-y:auto;';
+
+    function renderList(filter) {
+        list.empty();
+        var q = (filter || '').trim().toLowerCase();
+        var shown = 0;
+        var lastWasRelated = null;
+        for (var i = 0; i < allEvents.length; i++) {
+            var evt = allEvents[i];
+            var hay = (evt.year + ' ' + evt.month + ' ' + evt.tag + ' ' + evt.event).toLowerCase();
+            if (q && hay.indexOf(q) === -1) continue;
+            if (lastWasRelated === true && !evt.isRelated && shown > 0) {
+                var sep = list.createEl('div', { text: '— 其他事件 —' });
+                sep.style.cssText = 'padding:4px 10px;font-size:10px;color:#bbb;background:#f5f5f5;text-align:center;';
+            }
+            lastWasRelated = evt.isRelated;
+            shown++;
+            (function(ev) {
+                var row = list.createEl('div');
+                var isSelected = selectedEvt && selectedEvt.timelineIndex === ev.timelineIndex;
+                row.style.cssText = 'padding:8px 10px;cursor:pointer;border-bottom:1px solid #f0f0f0;font-size:12px;line-height:1.4;' +
+                    (isSelected ? 'background:#e8f4fd;' : (ev.isRelated ? 'background:#fffef5;' : 'background:white;'));
+                row.title = ev.event;
+                var timeSpan = document.createElement('span');
+                timeSpan.style.cssText = 'color:#888;font-size:11px;margin-right:4px;';
+                timeSpan.textContent = (ev.isRelated ? '⭐ ' : '') + ev.year + (ev.month && ev.month !== '未标注' ? '·' + ev.month : '') + ' ';
+                row.appendChild(timeSpan);
+                if (ev.tag) {
+                    var tagSpan = document.createElement('span');
+                    tagSpan.style.cssText = 'color:#9b59b6;font-size:10px;margin-right:4px;';
+                    tagSpan.textContent = '[' + ev.tag + '] ';
+                    row.appendChild(tagSpan);
+                }
+                row.appendChild(document.createTextNode(ev.event));
+                row.addEventListener('click', function() {
+                    selectedEvt = ev;
+                    renderList(searchInput.value);
+                    if (onSelect) onSelect(ev);
+                });
+            })(evt);
+        }
+        if (shown === 0) {
+            list.createEl('div', { text: q ? '没有匹配的事件' : '暂无时间线事件' }).style.cssText = 'padding:20px;text-align:center;color:#999;font-size:12px;';
+        }
+    }
+
+    searchInput.addEventListener('input', function() { renderList(searchInput.value); });
+    renderList('');
+
+    return {
+        getSelected: function() { return selectedEvt; },
+        clearSelection: function() { selectedEvt = null; renderList(searchInput.value); }
+    };
+}
+
 function buildIntimacyCurvePoints(history) {
     var sorted = sortHistoryByTime(history);
     if (sorted.length === 0) return [];
-    var points = [{ xLabel: '起点', sortValue: null, value: sorted[0].oldValue, idx: 0 }];
-    for (var i = 0; i < sorted.length; i++) {
-        var rec = sorted[i];
-        var parsed = parseHistoricalDate(rec.timestamp);
+
+    var points = [];
+    var baselineRec = null;
+    for (var bi = 0; bi < sorted.length; bi++) {
+        if (isBaselineRecord(sorted[bi])) { baselineRec = sorted[bi]; break; }
+    }
+
+    if (baselineRec) {
         points.push({
-            xLabel: rec.timestamp || ('变化' + (i + 1)),
-            sortValue: parsed && parsed.sortValue !== null ? parsed.sortValue : null,
-            value: rec.newValue,
-            idx: i + 1
+            xLabel: baselineRec.timestamp || '起点',
+            sortValue: getRecordSortValue(baselineRec),
+            value: baselineRec.newValue,
+            isBaseline: true,
+            order: 0
+        });
+    } else {
+        var first = sorted[0];
+        points.push({
+            xLabel: first.timestamp || '起点',
+            sortValue: getRecordSortValue(first),
+            value: first.oldValue !== undefined ? first.oldValue : first.newValue,
+            isBaseline: false,
+            order: 0
         });
     }
+
+    var changeRecords = getChangeRecordsOnly(sorted);
+    for (var i = 0; i < changeRecords.length; i++) {
+        var rec = changeRecords[i];
+        points.push({
+            xLabel: rec.timestamp || ('变化' + (i + 1)),
+            sortValue: getRecordSortValue(rec),
+            value: rec.newValue,
+            isBaseline: false,
+            order: i + 1
+        });
+    }
+
     return points;
+}
+
+function assignChartXValues(points) {
+    if (points.length === 0) return points;
+    var dated = [];
+    var undated = [];
+    for (var i = 0; i < points.length; i++) {
+        if (points[i].sortValue !== null && points[i].sortValue !== undefined) {
+            dated.push(points[i]);
+        } else {
+            undated.push(points[i]);
+        }
+    }
+
+    dated.sort(function(a, b) {
+        if (a.sortValue !== b.sortValue) return a.sortValue - b.sortValue;
+        return a.order - b.order;
+    });
+    undated.sort(function(a, b) { return a.order - b.order; });
+
+    var result = dated.slice();
+    if (dated.length >= 2) {
+        var minD = dated[0].sortValue;
+        var maxD = dated[dated.length - 1].sortValue;
+        var span = Math.max(maxD - minD, 1);
+        var step = span / (undated.length + 1);
+        for (var ui = 0; ui < undated.length; ui++) {
+            undated[ui].chartX = maxD + step * (ui + 1);
+            result.push(undated[ui]);
+        }
+        for (var di = 0; di < dated.length; di++) {
+            dated[di].chartX = dated[di].sortValue;
+        }
+    } else if (dated.length === 1) {
+        dated[0].chartX = dated[0].sortValue;
+        for (var uj = 0; uj < undated.length; uj++) {
+            undated[uj].chartX = dated[0].sortValue + (uj + 1);
+            result.push(undated[uj]);
+        }
+    } else {
+        for (var uk = 0; uk < undated.length; uk++) {
+            undated[uk].chartX = uk;
+            result.push(undated[uk]);
+        }
+    }
+
+    result.sort(function(a, b) {
+        if (a.chartX !== b.chartX) return a.chartX - b.chartX;
+        return a.order - b.order;
+    });
+    return result;
+}
+
+function formatChartXLabel(sortValue, fallbackLabel) {
+    if (sortValue === null || sortValue === undefined) return fallbackLabel || '?';
+    return formatSortValue(sortValue);
 }
 
 function renderIntimacyCurveChart(container, history, options) {
@@ -3962,20 +7549,22 @@ function renderIntimacyCurveChart(container, history, options) {
     var width = options.width || 460;
     var height = options.height || 150;
     var compact = options.compact || false;
-    var points = buildIntimacyCurvePoints(history);
-    if (points.length < 2) return null;
+    var rawPoints = buildIntimacyCurvePoints(history);
+    if (rawPoints.length === 0) return null;
+    var points = assignChartXValues(rawPoints);
+    if (points.length === 1) {
+        var singleWrap = container.createEl('div');
+        singleWrap.style.cssText = compact ? 'margin:4px 0;font-size:10px;color:#888;' : 'margin:12px 0;padding:10px;background:#fafbfc;border-radius:8px;border:1px solid #e8e8e8;font-size:12px;color:#666;';
+        singleWrap.textContent = '📈 当前亲密度：' + getIntimacyLabel(points[0].value) + '（' + (points[0].xLabel || '仅一条记录') + '）';
+        return singleWrap;
+    }
 
     var minY = -3, maxY = 5;
-    var padL = compact ? 24 : 36, padR = 12, padT = 10, padB = compact ? 14 : 28;
+    var padL = compact ? 24 : 36, padR = 12, padT = 10, padB = compact ? 14 : 36;
     var chartW = width - padL - padR;
     var chartH = height - padT - padB;
-    var hasTime = false;
-    for (var hi = 0; hi < points.length; hi++) {
-        if (points[hi].sortValue !== null) { hasTime = true; break; }
-    }
-    var xVals = points.map(function(p, i) {
-        return hasTime && p.sortValue !== null ? p.sortValue : i;
-    });
+
+    var xVals = points.map(function(p) { return p.chartX; });
     var minX = Math.min.apply(null, xVals);
     var maxX = Math.max.apply(null, xVals);
     if (minX === maxX) { minX -= 1; maxX += 1; }
@@ -3988,7 +7577,7 @@ function renderIntimacyCurveChart(container, history, options) {
         ? 'margin:4px 0 2px;'
         : 'margin:12px 0;padding:10px;background:#fafbfc;border-radius:8px;border:1px solid #e8e8e8;';
     if (!compact) {
-        wrap.createEl('div', { text: '📈 亲密度变化曲线' }).style.cssText = 'font-size:12px;font-weight:bold;margin-bottom:6px;color:#555;';
+        wrap.createEl('div', { text: '📈 亲密度变化曲线（按故事时间排序）' }).style.cssText = 'font-size:12px;font-weight:bold;margin-bottom:6px;color:#555;';
     }
 
     var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -4021,7 +7610,7 @@ function renderIntimacyCurveChart(container, history, options) {
 
     var pathD = '';
     for (var pi = 0; pi < points.length; pi++) {
-        pathD += (pi === 0 ? 'M' : 'L') + toX(xVals[pi]) + ',' + toY(points[pi].value);
+        pathD += (pi === 0 ? 'M' : 'L') + toX(points[pi].chartX) + ',' + toY(points[pi].value);
     }
     var path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     path.setAttribute('d', pathD);
@@ -4033,14 +7622,30 @@ function renderIntimacyCurveChart(container, history, options) {
     svg.appendChild(path);
 
     for (var ci = 0; ci < points.length; ci++) {
+        var pt = points[ci];
+        var cx = toX(pt.chartX);
+        var cy = toY(pt.value);
         var circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-        circle.setAttribute('cx', String(toX(xVals[ci])));
-        circle.setAttribute('cy', String(toY(points[ci].value)));
+        circle.setAttribute('cx', String(cx));
+        circle.setAttribute('cy', String(cy));
         circle.setAttribute('r', compact ? '3' : '5');
-        circle.setAttribute('fill', getIntimacyColor(points[ci].value));
+        circle.setAttribute('fill', getIntimacyColor(pt.value));
         circle.setAttribute('stroke', '#fff');
         circle.setAttribute('stroke-width', '1');
         svg.appendChild(circle);
+
+        if (!compact) {
+            var xLbl = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            xLbl.setAttribute('x', String(cx));
+            xLbl.setAttribute('y', String(height - 6));
+            xLbl.setAttribute('text-anchor', 'middle');
+            xLbl.setAttribute('font-size', '8');
+            xLbl.setAttribute('fill', '#999');
+            var labelText = pt.sortValue !== null ? formatChartXLabel(pt.sortValue, pt.xLabel) : (pt.xLabel || '?');
+            if (labelText.length > 8) labelText = labelText.substring(0, 8) + '…';
+            xLbl.textContent = labelText;
+            svg.appendChild(xLbl);
+        }
     }
 
     wrap.appendChild(svg);
@@ -4062,6 +7667,7 @@ var ChangeHistoryModal = /** @class */ (function (_super) {
 
     ChangeHistoryModal.prototype.onOpen = function () {
         var self = this;
+        this.contentEl.empty();
         var el = this.contentEl;
         el.style.cssText = 'padding:20px;max-height:80vh;overflow-y:auto;min-width:500px;';
         
@@ -4074,6 +7680,7 @@ var ChangeHistoryModal = /** @class */ (function (_super) {
         
         if (history.length === 0) {
             el.createEl('p', { text: '📭 该关系暂无变化记录', cls: 'my-char-view-empty' }).style.cssText = 'text-align:center;color:#888;padding:30px;';
+            el.createEl('p', { text: '💡 点击关系卡片上的「📝 记录变化」，选择「初始值设定」可设定亲密度起点' }).style.cssText = 'text-align:center;color:#999;font-size:12px;margin-top:-10px;';
             var closeBtn = el.createEl('button', { text: '关闭' });
             closeBtn.style.cssText = 'margin-top:15px;padding:8px 16px;background:#888;color:white;border:none;border-radius:4px;cursor:pointer;width:100%;';
             closeBtn.addEventListener('click', function() { self.close(); });
@@ -4081,21 +7688,28 @@ var ChangeHistoryModal = /** @class */ (function (_super) {
         }
         
         var sorted = sortHistoryByTime(history);
+        var changeRecords = getChangeRecordsOnly(sorted);
         
         // 统计信息
         var stats = el.createEl('div');
         stats.style.cssText = 'display:flex;gap:15px;padding:10px;background:#f5f7fa;border-radius:6px;margin-bottom:12px;flex-wrap:wrap;';
         var upCount = 0, downCount = 0, flatCount = 0;
-        for (var i = 0; i < sorted.length; i++) {
-            var type = getChangeType(sorted[i].oldValue, sorted[i].newValue);
+        for (var i = 0; i < changeRecords.length; i++) {
+            var type = getChangeType(changeRecords[i].oldValue, changeRecords[i].newValue);
             if (type.indexOf('提升') !== -1) upCount++;
             else if (type.indexOf('下降') !== -1) downCount++;
             else flatCount++;
         }
-        stats.createEl('span', { text: '📋 共 ' + sorted.length + ' 次' }).style.cssText = 'font-size:12px;';
-        stats.createEl('span', { text: '⬆ 提升 ' + upCount + ' 次' }).style.cssText = 'font-size:12px;color:#2ecc71;';
-        stats.createEl('span', { text: '⬇ 下降 ' + downCount + ' 次' }).style.cssText = 'font-size:12px;color:#e74c3c;';
-        stats.createEl('span', { text: '➡ 持平 ' + flatCount + ' 次' }).style.cssText = 'font-size:12px;color:#95a5a6;';
+        var hasBaseline = sorted.some(function(r) { return isBaselineRecord(r); });
+        if (hasBaseline) {
+            stats.createEl('span', { text: '📌 起点: ' + getIntimacyLabel(getBaselineValue(sorted)) }).style.cssText = 'font-size:12px;color:#888;';
+        }
+        stats.createEl('span', { text: '📋 共 ' + changeRecords.length + ' 次变化' }).style.cssText = 'font-size:12px;';
+        if (changeRecords.length > 0) {
+            stats.createEl('span', { text: '⬆ 提升 ' + upCount + ' 次' }).style.cssText = 'font-size:12px;color:#2ecc71;';
+            stats.createEl('span', { text: '⬇ 下降 ' + downCount + ' 次' }).style.cssText = 'font-size:12px;color:#e74c3c;';
+            stats.createEl('span', { text: '➡ 持平 ' + flatCount + ' 次' }).style.cssText = 'font-size:12px;color:#95a5a6;';
+        }
 
         renderIntimacyCurveChart(el, sorted, { width: 500, height: 170, compact: false });
 
@@ -4107,61 +7721,84 @@ var ChangeHistoryModal = /** @class */ (function (_super) {
             (function(record, idx) {
                 var item = list.createEl('div');
                 var isLatest = idx === sorted.length - 1;
-                var borderColor = isLatest ? '#4a90e2' : '#e8e8e8';
-                item.style.cssText = 'padding:10px 12px;margin:4px 0;border-left:3px solid ' + borderColor + ';background:' + (isLatest ? '#f0f7ff' : 'white') + ';border-radius:4px;';
+                var isBaseline = isBaselineRecord(record);
+                var borderColor = isBaseline ? '#95a5a6' : (isLatest ? '#4a90e2' : '#e8e8e8');
+                item.style.cssText = 'padding:10px 12px;margin:4px 0;border-left:3px solid ' + borderColor + ';background:' + (isLatest ? '#f0f7ff' : 'white') + ';border-radius:4px;position:relative;';
                 
                 // 行1：时间和变化值
                 var row1 = item.createEl('div');
-                row1.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
+                row1.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-right:60px;';
                 
                 var timeLabel = row1.createEl('span', { text: record.timestamp || '未标注时间' });
                 timeLabel.style.cssText = 'font-size:12px;color:#888;font-weight:bold;';
                 
-                var oldLabel = getIntimacyLabel(record.oldValue);
-                var newLabel = getIntimacyLabel(record.newValue);
-                var oldColor = getIntimacyColor(record.oldValue);
-                var newColor = getIntimacyColor(record.newValue);
-                var changeType = getChangeType(record.oldValue, record.newValue);
-                var arrowColor = record.newValue > record.oldValue ? '#2ecc71' : (record.newValue < record.oldValue ? '#e74c3c' : '#95a5a6');
-                
-                var oldSpan = row1.createEl('span', { text: oldLabel });
-                oldSpan.style.cssText = 'color:' + oldColor + ';font-weight:bold;font-size:13px;';
-                
-                var arrowSpan = row1.createEl('span', { text: ' → ' });
-                arrowSpan.style.cssText = 'color:' + arrowColor + ';font-weight:bold;';
-                
-                var newSpan = row1.createEl('span', { text: newLabel });
-                newSpan.style.cssText = 'color:' + newColor + ';font-weight:bold;font-size:13px;';
-                
-                var typeBadge = row1.createEl('span', { text: changeType });
-                typeBadge.style.cssText = 'font-size:10px;padding:1px 8px;border-radius:10px;background:' + (record.newValue > record.oldValue ? '#2ecc71' : (record.newValue < record.oldValue ? '#e74c3c' : '#95a5a6')) + ';color:white;';
+                if (isBaseline) {
+                    var baselineBadge = row1.createEl('span', { text: '📌 起点 ' + getIntimacyLabel(record.newValue) });
+                    baselineBadge.style.cssText = 'font-size:12px;padding:2px 8px;border-radius:10px;background:#95a5a6;color:white;font-weight:bold;';
+                } else {
+                    var oldLabel = getIntimacyLabel(record.oldValue);
+                    var newLabel = getIntimacyLabel(record.newValue);
+                    var oldColor = getIntimacyColor(record.oldValue);
+                    var newColor = getIntimacyColor(record.newValue);
+                    var changeType = getChangeType(record.oldValue, record.newValue);
+                    var arrowColor = record.newValue > record.oldValue ? '#2ecc71' : (record.newValue < record.oldValue ? '#e74c3c' : '#95a5a6');
+                    
+                    var oldSpan = row1.createEl('span', { text: oldLabel });
+                    oldSpan.style.cssText = 'color:' + oldColor + ';font-weight:bold;font-size:13px;';
+                    
+                    var arrowSpan = row1.createEl('span', { text: ' → ' });
+                    arrowSpan.style.cssText = 'color:' + arrowColor + ';font-weight:bold;';
+                    
+                    var newSpan = row1.createEl('span', { text: newLabel });
+                    newSpan.style.cssText = 'color:' + newColor + ';font-weight:bold;font-size:13px;';
+                    
+                    var typeBadge = row1.createEl('span', { text: changeType });
+                    typeBadge.style.cssText = 'font-size:10px;padding:1px 8px;border-radius:10px;background:' + (record.newValue > record.oldValue ? '#2ecc71' : (record.newValue < record.oldValue ? '#e74c3c' : '#95a5a6')) + ';color:white;';
+                }
                 
                 if (isLatest) {
                     var latestBadge = row1.createEl('span', { text: '当前' });
                     latestBadge.style.cssText = 'font-size:9px;padding:1px 6px;border-radius:8px;background:#4a90e2;color:white;';
                 }
+
+                // 删除按钮
+                var delBtn = item.createEl('button', { text: '🗑 删除' });
+                delBtn.style.cssText = 'position:absolute;top:10px;right:10px;padding:2px 8px;border:1px solid #e74c3c;border-radius:4px;cursor:pointer;font-size:10px;background:white;color:#e74c3c;';
+                delBtn.addEventListener('click', function() {
+                    var confirmMsg = isBaseline
+                        ? '确定删除这条起点设定吗？删除后曲线起点会重新计算。'
+                        : '确定删除这条变化记录吗？删除后当前亲密度会回退到上一条记录的值。';
+                    if (!confirm(confirmMsg)) return;
+                    removeIntimacyRecord(self.view.plugin, record.id);
+                    recalcRelationIntimacyFromHistory(self.view.plugin, self.relation);
+                    self.view.saveFactionsAndRelations({ skipGraphSync: true }).then(function() {
+                        self.view.refreshRelationsIfVisible();
+                        new obsidian.Notice('✅ 已删除该条记录');
+                        self.onOpen();
+                    });
+                });
                 
                 // 行2：原因
                 if (record.changeReason || record.customReason || record.eventId) {
                     var row2 = item.createEl('div');
                     row2.style.cssText = 'font-size:11px;color:#666;margin-top:4px;padding-left:4px;';
                     if (record.eventId && record.eventYear) {
-                        row2.createEl('span', { text: '📎 ' + record.eventYear + ' · ' });
-                        var eventLink = row2.createEl('span', { text: '查看事件' });
-                        eventLink.style.cssText = 'color:#4a90e2;cursor:pointer;text-decoration:underline;';
+                        var eventText = record.eventText || record.customReason || '';
+                        row2.createEl('span', { text: '📎 ' + record.eventYear + ' · ' + eventText });
+                        var eventLink = row2.createEl('span', { text: ' 查看' });
+                        eventLink.style.cssText = 'color:#4a90e2;cursor:pointer;text-decoration:underline;margin-left:4px;';
                         (function(eid) {
                             eventLink.addEventListener('click', function() {
-                                // 跳转到时间线并定位到该事件
                                 self.view.tab = 'timeline';
                                 self.view._yearSearchText = record.eventYear || '';
                                 self.view.render();
                                 self.close();
                             });
                         })(record.eventId);
-                    } else if (record.customReason) {
+                    } else if (record.customReason && !isBaseline) {
                         row2.createEl('span', { text: '📝 ' + record.customReason });
-                    } else if (record.changeReason === '初始值设定') {
-                        row2.createEl('span', { text: '📌 初始值设定' }).style.cssText = 'color:#999;';
+                    } else if (isBaseline) {
+                        row2.createEl('span', { text: '📌 亲密度起点设定' }).style.cssText = 'color:#999;';
                     }
                 }
                 
@@ -4204,35 +7841,44 @@ var RecordChangeModal = /** @class */ (function (_super) {
     RecordChangeModal.prototype.onOpen = function () {
         var self = this;
         var el = this.contentEl;
-        el.style.cssText = 'padding:20px;max-height:80vh;overflow-y:auto;min-width:450px;';
-        
-        el.createEl('h3', { text: '📝 记录关系变化' }).style.cssText = 'margin:0 0 4px;';
-        var sub = el.createEl('div');
-        sub.style.cssText = 'font-size:13px;color:#555;margin-bottom:15px;';
-        sub.innerHTML = '<strong>' + this.relation.charA + '</strong> ↔ <strong>' + this.relation.charB + '</strong> ｜ 当前：' + getIntimacyLabel(this.relation.intimacy || 0);
+        el.addClass('my-char-modal-body');
+        el.style.cssText = 'padding:20px;max-height:85vh;overflow-y:auto;min-width:480px;max-width:560px;';
         
         var currentIntimacy = this.relation.intimacy || 0;
         var newIntimacy = currentIntimacy;
-        var changeReason = '自定义描述';
-        var customReason = '';
-        var timestamp = '';
-        var note = '';
-        
-        // 变化前（自动填充当前值）
-        var rowOld = el.createEl('div');
-        rowOld.style.cssText = 'margin:10px 0;';
-        rowOld.createEl('label', { text: '变化前亲密度' }).style.cssText = 'display:block;font-weight:bold;margin-bottom:4px;font-size:13px;';
-        var oldDisplay = rowOld.createEl('span');
-        var oldColor = getIntimacyColor(currentIntimacy);
-        oldDisplay.style.cssText = 'padding:6px 12px;border-radius:4px;background:' + oldColor + ';color:white;font-weight:bold;display:inline-block;';
-        oldDisplay.textContent = getIntimacyLabel(currentIntimacy) + ' (' + currentIntimacy + ')';
-        
-        // 变化后
-        var rowNew = el.createEl('div');
-        rowNew.style.cssText = 'margin:10px 0;';
-        rowNew.createEl('label', { text: '变化后亲密度' }).style.cssText = 'display:block;font-weight:bold;margin-bottom:4px;font-size:13px;';
-        var newSelect = rowNew.createEl('select');
-        newSelect.style.cssText = 'width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;';
+        var mode = 'change';
+        var selectedEvent = null;
+        var eventPickerApi = null;
+
+        el.createEl('h3', { text: '📝 记录关系变化' }).style.cssText = 'margin:0 0 4px;';
+        var sub = el.createEl('div');
+        sub.style.cssText = 'font-size:13px;color:#555;margin-bottom:12px;';
+        sub.innerHTML = '<strong>' + this.relation.charA + '</strong> ↔ <strong>' + this.relation.charB + '</strong>';
+
+        // 模式切换
+        var modeRow = el.createEl('div');
+        modeRow.style.cssText = 'display:flex;gap:6px;margin-bottom:14px;';
+        var changeModeBtn = modeRow.createEl('button', { text: '📈 记录变化', type: 'button' });
+        var baselineModeBtn = modeRow.createEl('button', { text: '📌 设定起点', type: 'button' });
+        function preventBtnFocusSteal(btn) {
+            btn.addEventListener('mousedown', function(e) { e.preventDefault(); });
+        }
+        preventBtnFocusSteal(changeModeBtn);
+        preventBtnFocusSteal(baselineModeBtn);
+        function setModeStyle(active, inactive) {
+            active.style.cssText = 'flex:1;padding:8px;border:2px solid #4a90e2;border-radius:6px;cursor:pointer;background:#e8f4fd;color:#4a90e2;font-weight:bold;font-size:12px;';
+            inactive.style.cssText = 'flex:1;padding:8px;border:1px solid #ddd;border-radius:6px;cursor:pointer;background:white;color:#666;font-size:12px;';
+        }
+        setModeStyle(changeModeBtn, baselineModeBtn);
+
+        // 亲密度选择
+        var intimacyRow = el.createEl('div');
+        intimacyRow.style.cssText = 'margin:10px 0;padding:12px;background:#f8f9fa;border-radius:8px;';
+        var intimacyLabel = intimacyRow.createEl('div');
+        intimacyLabel.style.cssText = 'font-size:12px;color:#666;margin-bottom:6px;';
+        intimacyLabel.textContent = '当前：' + getIntimacyLabel(currentIntimacy);
+        var newSelect = intimacyRow.createEl('select');
+        newSelect.style.cssText = 'width:100%;padding:10px;border:1px solid #ddd;border-radius:6px;font-size:14px;';
         for (var i = 0; i < INTIMACY_LEVELS.length; i++) {
             var lvl = INTIMACY_LEVELS[i];
             var opt = document.createElement('option');
@@ -4241,174 +7887,165 @@ var RecordChangeModal = /** @class */ (function (_super) {
             if (lvl.value === currentIntimacy) opt.selected = true;
             newSelect.appendChild(opt);
         }
-        newSelect.addEventListener('change', function() {
+        var deltaHint = intimacyRow.createEl('div');
+        deltaHint.style.cssText = 'font-size:11px;color:#888;margin-top:6px;';
+        function updateDeltaHint() {
             newIntimacy = parseInt(newSelect.value);
-        });
-        
-        // 变化原因 - 三种模式
-        el.createEl('div', { text: '变化原因' }).style.cssText = 'font-weight:bold;margin:12px 0 4px;font-size:13px;';
-        
-        var reasonContainer = el.createEl('div');
-        reasonContainer.style.cssText = 'padding:10px;background:#f8f9fa;border-radius:6px;';
-        
-        var reasonType = '自定义描述';
-        
-        // 选项：事件关联
-        var eventRow = reasonContainer.createEl('div');
-        eventRow.style.cssText = 'margin-bottom:8px;';
-        var eventRadio = eventRow.createEl('input', { type: 'radio', name: 'reasonType', value: '事件关联' });
-        eventRadio.style.cssText = 'margin-right:6px;';
-        eventRow.createEl('span', { text: '📎 关联时间线事件' });
-        
-        var eventSelectRow = reasonContainer.createEl('div');
-        eventSelectRow.style.cssText = 'margin-left:24px;margin-bottom:8px;';
-        var eventSelect = eventSelectRow.createEl('select');
-        eventSelect.style.cssText = 'width:100%;padding:6px;border:1px solid #ddd;border-radius:4px;font-size:12px;';
-        var defaultOpt = document.createElement('option');
-        defaultOpt.value = '';
-        defaultOpt.textContent = '-- 请选择事件 --';
-        eventSelect.appendChild(defaultOpt);
-        
-        var timelineEvents = self.view.timeline || [];
-        // 收集所有事件，按年份排序
-        var eventList = [];
-        for (var i = 0; i < timelineEvents.length; i++) {
-            var evt = timelineEvents[i];
-            // 只保留有人物出场的事件（简化处理，全部显示）
-            eventList.push(evt);
+            if (mode === 'baseline') {
+                deltaHint.textContent = '设为亲密度曲线的起点';
+                intimacyLabel.textContent = '起点亲密度';
+                return;
+            }
+            intimacyLabel.textContent = '当前：' + getIntimacyLabel(currentIntimacy);
+            if (newIntimacy > currentIntimacy) {
+                deltaHint.textContent = '⬆ 提升 ' + (newIntimacy - currentIntimacy) + ' 级';
+                deltaHint.style.color = '#2ecc71';
+            } else if (newIntimacy < currentIntimacy) {
+                deltaHint.textContent = '⬇ 下降 ' + (currentIntimacy - newIntimacy) + ' 级';
+                deltaHint.style.color = '#e74c3c';
+            } else {
+                deltaHint.textContent = '与当前相同';
+                deltaHint.style.color = '#888';
+            }
         }
-        eventList.sort(function(a, b) {
-            var ay = parseHistoricalDate(a.year);
-            var by = parseHistoricalDate(b.year);
-            var av = ay && ay.sortValue !== null ? ay.sortValue : 0;
-            var bv = by && by.sortValue !== null ? by.sortValue : 0;
-            return bv - av; // 最新在前
-        });
-        for (var i = 0; i < Math.min(eventList.length, 100); i++) {
-            var evt = eventList[i];
-            var opt = document.createElement('option');
-            opt.value = i;
-            opt.textContent = '[' + evt.year + '] ' + evt.event.substring(0, 30) + (evt.event.length > 30 ? '...' : '');
-            opt.setAttribute('data-year', evt.year);
-            opt.setAttribute('data-event', evt.event);
-            eventSelect.appendChild(opt);
-        }
-        eventSelectRow.style.display = 'none';
-        
-        // 选项：自定义描述
-        var customRow = reasonContainer.createEl('div');
-        customRow.style.cssText = 'margin-bottom:8px;';
-        var customRadio = customRow.createEl('input', { type: 'radio', name: 'reasonType', value: '自定义描述' });
-        customRadio.checked = true;
-        customRadio.style.cssText = 'margin-right:6px;';
-        customRow.createEl('span', { text: '✏️ 自定义描述' });
-        
-        var customTextRow = reasonContainer.createEl('div');
-        customTextRow.style.cssText = 'margin-left:24px;';
-        var customInput = customTextRow.createEl('input', { type: 'text' });
-        customInput.style.cssText = 'width:100%;padding:6px;border:1px solid #ddd;border-radius:4px;font-size:12px;';
-        customInput.placeholder = '输入变化原因，如：共同经历了一次重大事件';
-        customInput.addEventListener('input', function() { customReason = customInput.value; });
-        
-        // 选项：初始值设定
-        var initRow = reasonContainer.createEl('div');
-        var initRadio = initRow.createEl('input', { type: 'radio', name: 'reasonType', value: '初始值设定' });
-        initRadio.style.cssText = 'margin-right:6px;';
-        initRow.createEl('span', { text: '📌 初始值设定（仅记录起点，不触发变化波动）' });
-        
-        // 事件关联切换
-        eventRadio.addEventListener('change', function() {
-            if (eventRadio.checked) {
-                eventSelectRow.style.display = 'block';
-                customTextRow.style.display = 'none';
-                reasonType = '事件关联';
-            }
-        });
-        customRadio.addEventListener('change', function() {
-            if (customRadio.checked) {
-                eventSelectRow.style.display = 'none';
-                customTextRow.style.display = 'block';
-                reasonType = '自定义描述';
-            }
-        });
-        initRadio.addEventListener('change', function() {
-            if (initRadio.checked) {
-                eventSelectRow.style.display = 'none';
-                customTextRow.style.display = 'none';
-                reasonType = '初始值设定';
-            }
-        });
-        
-        // 时间
+        newSelect.addEventListener('change', updateDeltaHint);
+        updateDeltaHint();
+
+        // 故事时间（放在模式区域之前，设定起点时可直接输入）
         var timeRow = el.createEl('div');
         timeRow.style.cssText = 'margin:10px 0;';
-        timeRow.createEl('label', { text: '故事内时间（可选）' }).style.cssText = 'display:block;font-weight:bold;margin-bottom:4px;font-size:13px;';
-        var timeInput = timeRow.createEl('input', { type: 'text' });
-        timeInput.style.cssText = 'width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;box-sizing:border-box;';
-        timeInput.placeholder = '如：前280年冬、300年春';
-        timeInput.addEventListener('input', function() { timestamp = timeInput.value; });
-        
-        // 备注
-        var noteRow = el.createEl('div');
-        noteRow.style.cssText = 'margin:10px 0;';
-        noteRow.createEl('label', { text: '备注（可选）' }).style.cssText = 'display:block;font-weight:bold;margin-bottom:4px;font-size:13px;';
-        var noteInput = noteRow.createEl('textarea');
-        noteInput.style.cssText = 'width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;height:50px;box-sizing:border-box;';
-        noteInput.placeholder = '额外说明...';
-        noteInput.addEventListener('input', function() { note = noteInput.value; });
-        
+        timeRow.createEl('label', { text: '故事内时间' }).style.cssText = 'display:block;font-size:12px;color:#666;margin-bottom:4px;';
+        var timeInput = timeRow.createEl('input', { type: 'text', cls: 'my-char-form-input' });
+        timeInput.placeholder = '如：前280年冬（选事件会自动填入）';
+
+        // 起点模式专属
+        var baselineSection = el.createEl('div');
+        baselineSection.style.cssText = 'display:none;margin-bottom:8px;';
+        baselineSection.createEl('div', { text: '💡 设定这条关系最初的亲密度，不会计入变化次数' }).style.cssText = 'font-size:11px;color:#888;padding:8px;background:#f5f5f5;border-radius:6px;';
+
+        // 变化模式专属区域
+        var changeSection = el.createEl('div');
+
+        var reasonTypeRow = changeSection.createEl('div');
+        reasonTypeRow.style.cssText = 'display:flex;gap:6px;margin:10px 0;';
+        var customReasonBtn = reasonTypeRow.createEl('button', { text: '✏️ 自定义描述', type: 'button' });
+        var eventReasonBtn = reasonTypeRow.createEl('button', { text: '📎 关联时间线事件', type: 'button' });
+        preventBtnFocusSteal(customReasonBtn);
+        preventBtnFocusSteal(eventReasonBtn);
+        var reasonMode = 'custom';
+        function setReasonModeStyle(active, inactive) {
+            active.style.cssText = 'flex:1;padding:7px;border:2px solid #4a90e2;border-radius:6px;cursor:pointer;background:#e8f4fd;color:#4a90e2;font-weight:bold;font-size:12px;';
+            inactive.style.cssText = 'flex:1;padding:7px;border:1px solid #ddd;border-radius:6px;cursor:pointer;background:white;color:#666;font-size:12px;';
+        }
+        setReasonModeStyle(customReasonBtn, eventReasonBtn);
+
+        var customReasonPanel = changeSection.createEl('div');
+        customReasonPanel.style.cssText = 'margin-bottom:8px;';
+        customReasonPanel.createEl('label', { text: '变化原因' }).style.cssText = 'display:block;font-size:12px;color:#666;margin-bottom:4px;';
+        var customInput = customReasonPanel.createEl('input', { type: 'text', cls: 'my-char-form-input' });
+        customInput.placeholder = '描述这次关系变化的原因，如：共同经历了一次重大事件';
+
+        var eventReasonPanel = changeSection.createEl('div');
+        eventReasonPanel.style.cssText = 'display:none;margin-bottom:8px;';
+        var eventPickerHost = eventReasonPanel.createEl('div');
+        eventPickerHost.style.cssText = 'padding:0;';
+        eventPickerApi = createTimelineEventPicker(eventPickerHost, self.view, self.relation.charA, self.relation.charB, function(evt) {
+            selectedEvent = evt;
+            timeInput.value = evt.year + (evt.month && evt.month !== '未标注' ? evt.month : '');
+            customInput.value = evt.event;
+        });
+
+        function switchReasonMode(nextMode) {
+            reasonMode = nextMode;
+            if (reasonMode === 'event') {
+                setReasonModeStyle(eventReasonBtn, customReasonBtn);
+                customReasonPanel.style.display = 'none';
+                eventReasonPanel.style.display = 'block';
+            } else {
+                setReasonModeStyle(customReasonBtn, eventReasonBtn);
+                customReasonPanel.style.display = 'block';
+                eventReasonPanel.style.display = 'none';
+                selectedEvent = null;
+                if (eventPickerApi) eventPickerApi.clearSelection();
+            }
+        }
+        customReasonBtn.addEventListener('click', function() { switchReasonMode('custom'); });
+        eventReasonBtn.addEventListener('click', function() { switchReasonMode('event'); });
+
+        function switchMode(nextMode) {
+            mode = nextMode;
+            if (mode === 'baseline') {
+                setModeStyle(baselineModeBtn, changeModeBtn);
+                changeSection.style.display = 'none';
+                baselineSection.style.display = 'block';
+            } else {
+                setModeStyle(changeModeBtn, baselineModeBtn);
+                changeSection.style.display = 'block';
+                baselineSection.style.display = 'none';
+            }
+            updateDeltaHint();
+        }
+        changeModeBtn.addEventListener('click', function() { switchMode('change'); });
+        baselineModeBtn.addEventListener('click', function() { switchMode('baseline'); });
+
         // 按钮
         var btnRow = el.createEl('div');
-        btnRow.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:15px;';
+        btnRow.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:16px;';
         
-        var saveBtn = btnRow.createEl('button', { text: '💾 保存变化' });
-        saveBtn.style.cssText = 'padding:8px 20px;background:#4a90e2;color:white;border:none;border-radius:4px;cursor:pointer;';
+        var saveBtn = btnRow.createEl('button', { text: '💾 保存', type: 'button' });
+        saveBtn.style.cssText = 'padding:10px 24px;background:#4a90e2;color:white;border:none;border-radius:6px;cursor:pointer;font-size:14px;';
         saveBtn.addEventListener('click', function() {
-            // 验证
-            if (newIntimacy === currentIntimacy && reasonType !== '初始值设定') {
-                if (!confirm('亲密度值没有变化，确定要记录吗？')) return;
+            newIntimacy = parseInt(newSelect.value);
+            var timeValue = timeInput.value.trim();
+            var reasonText = customInput.value.trim();
+            var reasonType = mode === 'baseline' ? '初始值设定' : (reasonMode === 'event' && selectedEvent ? '事件关联' : '自定义描述');
+
+            if (mode === 'change' && newIntimacy === currentIntimacy && reasonMode === 'custom' && !reasonText) {
+                new obsidian.Notice('亲密度没有变化时，请填写自定义描述');
+                return;
             }
-            
-            // 构建变化记录
+            if (mode === 'change' && reasonMode === 'event' && !selectedEvent) {
+                new obsidian.Notice('请选择要关联的时间线事件');
+                return;
+            }
+
+            if (mode === 'baseline') {
+                var existingHistory = getRelationHistory(self.view.plugin, self.relation.charA, self.relation.charB);
+                if (existingHistory.some(function(h) { return isBaselineRecord(h); })) {
+                    if (!confirm('已有起点设定，继续将新增一条。建议先在历史中删除旧起点。继续？')) return;
+                }
+            }
+
+            var recordOldValue = mode === 'baseline' ? newIntimacy : currentIntimacy;
             var record = {
                 id: generateId(),
                 charA: self.relation.charA,
                 charB: self.relation.charB,
-                oldValue: currentIntimacy,
+                oldValue: recordOldValue,
                 newValue: newIntimacy,
                 changeReason: reasonType,
-                timestamp: timestamp || '未标注时间',
+                timestamp: timeValue || '未标注时间',
                 recordDate: new Date().toISOString().split('T')[0],
-                note: note || ''
+                note: ''
             };
-            
-            if (reasonType === '事件关联') {
-                var selectedIdx = parseInt(eventSelect.value);
-                if (!isNaN(selectedIdx) && eventList[selectedIdx]) {
-                    var evt = eventList[selectedIdx];
-                    record.eventId = 'evt_' + selectedIdx;
-                    record.eventYear = evt.year;
-                    record.customReason = evt.event.substring(0, 50);
-                } else {
-                    new obsidian.Notice('请选择事件');
-                    return;
-                }
+
+            if (reasonType === '事件关联' && selectedEvent) {
+                record.eventId = 'tl_' + selectedEvent.timelineIndex;
+                record.eventYear = selectedEvent.year;
+                record.eventText = selectedEvent.event;
+                record.customReason = reasonText || selectedEvent.event;
             } else if (reasonType === '自定义描述') {
-                if (!customReason.trim()) {
-                    new obsidian.Notice('请输入自定义描述');
-                    return;
-                }
-                record.customReason = customReason.trim();
+                if (reasonText) record.customReason = reasonText;
             } else if (reasonType === '初始值设定') {
                 record.customReason = '初始值设定';
             }
-            
+
             if (self.onSave) self.onSave(record);
             self.close();
         });
         
-        var cancelBtn = btnRow.createEl('button', { text: '取消' });
-        cancelBtn.style.cssText = 'padding:8px 16px;border:1px solid #ddd;border-radius:4px;cursor:pointer;background:white;';
+        var cancelBtn = btnRow.createEl('button', { text: '取消', type: 'button' });
+        cancelBtn.style.cssText = 'padding:10px 16px;border:1px solid #ddd;border-radius:6px;cursor:pointer;background:white;';
         cancelBtn.addEventListener('click', function() { self.close(); });
     };
     
@@ -4433,11 +8070,22 @@ MyView.prototype.showRecordChange = function(relation, callback) {
     var self = this;
     var modal = new RecordChangeModal(this.app, relation, this, function(record) {
         addIntimacyRecord(self.plugin, record);
-        relation.intimacy = record.newValue;
-        self.saveFactionsAndRelations().then(function() {
+        if (record.changeReason === '初始值设定') {
+            var changes = getChangeRecordsOnly(getRelationHistory(self.plugin, relation.charA, relation.charB));
+            if (changes.length === 0) {
+                relation.intimacy = record.newValue;
+            }
+        } else {
+            relation.intimacy = record.newValue;
+        }
+        self.saveFactionsAndRelations({ skipGraphSync: true }).then(function() {
             if (callback) callback(record);
-            self.render();
-            new obsidian.Notice('✅ 变化已记录：' + getIntimacyLabel(record.oldValue) + ' → ' + getIntimacyLabel(record.newValue));
+            self.refreshRelationsIfVisible();
+            if (record.changeReason === '初始值设定') {
+                new obsidian.Notice('✅ 起点已设定：' + getIntimacyLabel(record.newValue));
+            } else {
+                new obsidian.Notice('✅ 变化已记录：' + getIntimacyLabel(record.oldValue) + ' → ' + getIntimacyLabel(record.newValue));
+            }
         });
     });
     modal.open();
@@ -4556,6 +8204,7 @@ MyView.prototype.showUnappearedChars = function() {
 };
 
 MyView.prototype.showIsolatedChars = function() {
+    var terms = getTermSet(this.plugin);
     var charsWithRelations = {};
     for (var i = 0; i < this.relations.length; i++) {
         charsWithRelations[this.relations[i].charA] = true;
@@ -4568,13 +8217,13 @@ MyView.prototype.showIsolatedChars = function() {
         }
     }
     if (matchedNames.length === 0) {
-        new obsidian.Notice('所有人物都已建立关系');
+        new obsidian.Notice('所有' + terms.entity + '都已建立' + terms.relation);
         return;
     }
     this.filterCharsByCondition(
         function(c) { return !charsWithRelations[c.name]; },
-        '🔗 无任何关系的人物',
-        '共 ' + matchedNames.length + ' 人'
+        '🔗 无任何' + terms.relation + '的' + terms.entity,
+        '共 ' + matchedNames.length + ' 个'
     );
 };
 
@@ -4632,7 +8281,7 @@ MyView.prototype.showDeadAfterAppear = function() {
 MyView.prototype.renderDashboard = function(container) {
     var self = this;
     container.empty();
-    container.style.cssText = 'padding:10px;overflow-y:auto;';
+    container.classList.add('my-char-scroll-section');
 
     var totalChars = this.chars.length;
     var totalEvents = this.timeline.length;
@@ -4691,18 +8340,18 @@ MyView.prototype.renderDashboard = function(container) {
         }
     }
 
-    container.createEl('h3', { text: '📊 写作仪表盘' }).style.cssText = 'margin:0 0 15px;border-bottom:2px solid var(--interactive-accent);padding-bottom:6px;';
+    container.createEl('h3', { text: '📊 写作仪表盘', cls: 'my-char-section-title' });
 
     var timeBar = container.createEl('div');
-    timeBar.style.cssText = 'display:flex;align-items:center;gap:10px;margin-bottom:15px;padding:8px 12px;background:#f0f7ff;border-radius:6px;border-left:3px solid #4a90e2;flex-wrap:wrap;';
-    timeBar.createEl('span', { text: '⏱️ 当前时间点：' }).style.cssText = 'font-weight:bold;font-size:13px;';
-    timeBar.createEl('span', { text: currentTimeStr || '（未设置）' }).style.cssText = 'font-size:13px;color:' + (currentTimeStr ? '#4a90e2' : '#999') + ';';
+    timeBar.className = 'my-char-time-bar';
+    timeBar.createEl('span', { text: '⏱️ 当前时间点：', cls: 'my-char-time-label' });
+    timeBar.createEl('span', { text: currentTimeStr || '（未设置）', cls: 'my-char-time-value' + (currentTimeStr ? ' is-set' : '') });
     var setTimeBtn = timeBar.createEl('button', { text: '⚙️ 设置' });
-    setTimeBtn.style.cssText = 'padding:2px 12px;font-size:11px;border-radius:4px;border:1px solid #ddd;cursor:pointer;background:white;';
+    setTimeBtn.className = 'my-char-btn-ghost my-char-btn-xs';
     setTimeBtn.addEventListener('click', function() { self.app.setting.open(); self.app.setting.openTabById(self.plugin.manifest.id); });
 
     var statsGrid = container.createEl('div');
-    statsGrid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px;margin-bottom:20px;';
+    statsGrid.className = 'my-char-stats-grid';
     var statCards = [
         { label: '👥 人物', value: totalChars, color: '#4a90e2' },
         { label: '📅 事件', value: totalEvents, color: '#2ecc71' },
@@ -4710,13 +8359,12 @@ MyView.prototype.renderDashboard = function(container) {
         { label: '🏰 阵营', value: totalFactions, color: '#9b59b6' }
     ];
     for (var i = 0; i < statCards.length; i++) {
-        var card = statsGrid.createEl('div');
-        card.style.cssText = 'background:white;border-radius:8px;padding:12px;text-align:center;border:1px solid #e0e0e0;';
-        card.innerHTML = '<div style="font-size:24px;">' + statCards[i].label.split(' ')[0] + '</div><div style="font-size:22px;font-weight:bold;color:' + statCards[i].color + ';">' + statCards[i].value + '</div><div style="font-size:11px;color:#888;">' + statCards[i].label.substring(2) + '</div>';
+        var card = statsGrid.createEl('div', { cls: 'my-char-stat-card' });
+        card.innerHTML = '<div class="my-char-stat-icon">' + statCards[i].label.split(' ')[0] + '</div><div class="my-char-stat-value" style="color:' + statCards[i].color + ';">' + statCards[i].value + '</div><div class="my-char-stat-label">' + statCards[i].label.substring(2) + '</div>';
     }
 
     var statusGrid = container.createEl('div');
-    statusGrid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:10px;margin-bottom:20px;';
+    statusGrid.className = 'my-char-status-grid';
     var statusItems = [
         { key: 'alive', label: '🟢 存活', count: statusCounts.alive || 0 },
         { key: 'dead', label: '🔴 已故', count: statusCounts.dead || 0 },
@@ -4726,19 +8374,19 @@ MyView.prototype.renderDashboard = function(container) {
     ];
     for (var i = 0; i < statusItems.length; i++) {
         var item = statusItems[i];
-        var card = statusGrid.createEl('div');
+        var card = statusGrid.createEl('div', { cls: 'my-char-status-card' });
         var color = getStatusColor(item.key);
-        card.style.cssText = 'background:white;border-radius:6px;padding:8px;text-align:center;border:1px solid #e0e0e0;border-left:3px solid ' + color + ';';
-        card.innerHTML = '<div style="font-size:20px;font-weight:bold;color:' + color + ';">' + item.count + '</div><div style="font-size:11px;color:#888;">' + item.label + '</div>';
+        card.style.setProperty('--status-color', color);
+        card.innerHTML = '<div class="my-char-stat-value" style="font-size:20px;color:' + color + ';">' + item.count + '</div><div class="my-char-stat-label">' + item.label + '</div>';
     }
 
     // ===== 待办提醒（可点击，带横幅） =====
     var todoSection = container.createEl('div');
-    todoSection.style.cssText = 'background:#fef9f0;border-radius:8px;padding:12px 16px;margin-bottom:20px;border-left:4px solid #f39c12;';
-    todoSection.createEl('div', { text: '⚠️ 待办提醒（点击条目查看）' }).style.cssText = 'font-weight:bold;font-size:14px;margin-bottom:8px;color:#e67e22;';
+    todoSection.className = 'my-char-todo-panel';
+    todoSection.createEl('div', { text: '⚠️ 待办提醒（点击条目查看）', cls: 'my-char-todo-title' });
 
     var todoList = todoSection.createEl('div');
-    todoList.style.cssText = 'display:flex;flex-direction:column;gap:4px;';
+    todoList.className = 'my-char-section';
 
     var todos = [];
     if (notAppearedChars > 0) {
@@ -4751,26 +8399,138 @@ MyView.prototype.renderDashboard = function(container) {
         todos.push({ text: '⚠️ ' + deadAfterAppearNames.length + ' 个角色已故后仍出场 → 点击查看', severity: 'high', action: function() { self.showDeadAfterAppear(); } });
     }
 
+    var firstAppearIssues = novelExt.auditFirstAppearSync(this);
+    if (firstAppearIssues.length > 0) {
+        var missingCount = firstAppearIssues.filter(function(i) { return i.type === 'missing_on_char'; }).length;
+        if (missingCount > 0) {
+            todos.push({
+                text: '📌 ' + missingCount + ' 个人物时间线已出场但档案未填 → 点击一键补全',
+                severity: 'medium',
+                action: function() { self.fixAllMissingFirstAppear(); }
+            });
+        }
+        var mismatchCount = firstAppearIssues.filter(function(i) { return i.type === 'mismatch'; }).length;
+        if (mismatchCount > 0) {
+            todos.push({
+                text: '⚠️ ' + mismatchCount + ' 个首次出场与时间线不一致 → 点击查看',
+                severity: 'high',
+                action: function() {
+                    self.tab = 'dashboard';
+                    self.render();
+                }
+            });
+        }
+    }
+
     if (todos.length === 0) {
-        todoList.createEl('div', { text: '✅ 暂无待办事项' }).style.cssText = 'color:#27ae60;font-size:13px;padding:4px 0;';
+        todoList.createEl('div', { text: '✅ 暂无待办事项', cls: 'my-char-todo-ok' });
     } else {
         for (var i = 0; i < todos.length; i++) {
             (function(todo) {
-                var row = todoList.createEl('div');
-                row.style.cssText = 'font-size:12px;padding:6px 10px;border-bottom:1px solid #f0e8d8;cursor:pointer;border-radius:4px;';
-                row.style.color = todo.severity === 'high' ? '#e74c3c' : '#555';
-                row.style.fontWeight = todo.severity === 'high' ? 'bold' : 'normal';
+                var row = todoList.createEl('div', { cls: 'my-char-todo-item' + (todo.severity === 'high' ? ' is-high' : '') });
                 row.textContent = todo.text;
-                row.addEventListener('mouseenter', function() { row.style.background = '#f0e8d8'; });
-                row.addEventListener('mouseleave', function() { row.style.background = 'transparent'; });
                 row.addEventListener('click', function() { todo.action(); });
             })(todos[i]);
         }
     }
 
+    if (firstAppearIssues.length > 0) {
+        var faSection = container.createEl('div', { cls: 'my-char-todo-panel' });
+        faSection.style.borderLeftColor = 'var(--char-accent)';
+        var faTitle = faSection.createEl('div', { text: '🔵 首次出场联动（' + firstAppearIssues.length + ' 条）', cls: 'my-char-todo-title' });
+        faTitle.style.color = 'var(--char-accent)';
+        var faList = faSection.createEl('div', { cls: 'my-char-section' });
+
+        var missingItems = firstAppearIssues.filter(function(i) { return i.type === 'missing_on_char'; });
+        if (missingItems.length > 0) {
+            var batchBtn = faSection.createEl('button', { text: '⚡ 一键补全 ' + missingItems.length + ' 个缺失', cls: 'my-char-view-btn my-char-btn-sm' });
+            batchBtn.style.marginBottom = '8px';
+            batchBtn.addEventListener('click', function() { self.fixAllMissingFirstAppear(); });
+        }
+
+        var showFa = Math.min(8, firstAppearIssues.length);
+        for (var fai = 0; fai < showFa; fai++) {
+            (function(issue) {
+                var row = faList.createEl('div', { cls: 'my-char-todo-item' + (issue.severity === 'high' ? ' is-high' : '') });
+                row.textContent = issue.message;
+                if (issue.type === 'missing_on_char') {
+                    row.title = '点击写入人物档案';
+                } else if (issue.type === 'mismatch') {
+                    row.title = '点击用时间线「' + issue.timelineValue + '」覆盖档案';
+                } else {
+                    row.title = '点击跳转时间线';
+                }
+                row.addEventListener('click', function() {
+                    if (issue.type === 'mismatch') {
+                        self.fixFirstAppearIssue(issue, true);
+                    } else {
+                        self.fixFirstAppearIssue(issue);
+                    }
+                });
+            })(firstAppearIssues[fai]);
+        }
+        if (firstAppearIssues.length > showFa) {
+            faList.createEl('div', { text: '…还有 ' + (firstAppearIssues.length - showFa) + ' 条', cls: 'my-char-muted' });
+        }
+    }
+
+    var unredeemedLines = novelExt.getUnredeemedPlotLines(this.timeline);
+    if (unredeemedLines.length > 0) {
+        var plotSection = container.createEl('div', { cls: 'my-char-todo-panel' });
+        plotSection.style.borderLeftColor = 'var(--char-purple)';
+        plotSection.createEl('div', { text: '🧵 未回收伏笔 / 情节线（' + unredeemedLines.length + ' 条）', cls: 'my-char-todo-title' });
+        plotSection.lastChild.style.color = 'var(--char-purple)';
+        var plotList = plotSection.createEl('div', { cls: 'my-char-section' });
+        var showPlots = Math.min(8, unredeemedLines.length);
+        for (var pi = 0; pi < showPlots; pi++) {
+            (function(grp) {
+                var row = plotList.createEl('div', { cls: 'my-char-todo-item' });
+                var lastEvt = grp.events[grp.events.length - 1];
+                var loc = (lastEvt.volume ? lastEvt.volume + ' / ' : '') + lastEvt.year;
+                row.textContent = grp.plotLine + ' · ' + (grp.latestStatus || '进行中') + ' · ' + grp.events.length + '个节点 — 最新：' + lastEvt.event.substring(0, 24);
+                row.title = '最新位置：' + loc;
+                row.addEventListener('click', function() {
+                    self.tab = 'timeline';
+                    self._plotLineFilter = grp.plotLine;
+                    self.render();
+                });
+            })(unredeemedLines[pi]);
+        }
+    }
+
+    var plotWarnings = novelExt.validatePlotLines(this.timeline);
+    if (plotWarnings.length > 0) {
+        var warnSection = container.createEl('div', { cls: 'my-char-todo-panel' });
+        warnSection.style.borderLeftColor = 'var(--color-orange, #e67e22)';
+        warnSection.createEl('div', { text: '⚠️ 伏笔逻辑提醒（' + plotWarnings.length + ' 条）', cls: 'my-char-todo-title' });
+        warnSection.lastChild.style.color = 'var(--color-orange, #e67e22)';
+        var warnList = warnSection.createEl('div', { cls: 'my-char-section' });
+        var showWarns = Math.min(6, plotWarnings.length);
+        for (var wi = 0; wi < showWarns; wi++) {
+            (function(w) {
+                var wrow = warnList.createEl('div', { cls: 'my-char-todo-item' + (w.severity === 'high' ? ' is-high' : '') });
+                wrow.textContent = w.message;
+                if (w.event) {
+                    wrow.addEventListener('click', function() {
+                        self.tab = 'timeline';
+                        if (w.plotLine) self._plotLineFilter = w.plotLine;
+                        self.render();
+                        self.showEditEvent(w.event);
+                    });
+                } else if (w.plotLine) {
+                    wrow.addEventListener('click', function() {
+                        self.tab = 'timeline';
+                        self._plotLineFilter = w.plotLine;
+                        self.render();
+                    });
+                }
+            })(plotWarnings[wi]);
+        }
+    }
+
     // ===== 时间线进度 =====
     var progressSection = container.createEl('div');
-    progressSection.style.cssText = 'background:white;border-radius:8px;padding:12px 16px;margin-bottom:20px;border:1px solid #e0e0e0;';
+    progressSection.className = 'my-char-panel-card';
     progressSection.createEl('div', { text: '⏳ 时间线进度' }).style.cssText = 'font-weight:bold;font-size:14px;margin-bottom:8px;';
 
     var allYears = [];
@@ -4818,7 +8578,7 @@ MyView.prototype.renderDashboard = function(container) {
 
     // ===== 最近活动（基于当前时间点） =====
     var recentSection = container.createEl('div');
-    recentSection.style.cssText = 'background:white;border-radius:8px;padding:12px 16px;border:1px solid #e0e0e0;';
+    recentSection.className = 'my-char-panel-card';
     recentSection.createEl('div', { text: '📝 最近活动（当前时间点之前）' }).style.cssText = 'font-weight:bold;font-size:14px;margin-bottom:8px;';
 
     // 获取当前时间点的数值
@@ -4890,74 +8650,7 @@ MyView.prototype.renderDashboard = function(container) {
     });
 };
 
-// ========== 修改 renderCurrentTab（添加 dashboard） ==========
-
-var __origRenderCurrentTabFinal = MyView.prototype.renderCurrentTab;
-MyView.prototype.renderCurrentTab = function(container) {
-    container.empty();
-    var tabContent = container.createEl('div');
-    tabContent.className = 'tab-content';
-    tabContent.style.cssText = 'flex:1;overflow-y:auto;min-height:0;';
-    switch (this.tab) {
-        case 'chars': this.renderChars(tabContent); break;
-        case 'factions': this.renderFactions(tabContent); break;
-        case 'relations': this.renderRelations(tabContent); break;
-        case 'timeline': this.renderTimeline(tabContent); break;
-        case 'lifecycle': this.renderLifecycle(tabContent); break;
-        case 'statistics': this.renderStatistics(tabContent); break;
-        case 'importexport': this.renderImportExport(tabContent); break;
-        case 'dashboard': this.renderDashboard(tabContent); break;
-        case 'heatmap': this.renderHeatmap(tabContent); break;
-        default: this.renderChars(tabContent);
-    }
-};
-
-// ========== 修改 render（添加仪表盘 Tab） ==========
-
-var __origRenderFinal = MyView.prototype.render;
-MyView.prototype.render = function() {
-    if (this._rendering) return;
-    this._rendering = true;
-    var container = this.contentEl;
-    container.empty();
-    container.addClass('my-char-view-root');
-    var self = this;
-
-    var headerRow = container.createEl('div', { cls: 'my-char-view-header' });
-    headerRow.createEl('h2', { text: getViewTitle(this.plugin) });
-    if (this.tab !== 'chars' && this.tab !== 'dashboard') {
-        var backBtn = headerRow.createEl('button', { text: '🏠 返回主页', cls: 'my-char-view-btn my-char-view-btn-secondary' });
-        backBtn.addEventListener('click', function() { self.tab = 'chars'; self.searchText = ''; self.selectedTag = ''; self.render(); });
-    }
-
-    var toolbar = container.createEl('div', { cls: 'my-char-view-toolbar' });
-    var refreshBtn = toolbar.createEl('button', { text: '🔄 刷新数据', cls: 'my-char-view-btn' });
-    refreshBtn.addEventListener('click', function() { self.loadAllData().then(function() { self.render(); }); });
-    var applyConfigBtn = toolbar.createEl('button', { text: '应用字段设置', cls: 'my-char-view-btn my-char-view-btn-success' });
-    applyConfigBtn.addEventListener('click', function() { self.loadAllData().then(function() { self.render(); }); new obsidian.Notice('已重新加载并应用字段设置'); });
-    toolbar.createEl('span', { text: '人物:' + this.chars.length + ' | 阵营:' + this.factions.length + ' | 关系:' + this.relations.length, cls: 'my-char-view-stats' });
-
-    var tabs = container.createEl('div', { cls: 'my-char-view-tabs' });
-    ensureValidTab(this);
-    var tabNames = getVisibleTabs(this.plugin);
-    for (var i = 0; i < tabNames.length; i++) {
-        (function(tab) {
-            var btn = tabs.createEl('button', { text: tab.label });
-            btn.className = 'my-char-view-tab-btn' + (self.tab === tab.id ? ' is-active' : '');
-            btn.addEventListener('click', function() { self.tab = tab.id; self.searchText = ''; self.selectedTag = ''; self.render(); });
-        })(tabNames[i]);
-    }
-
-    var content = container.createEl('div', { cls: 'my-char-view-content' });
-    if (this.chars.length === 0 && this.tab !== 'importexport' && this.tab !== 'dashboard') {
-        content.createEl('p', { text: '点击"刷新数据"加载文件', cls: 'my-char-view-empty' });
-    } else {
-        try { this.renderCurrentTab(content); } catch (err) { console.error('渲染错误:', err); content.createEl('p', { text: '渲染出错，请查看控制台', cls: 'my-char-view-empty' }); }
-    }
-    this._rendering = false;
-};
-
-// ========== 扩展设置（使用场景、Tab 显示、当前时间点） ==========
+// ========== 扩展设置（使用场景、Tab 显示、术语、当前时间点） ==========
 
 var __origDisplayFinal = SettingTab.prototype.display;
 SettingTab.prototype.display = function() {
@@ -5009,6 +8702,114 @@ SettingTab.prototype.display = function() {
                     refreshCharView(self.app);
                 });
         });
+
+    sceneSection.createEl('h4', { text: '术语自定义（留空则用场景默认）' }).style.cssText = 'margin:16px 0 8px;font-size:13px;font-weight:bold;color:var(--text-muted);';
+    var termFields = [
+        { key: 'entity', label: '实体', placeholder: '人物 / 概念 / 角色' },
+        { key: 'faction', label: '分组', placeholder: '阵营 / 分类' },
+        { key: 'relation', label: '关联', placeholder: '关系 / 关联' },
+        { key: 'timeline', label: '时间轴', placeholder: '时间线 / 日记 / 脉络' },
+        { key: 'event', label: '事件', placeholder: '事件 / 记录 / 节点' }
+    ];
+    if (!this.plugin.settings.termLabels) this.plugin.settings.termLabels = {};
+    for (var tfi = 0; tfi < termFields.length; tfi++) {
+        (function(field) {
+            new obsidian.Setting(sceneSection)
+                .setName(field.label + '名称')
+                .setDesc('界面中「' + field.label + '」的显示用词')
+                .addText(function(text) {
+                    text.setPlaceholder(field.placeholder)
+                        .setValue(self.plugin.settings.termLabels[field.key] || '')
+                        .onChange(async function(value) {
+                            if (!self.plugin.settings.termLabels) self.plugin.settings.termLabels = {};
+                            self.plugin.settings.termLabels[field.key] = value.trim();
+                            self.plugin.settings.useCaseMode = 'custom';
+                            await self.plugin.saveSettings();
+                            refreshCharView(self.app);
+                        });
+                });
+        })(termFields[tfi]);
+    }
+
+    new obsidian.Setting(sceneSection)
+        .setName('小说精简 Tab')
+        .setDesc('开启后默认只显示人物/时间线/关系/仪表盘等核心 Tab，其余收在「更多功能」')
+        .addToggle(function(toggle) {
+            toggle.setValue(self.plugin.settings.novelCompactUI !== false);
+            toggle.onChange(async function(value) {
+                self.plugin.settings.novelCompactUI = value;
+                await self.plugin.saveSettings();
+                refreshCharView(self.app);
+            });
+        });
+
+    new obsidian.Setting(sceneSection)
+        .setName('默认收起顶栏')
+        .setDesc('小屏幕时可收起标题、工具栏、故事进度与 Tab，仅保留一行精简栏（视图中也可随时切换）')
+        .addToggle(function(toggle) {
+            toggle.setValue(!!self.plugin.settings.topChromeCollapsed);
+            toggle.onChange(async function(value) {
+                self.plugin.settings.topChromeCollapsed = value;
+                await self.plugin.saveSettings();
+                refreshCharView(self.app);
+            });
+        });
+
+    new obsidian.Setting(sceneSection)
+        .setName('出场事件自动同步首次出场')
+        .setDesc('时间线事件标签为 [出场]/[登场] 时，自动写入人物档案中的「首次出场」字段（已有值且不一致时跳过，可在仪表盘修复）')
+        .addToggle(function(toggle) {
+            toggle.setValue(self.plugin.settings.syncFirstAppearOnEvent !== false);
+            toggle.onChange(async function(value) {
+                self.plugin.settings.syncFirstAppearOnEvent = value;
+                await self.plugin.saveSettings();
+            });
+        });
+
+    new obsidian.Setting(sceneSection)
+        .setName('时间线结构模式')
+        .setDesc('auto=自动识别卷章；chapter=分卷分章；historical=历史年代表')
+        .addDropdown(function(dropdown) {
+            dropdown.addOption('auto', '自动识别');
+            dropdown.addOption('chapter', '分卷 / 分章');
+            dropdown.addOption('historical', '历史年份');
+            dropdown.setValue(self.plugin.settings.timelineMode || 'auto');
+            dropdown.onChange(async function(value) {
+                self.plugin.settings.timelineMode = value;
+                await self.plugin.saveSettings();
+                refreshCharView(self.app);
+            });
+        });
+
+    new obsidian.Setting(sceneSection)
+        .setName('关系同步到 Markdown')
+        .setDesc('保存关系/阵营时写入「关系与阵营.md」，与 json 双备份')
+        .addToggle(function(toggle) {
+            toggle.setValue(self.plugin.settings.syncRelationsToMd !== false);
+            toggle.onChange(async function(value) {
+                self.plugin.settings.syncRelationsToMd = value;
+                await self.plugin.saveSettings();
+            });
+        });
+
+    sceneSection.createEl('h4', { text: '📖 小说事件标签预设' }).style.cssText = 'margin:16px 0 8px;font-size:13px;font-weight:bold;color:var(--text-muted);';
+    var tagPresetRow = sceneSection.createEl('div');
+    tagPresetRow.className = 'my-char-btn-group';
+    var presetKeys = Object.keys(novelExt.NOVEL_TAG_PRESETS);
+    for (var pi = 0; pi < presetKeys.length; pi++) {
+        (function(key) {
+            var p = novelExt.NOVEL_TAG_PRESETS[key];
+            var btn = tagPresetRow.createEl('button', { text: p.label });
+            btn.className = 'my-char-view-btn my-char-btn-sm';
+            btn.addEventListener('click', async function() {
+                novelExt.applyNovelTagPreset(self.plugin, key);
+                await self.plugin.saveSettings();
+                invalidateTagCache(self.plugin);
+                refreshCharView(self.app);
+                new obsidian.Notice('已应用标签预设：' + p.label);
+            });
+        })(presetKeys[pi]);
+    }
 
     sceneSection.createEl('h4', { text: 'Tab 显示开关' }).style.cssText = 'margin:16px 0 8px;font-size:13px;font-weight:bold;color:var(--text-muted);';
     var tabToggleBox = sceneSection.createEl('div');
@@ -5072,7 +8873,12 @@ MyPlugin.prototype.loadSettings = async function() {
         deathFieldNames: '死亡,死亡时间', birthFieldNames: '出生,出生时间',
         firstAppearFieldName: '首次出场', intimateFieldName: '亲密人物',
         preset: 'default', customEventTags: [], customIntimacyLevels: '',
-        currentTimePoint: '', useCaseMode: 'novel', hiddenTabs: [], viewTitle: ''
+        currentTimePoint: '', useCaseMode: 'novel', hiddenTabs: [], viewTitle: '',
+        termLabels: {}, tabLabels: {}, graphNotesFolder: '', syncGraphOnSave: true,
+        graphSyncMode: 'all', graphSyncTypes: [],
+        novelCompactUI: true, topChromeCollapsed: false, timelineMode: 'auto', syncRelationsToMd: true,
+        syncFirstAppearOnEvent: true,
+        relationMetaFile: '关系与阵营.md', novelTagPreset: 'gudai'
     };
     var loaded = await this.loadData() || {};
     this.settings = Object.assign({}, defaults, loaded);
@@ -5268,21 +9074,21 @@ function buildHeatmapData(view, options) {
 MyView.prototype.renderHeatmap = function(container) {
     var self = this;
     container.empty();
-    container.style.cssText = 'padding:10px;overflow-y:auto;';
+    container.classList.add('my-char-scroll-section');
 
     // 检查是否有数据
     if (this.timeline.length === 0 || this.chars.length === 0) {
         container.createEl('p', {
             text: '📭 没有数据。请在当前文件夹创建「人物索引.md」和「时间线.md」',
             cls: 'my-char-view-empty'
-        }).style.cssText = 'text-align:center;color:#888;padding:40px;';
+        }); /* empty state via cls */
         return;
     }
 
     // ===== 获取所有年份 =====
     var allYears = getTimelineYears(this);
     if (allYears.length === 0) {
-        container.createEl('p', { text: '📭 时间线中没有年份数据' }).style.cssText = 'text-align:center;color:#888;padding:40px;';
+        container.createEl('p', { text: '📭 时间线中没有年份数据' }); /* empty state via cls */
         return;
     }
 
@@ -5295,23 +9101,23 @@ MyView.prototype.renderHeatmap = function(container) {
 
     // ===== 标题 =====
     var titleRow = container.createEl('div');
-    titleRow.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;';
-    titleRow.createEl('h3', { text: '🔥 出场热力图' }).style.cssText = 'margin:0;';
+    titleRow.className = 'my-char-faction-header';
+    titleRow.createEl('h3', { text: '🔥 出场热力图' });
 
     var modeHint = titleRow.createEl('span');
-    modeHint.style.cssText = 'font-size:11px;color:#888;';
+    modeHint.className = 'my-char-muted';
     if (this.heatmapMode === '集中') modeHint.textContent = '📋 集中视图 · 显示所有人物';
     else if (this.heatmapMode === '单人') modeHint.textContent = '👤 单人深度视图 · 查看单个角色出场轨迹';
     else modeHint.textContent = '👥 多人对比视图 · 对比多个角色出场频率';
 
     // ===== 工具栏 =====
     var toolbar = container.createEl('div');
-    toolbar.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;padding:10px 14px;background:#f8f9fa;border-radius:8px;align-items:center;border:1px solid #e8e8e8;';
+    toolbar.className = 'my-char-heatmap-toolbar';
 
     // 模式切换
-    toolbar.createEl('span', { text: '📐 模式:' }).style.cssText = 'font-size:12px;color:#666;font-weight:bold;';
+    toolbar.createEl('span', { text: '📐 模式:', cls: 'my-char-filter-label' });
     var modeSelect = toolbar.createEl('select');
-    modeSelect.style.cssText = 'padding:4px 10px;border-radius:4px;border:1px solid #ddd;font-size:12px;background:white;';
+    modeSelect.className = 'my-char-select';
     var modes = ['集中', '单人', '多人'];
     for (var mi = 0; mi < modes.length; mi++) {
         var opt = document.createElement('option');
@@ -5339,9 +9145,9 @@ MyView.prototype.renderHeatmap = function(container) {
     });
 
     // 粒度切换
-    toolbar.createEl('span', { text: '粒度:' }).style.cssText = 'font-size:12px;color:#666;font-weight:bold;margin-left:8px;';
+    toolbar.createEl('span', { text: '粒度:', cls: 'my-char-filter-label' }); toolbar.lastChild.style.marginLeft = '8px';
     var granularitySelect = toolbar.createEl('select');
-    granularitySelect.style.cssText = 'padding:4px 10px;border-radius:4px;border:1px solid #ddd;font-size:12px;background:white;';
+    granularitySelect.className = 'my-char-select';
     var granularities = ['年', '半年', '季度'];
     for (var gi = 0; gi < granularities.length; gi++) {
         var opt2 = document.createElement('option');
@@ -5357,9 +9163,9 @@ MyView.prototype.renderHeatmap = function(container) {
 
     // 类型筛选（集中模式才有）
     if (this.heatmapMode === '集中') {
-        toolbar.createEl('span', { text: '类型:' }).style.cssText = 'font-size:12px;color:#666;font-weight:bold;margin-left:8px;';
+        toolbar.createEl('span', { text: '类型:', cls: 'my-char-filter-label' }); toolbar.lastChild.style.marginLeft = '8px';
         var typeSelect = toolbar.createEl('select');
-        typeSelect.style.cssText = 'padding:4px 10px;border-radius:4px;border:1px solid #ddd;font-size:12px;background:white;';
+        typeSelect.className = 'my-char-select';
 
         var typeSet = {};
         for (var i = 0; i < this.chars.length; i++) {
@@ -5404,9 +9210,9 @@ MyView.prototype.renderHeatmap = function(container) {
 
     // 搜索框（集中模式）
     if (this.heatmapMode === '集中') {
-        toolbar.createEl('span', { text: '🔍' }).style.cssText = 'font-size:12px;color:#666;margin-left:8px;';
+        toolbar.createEl('span', { text: '🔍', cls: 'my-char-filter-label' }); toolbar.lastChild.style.marginLeft = '8px';
         var searchInput = toolbar.createEl('input', { type: 'text', placeholder: '搜索人物...' });
-        searchInput.style.cssText = 'flex:1;min-width:100px;padding:4px 10px;border:1px solid #ddd;border-radius:4px;font-size:12px;';
+        searchInput.className = 'my-char-input-inline'; searchInput.style.flex = '1';
         searchInput.value = this.heatmapSearchText || '';
         searchInput.addEventListener('input', debounce(function() {
             self.heatmapSearchText = searchInput.value;
@@ -5417,12 +9223,12 @@ MyView.prototype.renderHeatmap = function(container) {
 
     // ===== 年份滑块 =====
     var sliderRow = container.createEl('div');
-    sliderRow.style.cssText = 'display:flex;align-items:center;gap:12px;margin-bottom:12px;padding:8px 14px;background:#f5f7fa;border-radius:6px;flex-wrap:wrap;border:1px solid #e8e8e8;';
+    sliderRow.className = 'my-char-heatmap-slider';
 
-    sliderRow.createEl('span', { text: '📅 年份范围:' }).style.cssText = 'font-size:12px;color:#666;font-weight:bold;';
+    sliderRow.createEl('span', { text: '📅 年份范围:', cls: 'my-char-filter-label' });
 
     var startYearDisplay = sliderRow.createEl('span');
-    startYearDisplay.style.cssText = 'font-size:13px;font-weight:bold;color:#4a90e2;min-width:60px;';
+    startYearDisplay.className = 'my-char-heatmap-year';
 
     var sliderWrapper = sliderRow.createEl('div');
     sliderWrapper.style.cssText = 'flex:1;min-width:150px;display:flex;align-items:center;gap:8px;';
@@ -5442,7 +9248,7 @@ MyView.prototype.renderHeatmap = function(container) {
     endSlider.step = 1;
 
     var endYearDisplay = sliderRow.createEl('span');
-    endYearDisplay.style.cssText = 'font-size:13px;font-weight:bold;color:#4a90e2;min-width:60px;';
+    endYearDisplay.className = 'my-char-heatmap-year';
 
     function updateSliderDisplay() {
         var s = parseInt(startSlider.value);
@@ -5783,10 +9589,10 @@ for (var si5 = 0; si5 < data.timeSlots.length; si5++) {
 
     // ===== 底部 =====
     var footer = container.createEl('div');
-    footer.style.cssText = 'display:flex;flex-wrap:wrap;gap:12px;padding:10px 0;align-items:center;justify-content:space-between;border-top:1px solid #eee;margin-top:8px;';
+    footer.className = 'my-char-heatmap-footer';
 
     var statsLeft = footer.createEl('div');
-    statsLeft.style.cssText = 'display:flex;gap:16px;font-size:12px;color:#666;flex-wrap:wrap;';
+    statsLeft.className = 'my-char-chip-list'; statsLeft.style.fontSize = '12px';
     statsLeft.createEl('span', { text: '👥 显示 ' + data.rows.length + ' 人' });
     statsLeft.createEl('span', { text: '📅 ' + data.timeSlots.length + ' 个时间段' });
     statsLeft.createEl('span', { text: '🔥 最大出场 ' + maxCount + ' 次' });
@@ -5794,10 +9600,10 @@ for (var si5 = 0; si5 < data.timeSlots.length; si5++) {
     // 分页（仅集中模式）
     if (this.heatmapMode === '集中') {
         var pagination = footer.createEl('div');
-        pagination.style.cssText = 'display:flex;gap:4px;align-items:center;';
+        pagination.className = 'my-char-pagination';
 
         var prevBtn = pagination.createEl('button', { text: '◀' });
-        prevBtn.style.cssText = 'padding:2px 12px;border:1px solid #ddd;border-radius:4px;cursor:pointer;background:white;font-size:12px;';
+        prevBtn.className = 'my-char-page-btn';
         prevBtn.addEventListener('click', function() {
             if (data.currentPage > 1) {
                 self.heatmapPage = data.currentPage - 1;
@@ -5816,7 +9622,7 @@ for (var si5 = 0; si5 < data.timeSlots.length; si5++) {
             (function(pg) {
                 var btn = pagination.createEl('button', { text: pg });
                 var isActive = pg === data.currentPage;
-                btn.style.cssText = 'padding:2px 12px;border:1px solid #ddd;border-radius:4px;cursor:pointer;background:' + (isActive ? '#4a90e2' : 'white') + ';color:' + (isActive ? 'white' : '#333') + ';font-size:12px;';
+                btn.className = 'my-char-page-btn' + (isActive ? ' is-active' : '');
                 btn.addEventListener('click', function() {
                     self.heatmapPage = pg;
                     self.renderHeatmap(container);
@@ -5825,7 +9631,7 @@ for (var si5 = 0; si5 < data.timeSlots.length; si5++) {
         }
 
         var nextBtn = pagination.createEl('button', { text: '▶' });
-        nextBtn.style.cssText = 'padding:2px 12px;border:1px solid #ddd;border-radius:4px;cursor:pointer;background:white;font-size:12px;';
+        nextBtn.className = 'my-char-page-btn';
         nextBtn.addEventListener('click', function() {
             if (data.currentPage < data.totalPages) {
                 self.heatmapPage = data.currentPage + 1;
@@ -5840,8 +9646,8 @@ for (var si5 = 0; si5 < data.timeSlots.length; si5++) {
 
     // ===== 图例 =====
     var legend = container.createEl('div');
-    legend.style.cssText = 'display:flex;gap:14px;padding:8px 0;font-size:11px;color:#666;align-items:center;border-top:1px solid #eee;margin-top:4px;flex-wrap:wrap;';
-    legend.createEl('span', { text: '🎨 热度图例:' }).style.cssText = 'font-weight:bold;';
+    legend.className = 'my-char-heatmap-legend';
+    legend.createEl('span', { text: '🎨 热度图例:', cls: 'my-char-filter-label' });
 
     var legendItems = [
         { label: '0次', color: '#f0f0f0', textColor: '#bbb' },
@@ -5853,12 +9659,12 @@ for (var si5 = 0; si5 < data.timeSlots.length; si5++) {
     for (var li = 0; li < legendItems.length; li++) {
         var item = legendItems[li];
         var dot = legend.createEl('span');
-        dot.style.cssText = 'display:inline-block;width:24px;height:16px;background:' + item.color + ';border:1px solid #ddd;border-radius:3px;text-align:center;line-height:16px;font-size:9px;color:' + item.textColor + ';';
-        legend.createEl('span', { text: item.label }).style.cssText = 'margin-right:6px;font-size:10px;';
+        dot.className = 'my-char-heatmap-legend-dot'; dot.style.background = item.color; dot.style.color = item.textColor;
+        legend.createEl('span', { text: item.label, cls: 'my-char-muted' }); legend.lastChild.style.marginRight = '6px'; legend.lastChild.style.fontSize = '10px';
     }
 
     var hint = legend.createEl('span', { text: '💡 点击表头年份查看事件 · 点击人物名查看详情 · 悬停数字查看具体事件' });
-    hint.style.cssText = 'font-size:10px;color:#999;margin-left:auto;';
+    hint.className = 'my-char-muted'; hint.style.fontSize = '10px'; hint.style.marginLeft = 'auto';
 };
 
 module.exports = MyPlugin;
