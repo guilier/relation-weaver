@@ -3,7 +3,7 @@
   "name": "relation-weaver",
   "version": "3.0.0",
   "minAppVersion": "1.4.0",
-  "description": "小说/历史/TRPG/知识库的人物关系管理：时间线、亲密度演化、热力图、情节线追踪、Obsidian原生图谱同步",
+  "description": "小说/历史/TRPG/知识库的人物关系管理：时间线、亲密度演化、热力图、情节线追踪、原生图谱同步",
   "author": "guilier",
   "authorUrl": "https://github.com/guilier",
   "isDesktopOnly": false
