@@ -1,0 +1,28 @@
+{
+  "name": "relation-weaver",
+  "version": "3.0.0",
+  "description": "人物关系谱系 - 小说/历史/TRPG/知识库的人物关系管理插件",
+  "main": "main.js",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "obsidian",
+    "plugin",
+    "character",
+    "relations",
+    "timeline",
+    "writing",
+    "novel",
+    "trpg",
+    "knowledge"
+  ],
+  "author": "guilier",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "esbuild": "^0.19.0",
+    "obsidian": "latest"
+  }
+}
