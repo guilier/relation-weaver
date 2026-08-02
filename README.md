@@ -427,4 +427,3 @@ MIT License
 ---
 
 **If this plugin helps you, give it a ⭐ on GitHub! / 如果这个插件对你有帮助，给个 ⭐ 支持一下吧！**
-```
