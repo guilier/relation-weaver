@@ -1,6 +1,8 @@
-# 📚 人物关系谱系 (Relation Weaver)
+# 📚 Relation Weaver (人物关系谱系)
 
 > An Obsidian plugin for managing characters, factions, relationships, and timelines in novels, TTRPG campaigns, and worldbuilding projects.
+>
+> 一个 Obsidian 插件，用于管理小说、跑团、世界构建中的人物、阵营、关系和时间线。
 
 [![GitHub release (latest by date)](https://img.shields.io/github/v/release/guilier/relation-weaver)](https://github.com/guilier/relation-weaver/releases)
 [![Obsidian Community](https://img.shields.io/badge/Obsidian-Community%20Plugin-7c3aed)](https://obsidian.md)
@@ -8,430 +10,421 @@
 
 ---
 
+## 📖 Table of Contents / 目录
+
+- [About / 插件简介](#about--插件简介)
+- [Installation / 安装与使用](#installation--安装与使用)
+- [What's New in v3.0.1 / v301-新功能](#whats-new-in-v301--v301-新功能)
+- [Data Format / 数据文件格式](#data-format--数据文件格式)
+- [Features Overview / 功能详解](#features-overview--功能详解)
+- [Customization / 自定义配置](#customization--自定义配置)
+- [FAQ / 常见问题](#faq--常见问题)
+- [Changelog / 更新日志](#changelog--更新日志)
+
+---
+
+## About / 插件简介
+
+### What is Relation Weaver? / 这是什么？
+
 **Relation Weaver** helps you track character connections, analyze appearance frequency, visualize intimacy changes over time, and maintain a consistent narrative timeline — all within your Obsidian vault.
 
-> 一个 Obsidian 插件，用于管理小说/世界构建中的人物、阵营、关系和时间线。
+**「人物关系谱系」** 是一款专为创作者设计的 Obsidian 插件，特别适合：
+
+| English | 中文 |
+|---------|------|
+| ✍️ **Novelists** — Manage character relationships, track appearance frequency, plant and resolve plot threads | ✍️ **小说作者** — 管理小说人物关系，追踪出场频率，埋设与回收伏笔 |
+| 🎮 **Game Masters / DMs** — Record NPC connections, adventure timelines, and faction politics | 🎮 **跑团主持人 (GM/DM)** — 记录 NPC 关系和冒险时间线，管理势力阵营 |
+| 📚 **Worldbuilders** — Map out character networks and historical timelines | 📚 **世界构建者** — 梳理世界观中的人物网络与历史脉络 |
+| 📝 **Reading Notes** — Analyze character interactions and relationship dynamics in books | 📝 **读书笔记** — 分析书中人物关系与互动频率 |
+| 🧠 **Knowledge Management** — Concept association and knowledge graph building | 🧠 **知识管理** — 概念关联与知识图谱构建 |
+
+### Key Advantages / 核心优势
+
+| Feature | 说明 |
+|---------|------|
+| 📁 **Pure Markdown Storage** — All data stored in `.md` files, editable manually anytime | 📁 **纯 Markdown 存储** — 所有数据都是 `.md` 文件，你随时可以手动编辑 |
+| 🔄 **Bidirectional Sync** — Relationships and factions backed up in both Markdown and JSON | 🔄 **双向同步** — 关系与阵营在 Markdown 和 JSON 之间双备份 |
+| 🕸️ **Native Graph Integration** — One-click sync to Obsidian's native graph view | 🕸️ **原生图谱集成** — 一键同步到 Obsidian 原生关系图谱，拖拽探索 |
+| 📱 **Cross-Platform** — Works on both desktop and mobile | 📱 **全平台支持** — 桌面端和移动端均可使用 |
+| 🎨 **Highly Customizable** — Field names, tags, intimacy levels, and relation types are all configurable | 🎨 **高度可定制** — 字段名、标签、亲密度等级、关系类型全部可自定义 |
 
 ---
 
-## 📖 目录
+## Installation / 安装与使用
 
-- [插件简介](#插件简介)
-- [安装与使用](#安装与使用)
-- [v3.0.0 新功能](#v300-新功能)
-- [数据文件格式](#数据文件格式)
-- [功能详解](#功能详解)
-- [自定义配置](#自定义配置)
-- [常见问题](#常见问题)
-- [更新日志](#更新日志)
+### Method 1: Obsidian Community Plugin Marketplace (Recommended) / 方式一：Obsidian 社区插件市场（推荐）
 
----
+1. Open Obsidian Settings → Community Plugins → Browse
+2. Search for `Relation Weaver`
+3. Click Install and Enable
 
-## 插件简介
+> 1. 打开 Obsidian 设置 → 社区插件 → 浏览
+> 2. 搜索 `Relation Weaver`
+> 3. 点击安装并启用
 
-### 这是什么？
+### Method 2: Manual Installation / 方式二：手动安装
 
-「人物关系谱系」是一款专为**创作者**设计的 Obsidian 插件，特别适合：
+1. Download the latest release from [Releases](https://github.com/guilier/relation-weaver/releases)
+2. Extract to your vault's `.obsidian/plugins/relation-weaver/` directory
+3. Enable the plugin in Obsidian settings
 
-- ✍️ **小说作者** — 管理小说人物关系，追踪出场频率，埋设与回收伏笔
-- 🎮 **跑团主持人 (GM/DM)** — 记录 NPC 关系和冒险时间线，管理势力阵营
-- 📚 **世界构建者** — 梳理世界观中的人物网络与历史脉络
-- 📝 **读书笔记** — 分析书中人物关系与互动频率
-- 🧠 **知识管理** — 概念关联与知识图谱构建
-
-### 核心优势
-
-| 特性 | 说明 |
-|------|------|
-| 📁 **纯 Markdown 存储** | 所有数据都是 `.md` 文件，你随时可以手动编辑 |
-| 🔄 **双向同步** | 关系与阵营在 Markdown 和 JSON 之间双备份 |
-| 🕸️ **原生图谱集成** | 一键同步到 Obsidian 原生关系图谱，拖拽探索 |
-| 📱 **全平台支持** | 桌面端和移动端均可使用 |
-| 🎨 **高度可定制** | 字段名、标签、亲密度等级、关系类型全部可自定义 |
+> 1. 从 [Releases](https://github.com/guilier/relation-weaver/releases) 下载最新版本
+> 2. 解压到 Vault 的 `.obsidian/plugins/relation-weaver/` 目录
+> 3. 在 Obsidian 中启用插件
 
 ---
 
-## 安装与使用
+## What's New in v3.0.1 / v3.0.1 新功能
 
-### 安装方式
+### 📌 Markdown Bidirectional Sync for Relationships / 关系与阵营 Markdown 双写
 
-#### 方式一：Obsidian 社区插件市场（推荐）
+Relationship data is now stored in both JSON and Markdown:
 
-1. 打开 Obsidian 设置 → 社区插件
-2. 关闭安全模式
-3. 搜索 **人物关系谱系** 或 **Relation Weaver**
-4. 点击安装并启用
+- New `关系与阵营.md` (Relationships & Factions) file in human-readable Markdown format
+- Edit the file directly in Obsidian — the plugin automatically syncs changes
+- JSON + Markdown dual backup for extra data safety
 
-#### 方式二：手动安装
+关系数据现在同时保存在 JSON 和 Markdown 中：
 
-1. 从 [Releases](https://github.com/guilier/relation-weaver/releases) 下载 `main.js` 和 `manifest.json`
-2. 放入 `<你的库>/.obsidian/plugins/relation-weaver/`
-3. 在 Obsidian 设置中启用插件
+- 新增 `关系与阵营.md` 文件，采用易读的 Markdown 格式
+- 在 Obsidian 中直接编辑该文件，插件会自动同步
+- JSON + MD 双备份，数据更安全
 
-#### 方式三：BRAT 安装（测试版）
+**Format Example / 格式示例**：
+```markdown
+# Factions / 阵营
 
-1. 安装 [BRAT](https://github.com/TfTHacker/obsidian-brat) 插件
-2. 添加 `guilier/relation-weaver` 作为测试插件
+## Northern Kingdom / 北境王国
+- Color / 颜色：#4a90e2
+- Description / 描述：The icy kingdom of the north
 
----
+# Relationships / 关系
 
-### 快速上手
-
-**三步开始使用：**
-
-```
-1. 点击左侧边栏「👥」图标 → 打开主视图
-2. 点击「创建场景模板」→ 选择你的使用场景
-3. 开始录入人物和时间线！
-```
-
-| 场景 | 说明 |
-|------|------|
-| 📖 **小说** | 古风/历史创作，含人物、时间线、阵营示例 |
-| 📔 **日记** | 日常记录，轻量化配置 |
-| 🎲 **跑团** | TRPG 角色与冒险日志 |
-| 🧠 **知识库** | 概念与关联，知识图谱构建 |
-
----
-
-## v3.0.0 新功能
-
-### 🧬 亲密度动态演化系统
-
-记录每一次亲密度变化，生成可视化曲线图。
-
-- 每次关系编辑自动记录变化
-- 按故事时间排序生成曲线图
-- 完整变化历史查看与删除
-- 自动识别变化类型：提升 ⬆ / 下降 ⬇ / 持平 ➡
-
-### 🔥 出场热力图
-
-人物出场频率可视化分析。
-
-- **三种模式**：集中视图 / 单人深度 / 多人对比
-- **多粒度**：年 / 半年 / 季度
-- 年份范围滑块自由调整
-- 按类型筛选、人物搜索
-- 悬停查看具体事件，点击跳转时间线
-
-### 🎯 首次出场联动
-
-[出场] 事件与人物档案自动联动。
-
-- 时间线 [出场] 事件自动写入「首次出场」字段
-- 仪表盘检测不一致并高亮提醒
-- 一键补全所有缺失
-- 可开关的自动同步
-
-### 📊 仪表盘全面升级
-
-- 写作进度条（时间线覆盖百分比）
-- 待办提醒（未出场/孤立/已故后出场）
-- 首次出场联动检查清单
-- 伏笔逻辑提醒汇总
-- 最近活动列表
-
-### 🧵 伏笔逻辑自动校验
-
-- 状态顺序检查：埋设 → 推进 → 回收
-- 回收后新事件检测（高亮警告）
-- 状态回退检测
-- 相似情节线名称检测
-- 一键跳转编辑问题事件
-
-### 🗺️ 情节线可视化轨道
-
-- 情节线事件流式展示
-- 按状态着色
-- 点击节点编辑事件
-
-### 📚 多场景模板
-
-一键创建完整文件夹结构：
-
-- 小说 / 日记 / 跑团 / 知识库
-- 自动生成示例人物、时间线、关系
-- 自动切换字段预设和 Tab 布局
-
----
-
-## 数据文件格式
-
-### 文件结构
-
-```
-你的数据文件夹/
-├── 人物索引.md              # 人物数据
-├── 时间线.md                # 时间线事件
-├── 关系与阵营.md            # 关系和阵营（双向同步）
-├── 关系图谱节点/            # Obsidian 图谱节点（自动同步）
-│   ├── 人物A.md
-│   └── 人物B.md
-└── README.md                # 场景说明
+## Zhang San · Li Si / 张三 · 李四
+- Type / 类型：Close Friend / 挚友
+- Intimacy / 亲密度：4
+- Description / 描述：Grew up together / 从小一起长大的生死之交
+- Start / 开始：280 BC / 前280年
 ```
 
-### 人物索引格式 (`人物索引.md`)
+### 📌 Visual Relation Type Manager / 关系类型管理 UI
+
+A new UI panel in Settings for managing relation types:
+
+- Freely add, edit, or delete relation types
+- Changes take effect immediately — no restart required
+
+设置页新增「管理关系类型」可视化面板：
+
+- 自由添加/编辑/删除关系类型
+- 实时生效，无需重启
+
+### 📌 Visual Intimacy Level Manager / 亲密度等级管理 UI
+
+A new UI panel in Settings for managing intimacy levels:
+
+- Freely add, edit, or delete intimacy levels
+- Customize numeric values, display names, and colors
+- Changes take effect immediately
+
+设置页新增「管理亲密度等级」可视化面板：
+
+- 自由添加/编辑/删除亲密度等级
+- 自定义数值、显示名称、颜色
+- 实时生效
+
+### 📌 Enhanced Setting Collection / 设定集增强
+
+- **One-click Update Setting Collection**: Overwrites `设定集.md` in your character folder for easy collaboration
+- Setting collection now includes **Mermaid relationship diagrams**
+- Setting collection includes **first appearance consistency check** results
+- Setting collection includes **plot thread validation** results
+
+- **一键更新设定集**：覆盖人物文件夹下的 `设定集.md`，方便共创编辑
+- 设定集新增 **Mermaid 关系图**
+- 设定集新增 **首次出场一致性检查** 结果
+- 设定集新增 **伏笔逻辑校验** 结果
+
+### 📌 Enhanced Dashboard / 仪表盘增强
+
+- **MD Parse Error Panel**: Invalid relationship lines in character index are displayed with fix suggestions
+- **Appearance Consistency Check**: Detects "appeared before birth" timeline contradictions
+- **One-click Fix Missing First Appearances**: Automatically writes first appearance to character profiles when a `[出场]` event exists in the timeline
+- **Create Snapshot**: Backup directly from the dashboard
+
+- **MD 解析错误面板**：人物索引中格式错误的关系行会显示并提示修复方法
+- **出场一致性检查**：检测「出生前出场」的穿帮问题
+- **一键补全首次出场**：时间线已有 `[出场]` 事件但档案未填的人物，一键写入
+- **创建设定快照**：直接从仪表盘备份
+
+### 📌 Floating Character Quick Reference Panel / 时间线人物速查浮窗
+
+- A draggable character tab panel in the timeline view
+- Click character names to quickly view details
+- Supports search filtering
+- Toggle on/off as needed
+
+- 时间线视图显示可拖动的人物 Tab 弹窗
+- 点击人物名快速查看详情
+- 支持搜索过滤
+- 可开启/关闭
+
+### 📌 Event Tag Manager UI Rewrite / 事件标签管理 UI 重写
+
+- Completely free management of event tags — add, edit, or delete any tag
+- Tag value uniqueness validation
+- No longer forced to keep default tags
+
+- 完全自由添加/编辑/删除事件标签
+- 标签值唯一性校验
+- 不再强制保留默认标签
+
+### 📌 Bug Fixes / 修复
+
+- Character index MD parsing: Now correctly handles `* ` list items
+- Bidirectional relationship sync: Editing relationships now correctly writes to character MD
+- Relationship deletion cascade: Deleting a relationship now cleans up records in character MD
+
+- 人物索引 MD 解析：现在正确处理 `* ` 开头的列表项
+- 关系双向同步：编辑关系时正确写入人物 MD
+- 关系删除联动：删除关系时同步清除人物 MD 中的记录
+
+---
+
+## Data Format / 数据文件格式
+
+### Character Index / 人物索引（`人物索引.md`）
 
 ```markdown
-## 张三
-- 身份：皇帝
-- 类型：主角
-- 阵营：北境王国
-- 首次出场：公元前300年
-- 出生：公元前280年
-- 死亡：前200年
-- 亲密人物：李四
+## Character Name / 姓名
+- Field1: Value1 / 字段1：值1
+- Field2: Value2 / 字段2：值2
+- Type: Protagonist/Supporting/Extra / 类型：主角/配角/龙套
 
-## 李四
-- 身份：将军
-- 类型：配角
-- 阵营：北境王国
-- 出生：290年
+### Relationships / 关系
+- Other: Li Si | Type: Close Friend | Intimacy: 4
+- 对方：李四｜类型：挚友｜亲密度：4
+
+### Relationship Changes / 关系变化
+- Other: Li Si | Old: 3 | New: 4 | Reason: Survived a crisis together | Time: 280 BC
+- 对方：李四｜旧：3｜新：4｜原因：共同经历生死｜时间：前280年
 ```
 
-### 时间线格式 (`时间线.md`)
+### Timeline / 时间线（`时间线.md`）
 
 ```markdown
-## 300年
-### 春季：
-- [战争] 张三率军出征 | 情节线:主线-A | 状态:埋设 | 笔记:[[第一章]]
-- [政治] 李四受封将军
+## Year/Chapter / 年份/章节
 
-### 秋季：
-- [出场] 张三与李四凯旋 | 情节线:主线-A | 状态:推进
-
-## 301年
-- [日常] 张三与李四饮酒
+### Month/Scene: / 月份/场景：
+- [Tag] Event description | Plot: Main-A | Status: Plant/Advance/Resolve | Note: [[Link]]
+- [标签] 事件内容 | 情节线:xxx | 状态:埋设/推进/回收 | 笔记:[[链接]]
 ```
 
-### 关系与阵营格式 (`关系与阵营.md`)
+### Relationships & Factions / 关系与阵营（`关系与阵营.md`）
 
 ```markdown
-# 阵营
+# Factions / 阵营
 
-## 北境王国
-- 颜色：#3498db
-- 描述：北方强国
+## Faction Name / 阵营名
+- Color / 颜色：#4a90e2
+- Description / 描述：Description text
 
-# 关系
+# Relationships / 关系
 
-## 张三 · 李四
-- 类型：君臣
-- 亲密度：4
-- 描述：皇帝与将军
-- 开始：300年
+## Character A · Character B / 人物A · 人物B
+- Type / 类型：Relationship type
+- Intimacy / 亲密度：Number
+- Description / 描述：Description text
+- Start / 开始：Start time
+- End / 结束：End time
 ```
 
 ---
 
-## 功能详解
+## Features Overview / 功能详解
 
-### 👥 人物管理
+### 👥 Character Management / 人物管理
 
-| 功能 | 说明 |
-|------|------|
-| 人物列表 | 按阵营分组，显示状态徽章 |
-| 状态筛选 | 存活 / 已故 / 未出生 / 未知 / 失踪 |
-| 类型筛选 | 主角 / 配角 / 龙套（自动扫描） |
-| 搜索 | 人物名、身份、阵营、死亡等 |
-| 快速添加 | 弹窗快速录入新人物 |
-| 详情弹窗 | 查看人物所有信息、关系、出场事件 |
+| English | 中文 |
+|---------|------|
+| Markdown-based character index (`## Name` + `- Field: Value`) | 基于 Markdown 的人物索引（`## 姓名` + `- 字段：值`） |
+| Customizable fields (identity, faction, birth, death, first appearance, etc.) | 自定义字段（身份、阵营、出生、死亡、首次出场……） |
+| Auto-updating status badges (Alive/Deceased/Unborn/Unknown) based on the **current timeline point** | 人物状态徽章（存活/已故/未出生/未知），基于**当前时间点**自动判断 |
 
-### 📅 时间线
+### 🔗 Relationship Graph / 关系图谱
 
-| 功能 | 说明 |
-|------|------|
-| 三种模式 | 自动识别 / 分卷分章 / 历史年份 |
-| 标签系统 | 完全自定义，可视化管理 |
-| 情节线 | 埋设 → 推进 → 回收 三状态 |
-| 伏笔校验 | 自动检测逻辑问题 |
-| 年份搜索 | 支持关键词和数值搜索 |
-| 折叠/展开 | 年份和月份级折叠 |
+| English | 中文 |
+|---------|------|
+| Bidirectional character relationships (fully customizable) | 双向人物关系（父子、师徒、恋人、敌人……完全自定义） |
+| Intimacy system (-3 to 5 levels, fully customizable) | 亲密度系统（-3 ~ 5 级，支持自定义等级） |
+| **Intimacy Evolution**: Track relationship changes over time with visual intimacy curves | **亲密度动态演化**：记录关系变化历史，可视化亲密度曲线 |
+| Relationship time ranges (start/end dates) with timeline filtering | 关系时间范围（开始/结束时间），配合时间点过滤 |
 
-### 🔗 关系网络
+### 📅 Timeline / 时间线
 
-| 功能 | 说明 |
-|------|------|
-| 关系管理 | 双向关系，支持类型、亲密度、描述 |
-| 亲密度等级 | 完全自定义（数值/标签/颜色） |
-| 动态演化 | 变化历史记录 + 曲线图 |
-| 智能建议 | 基于共同出场自动推荐关系 |
-| 批量操作 | 按类型删除/更新亲密度 |
-| CSV 导出 | 一键导出所有关系数据 |
+| English | 中文 |
+|---------|------|
+| Year + month structure with auto-parsing | 支持「年份+月份」结构，自动解析 |
+| Fully customizable event tag system | 事件标签系统（完全自定义） |
+| **Plot Thread Tracking**: Plant → Advance → Resolve | **情节线追踪**：埋设 → 推进 → 回收 |
+| Auto-validation of plot logic (events after resolution, status regression, etc.) | 伏笔逻辑自动校验（回收后仍有事件、状态倒退等） |
 
-### 🔥 热力图
+### 🔥 Appearance Heatmap / 出场热力图
 
-| 功能 | 说明 |
-|------|------|
-| 三种模式 | 集中 / 单人 / 多人对比 |
-| 粒度控制 | 年 / 半年 / 季度 |
-| 年份范围 | 双滑块自由调整 |
-| 筛选 | 按类型筛选 + 人物搜索 |
-| 交互 | 悬停查看事件，点击跳转 |
+| English | 中文 |
+|---------|------|
+| Three modes: Consolidated / Single Character / Multiple Characters | 集中/单人/多人 三种视图模式 |
+| Granularity: Year / Half-year / Quarter | 年/半年/季度 粒度切换 |
+| Selectable year range | 年份范围自由选择 |
+| Hover to see specific events | 悬停显示具体事件 |
 
-### 🕸️ 图谱集成
+### 🔍 Global Search / 全局搜索
 
-| 功能 | 说明 |
-|------|------|
-| 一键同步 | 生成带双向链接的图谱节点 |
-| 类型筛选 | 仅同步选中的类型 |
-| 原生图谱 | 点击节点打开本地图谱 |
-| 全局图谱 | 打开筛选后的全局图谱 |
+- Search across characters, relationships, events, plot threads, and factions simultaneously
+- Click results to jump directly
 
-### 📊 仪表盘
+- 同时搜索人物、关系、事件、情节线、阵营
+- 点击结果直接跳转
 
-| 功能 | 说明 |
-|------|------|
-| 进度条 | 时间线覆盖百分比 |
-| 待办提醒 | 可点击跳转筛选 |
-| 首次出场联动 | 检测不一致，一键补全 |
-| 伏笔提醒 | 逻辑问题汇总 |
-| 最近活动 | 当前时间点之前的事件 |
-| 报告导出 | 导出 Markdown 报告 |
+### 🎯 Current Timeline Point Filtering / 当前时间点过滤
 
----
+- Set the current narrative progress
+- Relationships filtered by start/end dates
+- Timeline hides "future" events
+- Character status auto-updates
 
-## 自定义配置
+- 设置故事当前进度
+- 关系按开始/结束时间过滤
+- 时间线隐藏「未来」事件
+- 人物状态自动更新
 
-### 设置页概览
+### 🕸️ Obsidian Native Graph Sync / Obsidian 原生图谱同步
 
-| 分类 | 可配置项 |
-|------|----------|
-| **数据路径** | 人物文件、时间线文件、图谱节点文件夹 |
-| **字段配置** | 阵营、死亡、出生、首次出场、亲密人物字段名 |
-| **事件标签** | 可视化管理所有标签（自由增删改） |
-| **关系类型** | 可视化管理关系类型列表 |
-| **亲密度等级** | 自定义等级（数值/标签/颜色） |
-| **使用场景** | 一键切换预设 + 自定义术语 |
-| **Tab 开关** | 每个 Tab 独立显示/隐藏 |
-| **图谱同步** | 同步范围、类型筛选 |
+- Filter sync scope by character "Type" (Protagonist/Supporting/Extra)
+- Generates independent notes with `[[wikilinks]]`
+- One-click open native graph (global/local)
 
-### 快速配置预设
+- 按人物「类型」筛选同步范围（主角/配角/龙套）
+- 生成含 `[[双向链接]]` 的独立笔记
+- 一键打开原生图谱（全局/本地）
 
-| 预设 | 阵营字段 | 关系类型示例 | 首次出场字段 |
-|------|----------|--------------|--------------|
-| 默认 | 阵营 | 父子,母子,兄弟,姐妹,夫妻,恋人,朋友,敌人 | 首次出场 |
-| 西幻 | 势力 | 同盟,敌对,隶属,师徒,主仆,战友,宿敌 | 登场 |
-| 现代都市 | 所属组织 | 同事,上下级,朋友,恋人,家人,竞争对手 | 首次出现 |
-| 科幻 | 所属势力 | 同盟,敌对,从属,克隆,共生,竞争 | 首次登场 |
-| 知识库 | 分类 | 包含,引用,因果,对比,相关,从属,对立 | 首次收录 |
+### 📊 Writing Dashboard / 写作仪表盘
 
----
+- Data overview (characters/events/relationships/factions)
+- Character status distribution
+- Action items (unappeared characters, isolated characters, deceased but still appearing issues)
+- First appearance consistency check
+- Unresolved plot thread list
+- Timeline progress bar
+- **MD Format Validation**: Parse errors displayed in dashboard with fix suggestions
 
-## 常见问题
+- 数据概览（人物/事件/关系/阵营）
+- 人物状态分布
+- 待办提醒（未出场人物、孤立人物、已故后出场穿帮）
+- 首次出场联动检查
+- 未回收伏笔清单
+- 时间线进度条
+- **MD 格式校验**：解析失败的行会显示在仪表盘
 
-### Q：支持公元前年份吗？
+### 📚 Setting Collection Export / 设定集导出
 
-**A**：完全支持。格式：`公元前280年`、`前100年`、`280年`、`公元100年`。所有时间排序和生命周期视图均正确识别。
+- One-click complete setting collection Markdown (character cards + relationship tables + timelines + plot threads)
+- Includes Mermaid relationship diagrams
+- Print preview (with PDF export support)
+- Save to vault or download
 
-### Q：数据安全吗？会丢失吗？
+- 一键生成完整设定集 Markdown（人物卡 + 关系表 + 时间线 + 伏笔）
+- 包含 Mermaid 关系图
+- 打印预览（支持另存为 PDF）
+- 支持保存到 Vault 或下载
 
-**A**：你的数据就是 Markdown 文件，随库一起备份。关系/阵营还有 JSON 双备份。删除插件不会删除你的数据文件。
+### 🧊 Setting Snapshots / 设定快照
 
-### Q：可以和其他插件联动吗？
+- One-click backup of character index + timeline + relationships & factions
+- Timestamped archives — a safety net before major changes
 
-**A**：可以！图谱节点文件夹中的笔记带有 `relation-weaver` 标签，可与 Dataview、Excalidraw 等插件联动。
+- 一键备份人物索引 + 时间线 + 关系与阵营
+- 按时间戳存档，大改设定前的安全网
 
-### Q：移动端能用吗？
+### 🎨 Multi-Scene Presets / 多场景预设
 
-**A**：能。所有功能在移动端均可正常使用，包括热力图交互（触摸悬停替代方案）。
-
-### Q：如何迁移数据到新电脑？
-
-**A**：你的数据文件（`人物索引.md`、`时间线.md`、`关系与阵营.md`）随库同步即可。亲密度历史在 `.obsidian/plugins/relation-weaver/intimacy_history.json`。
-
-### Q：插件不加载怎么办？
-
-**A**：检查以下几点：
-1. 确保 `main.js` 和 `manifest.json` 在正确位置
-2. 检查 Obsidian 版本 ≥ 1.4.0
-3. 查看控制台错误信息（Ctrl+Shift+I）
+- 📖 Novel / Historical Writing / 小说 / 历史创作
+- 📔 Daily Journal / 日常日记
+- 🎲 TTRPG / Campaigns / 跑团 / TRPG
+- 🧠 Knowledge / Concept Relationships / 知识 / 概念关系
 
 ---
 
-## 更新日志
+## Customization / 自定义配置
 
-### [3.0.0] - 2026-07-14
-
-**重大更新**
-
-- 🧬 亲密度动态演化系统（变化历史 + 曲线图）
-- 🔥 出场热力图（三种模式 / 多粒度）
-- 🎯 首次出场联动（自动同步 + 一键补全）
-- 📊 仪表盘全面升级（进度条 / 待办 / 提醒）
-- 🧵 伏笔逻辑自动校验
-- 🗺️ 情节线可视化轨道
-- 📚 多场景模板（小说/日记/跑团/知识库）
-- 🏷️ 人物类型筛选
-- 📐 精简顶栏模式
-- 🔄 图谱同步增强（类型筛选）
+| Setting / 配置项 | Description / 说明 |
+|------------------|-------------------|
+| Data Folder / 实体数据文件夹 | Directory for character index and related files / 存放人物索引等文件的目录 |
+| Timeline Mode / 时间线结构模式 | auto / chapter / historical |
+| Current Timeline Point / 当前时间点 | Current narrative progress for status and filtering / 故事当前进度，用于状态判断和过滤 |
+| Graph Sync Scope / 图谱同步范围 | All types / Selected types only / 全部类型 / 仅选中类型 |
+| Auto-sync First Appearance / 出场事件自动同步首次出场 | `[出场]` tag auto-writes to character profiles / `[出场]` 标签自动写入人物档案 |
+| Default Collapse Top Bar / 默认收起顶栏 | Save space on small screens / 小屏幕省空间 |
 
 ---
 
-### [2.1.0] - 2026-07-08
+## FAQ / 常见问题
 
-- 🔥 热力图（初版）
-- 📈 亲密度动态演化（初版）
-- 🎨 使用场景预设（5 种）
-- ⏱️ 当前时间点设置
-- 🏷️ 人物类型筛选
-- 📋 Tab 显示开关
+### Q: Can I edit the data files manually? / 可以手动编辑数据文件吗？
 
----
+**A:** Yes! All data is stored in standard Markdown files. You can edit them in Obsidian or any text editor. The plugin will automatically sync changes on refresh.
 
-### [2.0.0] - 2026-07-06
+**A:** 可以！所有数据都存储在标准 Markdown 文件中。你可以在 Obsidian 或任何文本编辑器中编辑，插件会在刷新时自动同步更改。
 
-- 📊 写作仪表盘
-- ⏳ 时间感知状态
-- 🔍 年份搜索
-- 📄 导出仪表盘报告
-- 🎯 筛选横幅
+### Q: How do I migrate from v2.x? / 如何从 v2.x 迁移？
 
----
+**A:** v3.0 uses the same data format as v2.x. Simply install the new version — your existing data will work without migration.
 
-### [1.2.0] - 2026-06-20
+**A:** v3.0 使用与 v2.x 相同的数据格式。直接安装新版本即可，现有数据无需迁移。
 
-- ❤️ 自定义亲密度等级（可视化）
-- 🏷️ 自定义事件标签（完全自由）
-- ⚡ 关系批量操作
-- 📊 导出关系为 CSV
-- ⏳ 生命周期视图
-- 📥 导入/导出 JSON
+### Q: Does this work with Obsidian Mobile? / 支持 Obsidian 移动端吗？
+
+**A:** Yes, the plugin is fully compatible with Obsidian Mobile.
+
+**A:** 支持，插件完全兼容 Obsidian 移动端。
+
+### Q: Can I use this for non-fiction knowledge management? / 可以用于非虚构类的知识管理吗？
+
+**A:** Absolutely. Switch to the "Knowledge" scene preset to rename entities as "Concepts", factions as "Categories", and relationships as "Associations".
+
+**A:** 当然可以。切换到「知识库」场景预设，实体将显示为「概念」，阵营为「分类」，关系为「关联」。
 
 ---
 
-## 开发与贡献
+## Changelog / 更新日志
 
-欢迎 Issue 和 PR！
+### v3.0.1 (2026-08-02)
 
-```bash
-git clone https://github.com/guilier/relation-weaver.git
-cd relation-weaver
-npm install
-npm run build
+**New Features / 新增功能：**
+- Markdown bidirectional sync for relationships & factions / 关系与阵营 Markdown 双写
+- Visual relation type manager / 关系类型管理可视化界面
+- Visual intimacy level manager / 亲密度等级管理可视化界面
+- Floating character quick reference panel / 时间线人物速查浮窗
+- Event tag manager UI rewrite / 事件标签管理界面重写
+
+**Enhancements / 功能增强：**
+- Setting collection now includes Mermaid diagrams and consistency checks / 设定集新增 Mermaid 关系图和一致性检查
+- Dashboard now shows MD parse errors and appearance consistency issues / 仪表盘新增 MD 解析错误和出场一致性检查
+- One-click fix for missing first appearances / 一键补全缺失的首次出场
+
+**Bug Fixes / 问题修复：**
+- Fixed MD parsing for `* ` list items / 修复 `* ` 列表项的 MD 解析
+- Fixed bidirectional relationship sync / 修复关系双向同步
+- Fixed relationship deletion cascade / 修复关系删除联动清理
+
+---
+
+## License / 开源协议
+
+MIT License
+
+---
+
+**If this plugin helps you, give it a ⭐ on GitHub! / 如果这个插件对你有帮助，给个 ⭐ 支持一下吧！**
 ```
-
-### 项目结构
-
-```
-relation-weaver/
-├── main.ts          # 插件入口
-├── view.ts          # 主视图
-├── settings.ts      # 设置页
-├── modals.ts        # 弹窗
-├── utils.ts         # 工具函数
-└── styles.css       # 样式
-```
-
----
-
-## 许可证
-
-MIT License © 2026 guilier
-
----
-
-**如果这个插件对你有帮助，欢迎 ⭐ Star！**
-
-[![Star on GitHub](https://img.shields.io/github/stars/guilier/relation-weaver?style=social)](https://github.com/guilier/relation-weaver/stargazers)
