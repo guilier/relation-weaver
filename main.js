@@ -452,6 +452,41 @@ function sanitizeRelField(value) {
     return String(value == null ? '' : value).replace(/[｜|]/g, '、').trim();
 }
 
+function sanitizeMdTableCell(value) {
+    return String(value == null ? '' : value)
+        .replace(/\r?\n/g, ' ')
+        .replace(/\|/g, '、')
+        .trim();
+}
+
+function splitMdTableRow(line) {
+    var raw = String(line || '').trim();
+    if (!raw.startsWith('|')) return null;
+    if (raw.charAt(0) === '|') raw = raw.substring(1);
+    if (raw.charAt(raw.length - 1) === '|') raw = raw.substring(0, raw.length - 1);
+    return raw.split('|').map(function (c) { return c.trim(); });
+}
+
+function isMdTableSeparator(line) {
+    var cells = splitMdTableRow(line);
+    if (!cells || cells.length === 0) return false;
+    for (var i = 0; i < cells.length; i++) {
+        if (!/^:?-{1,}:?$/.test(cells[i].replace(/\s/g, ''))) return false;
+    }
+    return true;
+}
+
+function zipTableRowToMap(headers, cells) {
+    var map = {};
+    if (!headers || !cells) return map;
+    for (var i = 0; i < headers.length; i++) {
+        var key = String(headers[i] || '').trim();
+        if (!key) continue;
+        map[key] = cells[i] != null ? String(cells[i]).trim() : '';
+    }
+    return map;
+}
+
 function serializeCharRelationLine(ownerName, rel) {
     var other = rel.charA === ownerName ? rel.charB : rel.charA;
     var parts = [other + '：' + (rel.type || '其他'), '亲密度：' + (rel.intimacy != null ? rel.intimacy : 0)];
@@ -480,16 +515,95 @@ function serializeCharHistoryLine(ownerName, record) {
     return '- ' + parts.join('｜');
 }
 
-function parseCharRelationLine(ownerName, lineText) {
-    var body = lineText.replace(/^[-*]\s*/, '').trim();
-    if (!body || body.indexOf('暂无') !== -1) return null;
-    var map = parsePipeKv(body);
+function appendMdTable(outLines, headers, rows) {
+    outLines.push('| ' + headers.join(' | ') + ' |');
+    outLines.push('| ' + headers.map(function () { return '---'; }).join(' | ') + ' |');
+    for (var i = 0; i < rows.length; i++) {
+        var row = rows[i];
+        var cells = [];
+        for (var c = 0; c < headers.length; c++) {
+            cells.push(sanitizeMdTableCell(row[c] != null ? row[c] : ''));
+        }
+        outLines.push('| ' + cells.join(' | ') + ' |');
+    }
+}
+
+function serializeCharRelationTableLines(ownerName, rels) {
+    var headers = ['对方', '类型', '亲密度', '描述', '开始', '结束'];
+    var rows = [];
+    for (var i = 0; i < rels.length; i++) {
+        var rel = rels[i];
+        var other = rel.charA === ownerName ? rel.charB : rel.charA;
+        rows.push([
+            other,
+            rel.type || '其他',
+            rel.intimacy != null ? rel.intimacy : 0,
+            rel.desc || '',
+            rel.startTime || '',
+            rel.endTime || ''
+        ]);
+    }
+    var lines = [];
+    appendMdTable(lines, headers, rows);
+    return lines;
+}
+
+function serializeCharHistoryTableLines(ownerName, histRecords) {
+    var headers = ['对方', '旧', '新', '原因', '时间', '日期', '备注', '事件', '事件年', '事件文'];
+    var rows = [];
+    for (var i = 0; i < histRecords.length; i++) {
+        var record = histRecords[i];
+        var other = record.charA === ownerName ? record.charB : (record.charB === ownerName ? record.charA : record.charB);
+        rows.push([
+            other,
+            record.oldValue != null ? record.oldValue : 0,
+            record.newValue != null ? record.newValue : 0,
+            record.changeReason || '',
+            record.timestamp || '',
+            record.recordDate || '',
+            record.customReason || record.note || '',
+            record.eventId || '',
+            record.eventYear || '',
+            record.eventText || ''
+        ]);
+    }
+    var lines = [];
+    appendMdTable(lines, headers, rows);
+    return lines;
+}
+
+function normalizeHistoryMapKeys(map) {
+    if (!map) return {};
+    var out = Object.assign({}, map);
+    if (out['人物'] && !out['对方']) out['对方'] = out['人物'];
+    if (out['角色'] && !out['对方']) out['对方'] = out['角色'];
+    if (out['旧值'] != null && out['旧'] == null) out['旧'] = out['旧值'];
+    if (out['新值'] != null && out['新'] == null) out['新'] = out['新值'];
+    if (out['时间点'] && !out['时间']) out['时间'] = out['时间点'];
+    if (out['记录日期'] && !out['日期']) out['日期'] = out['记录日期'];
+    return out;
+}
+
+function normalizeRelationMapKeys(map) {
+    if (!map) return {};
+    var out = Object.assign({}, map);
+    if (out['人物'] && !out['对方']) out['对方'] = out['人物'];
+    if (out['角色'] && !out['对方']) out['对方'] = out['角色'];
+    if (out['关系类型'] && !out['类型']) out['类型'] = out['关系类型'];
+    if (out['亲密'] != null && out['亲密度'] == null) out['亲密度'] = out['亲密'];
+    if (out['开始时间'] && !out['开始']) out['开始'] = out['开始时间'];
+    if (out['结束时间'] && !out['结束']) out['结束'] = out['结束时间'];
+    return out;
+}
+
+function parseCharRelationFromMap(ownerName, rawMap) {
+    var map = normalizeRelationMapKeys(rawMap);
     var other = '';
     var type = '其他';
-    // 标准写法：- 李四：朋友｜亲密度：3  （姓名：类型 会被拆成动态键，不是 _head）
     var knownRelKeys = {
         '亲密度': 1, '亲密': 1, '描述': 1, '开始': 1, '开始时间': 1,
-        '结束': 1, '结束时间': 1, '对方': 1, '类型': 1, '_head': 1
+        '结束': 1, '结束时间': 1, '对方': 1, '类型': 1, '关系类型': 1,
+        '人物': 1, '角色': 1, '_head': 1
     };
     if (map._head) {
         var headSep = map._head.indexOf('：');
@@ -515,12 +629,39 @@ function parseCharRelationLine(ownerName, lineText) {
     return {
         charA: ownerName,
         charB: other,
-        type: type,
+        type: type || '其他',
         intimacy: parseInt(map['亲密度'] != null ? map['亲密度'] : (map['亲密'] || '0'), 10) || 0,
         desc: map['描述'] || '',
         startTime: map['开始'] || map['开始时间'] || '',
         endTime: map['结束'] || map['结束时间'] || ''
     };
+}
+
+function parseCharHistoryFromMap(ownerName, rawMap) {
+    var map = normalizeHistoryMapKeys(rawMap);
+    var other = stripWikiName(map['对方'] || map._head || '');
+    if (!other || other.indexOf('暂无') !== -1) return null;
+    return {
+        id: buildHistoryRecordId(ownerName, other, map),
+        charA: ownerName,
+        charB: other,
+        oldValue: parseInt(map['旧'] != null && String(map['旧']).trim() !== '' ? map['旧'] : '0', 10) || 0,
+        newValue: parseInt(map['新'] != null && String(map['新']).trim() !== '' ? map['新'] : '0', 10) || 0,
+        changeReason: map['原因'] || '',
+        timestamp: map['时间'] || map['时间点'] || '',
+        recordDate: map['日期'] || '',
+        note: map['备注'] || '',
+        customReason: map['备注'] || '',
+        eventId: map['事件'] || '',
+        eventYear: map['事件年'] || '',
+        eventText: map['事件文'] || ''
+    };
+}
+
+function parseCharRelationLine(ownerName, lineText) {
+    var body = lineText.replace(/^[-*]\s*/, '').trim();
+    if (!body || body.indexOf('暂无') !== -1) return null;
+    return parseCharRelationFromMap(ownerName, parsePipeKv(body));
 }
 
 function buildHistoryRecordId(ownerName, other, map) {
@@ -541,24 +682,7 @@ function buildHistoryRecordId(ownerName, other, map) {
 function parseCharHistoryLine(ownerName, lineText) {
     var body = lineText.replace(/^[-*]\s*/, '').trim();
     if (!body || body.indexOf('暂无') !== -1) return null;
-    var map = parsePipeKv(body);
-    var other = stripWikiName(map['对方'] || map._head || '');
-    if (!other || other.indexOf('暂无') !== -1) return null;
-    return {
-        id: buildHistoryRecordId(ownerName, other, map),
-        charA: ownerName,
-        charB: other,
-        oldValue: parseInt(map['旧'] != null ? map['旧'] : '0', 10) || 0,
-        newValue: parseInt(map['新'] != null ? map['新'] : '0', 10) || 0,
-        changeReason: map['原因'] || '',
-        timestamp: map['时间'] || map['时间点'] || '',
-        recordDate: map['日期'] || '',
-        note: map['备注'] || '',
-        customReason: map['备注'] || '',
-        eventId: map['事件'] || '',
-        eventYear: map['事件年'] || '',
-        eventText: map['事件文'] || ''
-    };
+    return parseCharHistoryFromMap(ownerName, parsePipeKv(body));
 }
 
 function parseCharEmbeddedRelationsAndHistory(content) {
@@ -571,6 +695,7 @@ function parseCharEmbeddedRelationsAndHistory(content) {
     var lines = content.split('\n');
     var currentChar = null;
     var section = null;
+    var tableHeaders = null;
 
     for (var i = 0; i < lines.length; i++) {
         var t = lines[i].trim();
@@ -578,14 +703,71 @@ function parseCharEmbeddedRelationsAndHistory(content) {
         if (t.startsWith('## ') && !t.startsWith('### ')) {
             currentChar = t.substring(3).trim();
             section = null;
+            tableHeaders = null;
             continue;
         }
         if (!currentChar) continue;
-        if (t === '### 关系' || t === '###关系') { section = 'rel'; continue; }
-        if (t === '### 关系变化' || t === '###关系变化') { section = 'hist'; continue; }
-        if (t.startsWith('### ')) { section = null; continue; }
+        if (t === '### 关系' || t === '###关系') {
+            section = 'rel';
+            tableHeaders = null;
+            continue;
+        }
+        if (t === '### 关系变化' || t === '###关系变化') {
+            section = 'hist';
+            tableHeaders = null;
+            continue;
+        }
+        if (t.startsWith('### ')) {
+            section = null;
+            tableHeaders = null;
+            continue;
+        }
         if (t.startsWith('# ')) continue;
+        if (section !== 'rel' && section !== 'hist') continue;
+
+        if (t.startsWith('|')) {
+            if (isMdTableSeparator(t)) continue;
+            var cells = splitMdTableRow(t);
+            if (!cells || cells.length === 0) continue;
+            if (!tableHeaders) {
+                tableHeaders = cells;
+                continue;
+            }
+            var rowMap = zipTableRowToMap(tableHeaders, cells);
+            if (section === 'rel') {
+                var relFromTable = parseCharRelationFromMap(currentChar, rowMap);
+                if (relFromTable) {
+                    relations.push(relFromTable);
+                } else if ((rowMap['对方'] || rowMap['人物'] || '').trim() &&
+                    String(rowMap['对方'] || rowMap['人物'] || '').indexOf('暂无') === -1) {
+                    errors.push({
+                        line: i + 1,
+                        char: currentChar,
+                        section: '关系',
+                        text: t,
+                        reason: '表格行无法识别。表头示例：对方 | 类型 | 亲密度 | 描述 | 开始 | 结束'
+                    });
+                }
+            } else {
+                var histFromTable = parseCharHistoryFromMap(currentChar, rowMap);
+                if (histFromTable) {
+                    history.push(histFromTable);
+                } else if ((rowMap['对方'] || rowMap['人物'] || '').trim() &&
+                    String(rowMap['对方'] || rowMap['人物'] || '').indexOf('暂无') === -1) {
+                    errors.push({
+                        line: i + 1,
+                        char: currentChar,
+                        section: '关系变化',
+                        text: t,
+                        reason: '表格行无法识别。表头示例：对方 | 旧 | 新 | 原因 | 时间 | 日期 | 备注'
+                    });
+                }
+            }
+            continue;
+        }
+
         if (!(t.startsWith('- ') || t.startsWith('* '))) continue;
+        tableHeaders = null;
         if (section === 'rel') {
             var rel = parseCharRelationLine(currentChar, t);
             if (rel) {
@@ -596,7 +778,7 @@ function parseCharEmbeddedRelationsAndHistory(content) {
                     char: currentChar,
                     section: '关系',
                     text: t,
-                    reason: '无法识别。示例：- 李四：朋友｜亲密度：3'
+                    reason: '无法识别。推荐表格：| 对方 | 类型 | 亲密度 | 描述 | 开始 | 结束 |；旧格式：- 李四：朋友｜亲密度：3'
                 });
             }
         } else if (section === 'hist') {
@@ -609,7 +791,7 @@ function parseCharEmbeddedRelationsAndHistory(content) {
                     char: currentChar,
                     section: '关系变化',
                     text: t,
-                    reason: '无法识别。示例：- 对方：李四｜旧：1｜新：3｜原因：自定义描述｜时间：前280年｜日期：2026-08-02'
+                    reason: '无法识别。推荐表格：| 对方 | 旧 | 新 | 原因 | 时间 | 日期 | 备注 |；旧格式：- 对方：李四｜旧：1｜新：3｜原因：自定义描述｜时间：前280年｜日期：2026-08-02'
                 });
             }
         }
@@ -654,11 +836,10 @@ function appendCharRelationSections(outLines, charName, relations, intimacyHisto
     outLines.push('');
     outLines.push('### 关系');
     if (rels.length === 0) {
-        outLines.push('- （暂无关系）');
+        appendMdTable(outLines, ['对方', '类型', '亲密度', '描述', '开始', '结束'], []);
     } else {
-        for (var ri = 0; ri < rels.length; ri++) {
-            outLines.push(serializeCharRelationLine(charName, rels[ri]));
-        }
+        var relLines = serializeCharRelationTableLines(charName, rels);
+        for (var rli = 0; rli < relLines.length; rli++) outLines.push(relLines[rli]);
     }
 
     var hist = [];
@@ -669,15 +850,14 @@ function appendCharRelationSections(outLines, charName, relations, intimacyHisto
     outLines.push('');
     outLines.push('### 关系变化');
     if (hist.length === 0) {
-        outLines.push('- （暂无变化记录）');
+        appendMdTable(outLines, ['对方', '旧', '新', '原因', '时间', '日期', '备注', '事件', '事件年', '事件文'], []);
     } else {
-        var sorted = hist.slice().sort(function(a, b) {
+        var sorted = hist.slice().sort(function (a, b) {
             return String(a.recordDate || '').localeCompare(String(b.recordDate || '')) ||
                 String(a.timestamp || '').localeCompare(String(b.timestamp || ''));
         });
-        for (var sj = 0; sj < sorted.length; sj++) {
-            outLines.push(serializeCharHistoryLine(charName, sorted[sj]));
-        }
+        var histLines = serializeCharHistoryTableLines(charName, sorted);
+        for (var hli = 0; hli < histLines.length; hli++) outLines.push(histLines[hli]);
     }
     outLines.push('');
 }
@@ -3204,10 +3384,12 @@ var MyView = /** @class */ (function (_super) {
                 this.plugin._intimacyHistory = jsonHistory;
             }
 
+            var usesOldListFormat = /(?:^|\n)###\s*关系(?:变化)?\s*\n(?:\s*\n)*-\s/.test(charRaw);
             var needSyncToMd = this.plugin.settings.syncRelationsToCharMd !== false && (
                 (!hasRelSection && (this.relations.length > 0 || (this.plugin._intimacyHistory || []).length > 0)) ||
                 (this.relations.length > 0 && hasRelSection && embedded.relations.length === 0) ||
-                ((this.plugin._intimacyHistory || []).length > 0 && (!hasHistSection || embedded.history.length === 0))
+                ((this.plugin._intimacyHistory || []).length > 0 && (!hasHistSection || embedded.history.length === 0)) ||
+                (usesOldListFormat && (this.relations.length > 0 || (this.plugin._intimacyHistory || []).length > 0 || embedded.relations.length > 0 || embedded.history.length > 0))
             );
             if (needSyncToMd) {
                 await syncRelationsIntoCharMd(this.app, this.plugin, this.relations, this.plugin._intimacyHistory || []);
@@ -5402,6 +5584,15 @@ MyView.prototype.renderTimeline = function (container) {
         if (this._yearSearchText) emptyMsg = '没有匹配 "' + this._yearSearchText + '" 的事件';
         if (isTimeFilterActive(this.plugin)) emptyMsg = '当前时间点之前暂无事件（可关闭顶栏「时间过滤」查看全部）';
         container.createEl('p', { text: emptyMsg, cls: 'my-char-view-empty' });
+        if (self._pendingFocusEvent && typeof self.showEditEvent === 'function') {
+            var orphanEvt = self._pendingFocusEvent;
+            self._pendingHighlightLineIndex = null;
+            self._pendingFocusEvent = null;
+            setTimeout(function () { self.showEditEvent(orphanEvt); }, 50);
+        } else {
+            self._pendingHighlightLineIndex = null;
+            self._pendingFocusEvent = null;
+        }
         return;
     }
 
@@ -5489,6 +5680,9 @@ MyView.prototype.renderTimeline = function (container) {
                 var tagColor = eventData.tag ? getTagColor(self.plugin, eventData.tag) : '#4a90e2';
                 var eventDiv = monthBody.createEl('div', { cls: 'my-char-timeline-event my-char-timeline-event-editable' });
                 eventDiv.title = '点击编辑';
+                if (eventData._lineIndex != null) {
+                    eventDiv.setAttribute('data-line-index', String(eventData._lineIndex));
+                }
                 eventDiv.style.setProperty('--event-accent', tagColor);
                 eventDiv.style.borderLeftColor = tagColor;
 
@@ -5549,6 +5743,25 @@ MyView.prototype.renderTimeline = function (container) {
                 if (charData) self.showCharDetail(charData);
             });
         })(links[i]);
+    }
+
+    if (self._pendingHighlightLineIndex != null) {
+        var pendingIdx = self._pendingHighlightLineIndex;
+        var pendingEvt = self._pendingFocusEvent;
+        self._pendingHighlightLineIndex = null;
+        self._pendingFocusEvent = null;
+        setTimeout(function () {
+            var target = container.querySelector('[data-line-index="' + pendingIdx + '"]');
+            if (target) {
+                target.classList.add('is-highlight');
+                if (typeof target.scrollIntoView === 'function') {
+                    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+            }
+            if (pendingEvt && typeof self.showEditEvent === 'function') {
+                self.showEditEvent(pendingEvt);
+            }
+        }, 50);
     }
 };
     // ========== 生命周期视图 ==========
@@ -6245,6 +6458,20 @@ MyView.prototype.renderTimeline = function (container) {
         if (warnings.length > showCount) {
             warnBody.createEl('div', { text: '…还有 ' + (warnings.length - showCount) + ' 条', cls: 'my-char-muted' });
         }
+    };
+
+    // ========== 跳转到时间线事件并高亮 ==========
+    MyView.prototype.focusTimelineEvent = function (evt) {
+        if (!evt) return;
+        this.tab = 'timeline';
+        this._plotLineFilter = '';
+        this._yearSearchText = '';
+        this.selectedTag = null;
+        if (evt.year) setTimelineYearExpanded(this, evt.year, true);
+        if (evt.year && evt.month) setTimelineMonthExpanded(this, evt.year, evt.month, true);
+        this._pendingHighlightLineIndex = (evt._lineIndex != null) ? evt._lineIndex : null;
+        this._pendingFocusEvent = evt;
+        this.render();
     };
 
     // ========== 人物详情弹窗 ==========
@@ -7007,8 +7234,396 @@ var DetailModal = /** @class */ (function (_super) {
         _this.relations = relations;
         _this.manualRels = manualRels;
         _this.view = view;
+        _this._filterCoChar = null;
+        _this._coAppearQuery = '';
+        _this._timelineQuery = '';
+        _this._timelineTag = '';
+        _this._timelineYear = '';
+        _this._timelineVolume = '';
         return _this;
     }
+
+    DetailModal.prototype.getBaseEvents = function () {
+        if (this._filterCoChar && this.relations[this._filterCoChar]) {
+            return this.relations[this._filterCoChar];
+        }
+        return this.events || [];
+    };
+
+    DetailModal.prototype.getDisplayEvents = function () {
+        var list = this.getBaseEvents();
+        var q = (this._timelineQuery || '').trim().toLowerCase();
+        var tag = this._timelineTag || '';
+        var year = this._timelineYear || '';
+        var volume = this._timelineVolume || '';
+        if (!q && !tag && !year && !volume) return list;
+        var out = [];
+        for (var i = 0; i < list.length; i++) {
+            var evt = list[i];
+            if (tag && (evt.tag || '') !== tag) continue;
+            if (year && (evt.year || '') !== year) continue;
+            if (volume && (evt.volume || '') !== volume) continue;
+            if (q) {
+                var hay = [
+                    evt.event || '',
+                    evt.year || '',
+                    evt.month || '',
+                    evt.volume || '',
+                    evt.tag || '',
+                    evt.plotLine || '',
+                    evt.chapterNote || ''
+                ].join(' ').toLowerCase();
+                if (hay.indexOf(q) === -1) continue;
+            }
+            out.push(evt);
+        }
+        return out;
+    };
+
+    DetailModal.prototype.getSortedCoAppearNames = function () {
+        var self = this;
+        var names = Object.keys(this.relations || {});
+        names.sort(function (a, b) {
+            return (self.relations[b].length || 0) - (self.relations[a].length || 0);
+        });
+        var q = (this._coAppearQuery || '').trim().toLowerCase();
+        if (!q) return names;
+        return names.filter(function (n) {
+            return n.toLowerCase().indexOf(q) !== -1;
+        });
+    };
+
+    DetailModal.prototype.collectEventFacets = function (list) {
+        var years = {};
+        var volumes = {};
+        var tags = {};
+        for (var i = 0; i < list.length; i++) {
+            var evt = list[i];
+            if (evt.year) years[evt.year] = true;
+            if (evt.volume) volumes[evt.volume] = true;
+            if (evt.tag) tags[evt.tag] = true;
+        }
+        return {
+            years: Object.keys(years).sort().reverse(),
+            volumes: Object.keys(volumes).sort(),
+            tags: Object.keys(tags).sort()
+        };
+    };
+
+    DetailModal.prototype.setCoCharFilter = function (name) {
+        if (this._filterCoChar === name) this._filterCoChar = null;
+        else this._filterCoChar = name;
+        this._timelineTag = '';
+        this._timelineYear = '';
+        this._timelineVolume = '';
+        this.refreshInteractiveSections();
+    };
+
+    DetailModal.prototype.clearCoCharFilter = function () {
+        this._filterCoChar = null;
+        this.refreshInteractiveSections();
+    };
+
+    DetailModal.prototype.clearTimelineFilters = function () {
+        this._timelineQuery = '';
+        this._timelineTag = '';
+        this._timelineYear = '';
+        this._timelineVolume = '';
+        this.refreshInteractiveSections();
+    };
+
+    DetailModal.prototype.refreshInteractiveSections = function () {
+        if (!this._interactiveRoot) {
+            this.onOpen();
+            return;
+        }
+        this._interactiveRoot.empty();
+        this.renderCoAppearSection(this._interactiveRoot);
+        this.renderTimelineSection(this._interactiveRoot);
+    };
+
+    DetailModal.prototype.renderFieldRow = function (parent, key, value) {
+        var row = parent.createEl('div', { cls: 'my-char-detail-field-row' });
+        row.createEl('strong', { text: key + '：', cls: 'my-char-detail-field-label' });
+        row.createEl('span', { text: value, cls: 'my-char-detail-field-value' });
+    };
+
+    DetailModal.prototype.fillCoAppearList = function () {
+        var self = this;
+        var listEl = this._coAppearListEl;
+        var titleEl = this._coAppearTitleEl;
+        if (!listEl) return;
+
+        var allCount = Object.keys(this.relations || {}).length;
+        var names = this.getSortedCoAppearNames();
+        if (titleEl) {
+            var q = (this._coAppearQuery || '').trim();
+            titleEl.textContent = q
+                ? '共同出场人物（显示 ' + names.length + ' / ' + allCount + '人）'
+                : '共同出场人物 (' + allCount + '人)';
+        }
+
+        listEl.empty();
+        if (names.length === 0) {
+            listEl.createEl('p', {
+                text: (this._coAppearQuery || '').trim() ? '没有匹配的共同出场人物' : '暂无共同出场人物',
+                cls: 'my-char-detail-more-hint'
+            });
+            return;
+        }
+
+        for (var i = 0; i < names.length; i++) {
+            (function (name) {
+                var evts = self.relations[name] || [];
+                var item = listEl.createEl('div', {
+                    cls: 'my-char-coappear-item' + (self._filterCoChar === name ? ' is-active' : '')
+                });
+                item.title = '点击筛选共同出场事件；点人名可跳转';
+
+                var nameEl = item.createEl('strong', { text: name, cls: 'my-char-coappear-name' });
+                item.createEl('span', {
+                    text: '共同出场 ' + evts.length + ' 次',
+                    cls: 'my-char-coappear-count'
+                });
+
+                nameEl.addEventListener('click', function (e) {
+                    e.stopPropagation();
+                    var targetChar = self.view.findChar(name);
+                    if (targetChar) {
+                        self.close();
+                        self.view.showCharDetail(targetChar);
+                    }
+                });
+
+                item.addEventListener('click', function () {
+                    self.setCoCharFilter(name);
+                });
+            })(names[i]);
+        }
+    };
+
+    DetailModal.prototype.renderCoAppearSection = function (el) {
+        var self = this;
+        var allNames = Object.keys(this.relations || {});
+        if (allNames.length === 0) return;
+
+        var section = el.createEl('div', { cls: 'my-char-detail-section' });
+        this._coAppearTitleEl = section.createEl('h3', {
+            text: '共同出场人物 (' + allNames.length + '人)',
+            cls: 'my-char-detail-section-title'
+        });
+        section.createEl('div', {
+            text: '可搜索人名；点人名跳转档案；点整行筛选下方时间线',
+            cls: 'my-char-coappear-hint'
+        });
+
+        var filterBar = section.createEl('div', { cls: 'my-char-detail-toolbar' });
+        var searchInput = filterBar.createEl('input', {
+            type: 'text',
+            cls: 'my-char-detail-search',
+            placeholder: '搜索共同出场人物…'
+        });
+        searchInput.value = this._coAppearQuery || '';
+        searchInput.addEventListener('input', function () {
+            self._coAppearQuery = searchInput.value;
+            self.fillCoAppearList();
+        });
+        var clearBtn = filterBar.createEl('button', {
+            text: '清除',
+            cls: 'my-char-btn-ghost my-char-btn-sm'
+        });
+        clearBtn.addEventListener('click', function () {
+            self._coAppearQuery = '';
+            searchInput.value = '';
+            self.fillCoAppearList();
+            searchInput.focus();
+        });
+
+        this._coAppearListEl = section.createEl('div', { cls: 'my-char-detail-scroll-list' });
+        this.fillCoAppearList();
+    };
+
+    DetailModal.prototype.fillTimelineList = function () {
+        var self = this;
+        var listEl = this._timelineListEl;
+        var titleEl = this._timelineTitleEl;
+        var metaEl = this._timelineMetaEl;
+        if (!listEl) return;
+
+        var base = this.getBaseEvents();
+        var list = this.getDisplayEvents();
+        if (titleEl) {
+            if (this._filterCoChar) {
+                titleEl.textContent = '时间线出场（与「' + this._filterCoChar + '」共同 ' + base.length + ' 次）';
+            } else {
+                titleEl.textContent = '时间线出场 (' + base.length + '次)';
+            }
+        }
+        if (metaEl) {
+            var hasExtra = !!(this._timelineQuery || this._timelineTag || this._timelineYear || this._timelineVolume);
+            metaEl.textContent = hasExtra
+                ? '当前显示 ' + list.length + ' / ' + base.length + ' 条'
+                : (list.length > 50 ? '默认展示前 50 条，可用上方筛选缩小范围' : '');
+            metaEl.style.display = metaEl.textContent ? '' : 'none';
+        }
+
+        listEl.empty();
+        if (list.length === 0) {
+            listEl.createEl('p', {
+                text: base.length === 0
+                    ? (this._filterCoChar ? '当前共同出场筛选下没有事件' : '暂无出场记录')
+                    : '没有匹配的时间线事件，请调整筛选条件',
+                cls: 'my-char-detail-more-hint'
+            });
+            return;
+        }
+
+        var showCount = Math.min(50, list.length);
+        for (var i = 0; i < showCount; i++) {
+            (function (evt) {
+                var item = listEl.createEl('div', {
+                    cls: 'my-char-timeline-event is-clickable'
+                });
+                item.title = '点击跳转到时间线';
+                if (evt.tag) {
+                    var tagColor = getTagColor(self.view.plugin, evt.tag);
+                    item.style.setProperty('--event-accent', tagColor);
+                }
+                var loc = evt.volume ? evt.volume + ' / ' : '';
+                item.createEl('small', {
+                    text: '[' + loc + (evt.year || '') + ' ' + (evt.month || '') + '] ',
+                    cls: 'my-char-detail-event-loc'
+                });
+                var evtSpan = item.createEl('span');
+                evtSpan.textContent = evt.event || '';
+                if (evt.chapterNote) {
+                    var noteLink = item.createEl('span', {
+                        text: ' → ' + evt.chapterNote,
+                        cls: 'my-char-link my-char-timeline-note-link'
+                    });
+                    noteLink.addEventListener('click', function (e) {
+                        e.stopPropagation();
+                        var m = evt.chapterNote.match(/\[\[([^\]|]+)/);
+                        if (m) self.app.workspace.openLinkText(m[1], '');
+                    });
+                }
+                item.addEventListener('click', function () {
+                    self.close();
+                    self.view.focusTimelineEvent(evt);
+                });
+            })(list[i]);
+        }
+        if (list.length > 50) {
+            listEl.createEl('p', {
+                text: '...还有 ' + (list.length - 50) + ' 条，请继续用搜索/标签/年份缩小范围',
+                cls: 'my-char-detail-more-hint'
+            });
+        }
+    };
+
+    DetailModal.prototype.renderTimelineSection = function (el) {
+        var self = this;
+        var base = this.getBaseEvents();
+        if ((!base || base.length === 0) && !this._filterCoChar && (!this.events || this.events.length === 0)) {
+            return;
+        }
+
+        var section = el.createEl('div', { cls: 'my-char-detail-section' });
+        this._timelineTitleEl = section.createEl('h3', {
+            text: '时间线出场',
+            cls: 'my-char-detail-section-title'
+        });
+
+        if (this._filterCoChar) {
+            var coBar = section.createEl('div', { cls: 'my-char-detail-filter-bar' });
+            coBar.createEl('span', { text: '已筛选：与「' + this._filterCoChar + '」共同出场' });
+            var clearCoBtn = coBar.createEl('button', { text: '清除人物筛选', cls: 'my-char-filter-clear' });
+            clearCoBtn.addEventListener('click', function () {
+                self.clearCoCharFilter();
+            });
+        }
+
+        var facets = this.collectEventFacets(base);
+        var toolbar = section.createEl('div', { cls: 'my-char-detail-toolbar' });
+        var searchInput = toolbar.createEl('input', {
+            type: 'text',
+            cls: 'my-char-detail-search',
+            placeholder: '搜索事件内容 / 年份 / 卷名…'
+        });
+        searchInput.value = this._timelineQuery || '';
+        searchInput.addEventListener('input', function () {
+            self._timelineQuery = searchInput.value;
+            self.fillTimelineList();
+        });
+
+        if (facets.years.length > 1) {
+            var yearSelect = toolbar.createEl('select', { cls: 'my-char-detail-select' });
+            yearSelect.createEl('option', { text: '全部年份', value: '' });
+            for (var yi = 0; yi < facets.years.length; yi++) {
+                var yOpt = yearSelect.createEl('option', {
+                    text: facets.years[yi],
+                    value: facets.years[yi]
+                });
+                if (this._timelineYear === facets.years[yi]) yOpt.selected = true;
+            }
+            yearSelect.value = this._timelineYear || '';
+            yearSelect.addEventListener('change', function () {
+                self._timelineYear = yearSelect.value || '';
+                self.fillTimelineList();
+            });
+        }
+
+        if (facets.volumes.length > 1) {
+            var volSelect = toolbar.createEl('select', { cls: 'my-char-detail-select' });
+            volSelect.createEl('option', { text: '全部卷', value: '' });
+            for (var vi = 0; vi < facets.volumes.length; vi++) {
+                var vOpt = volSelect.createEl('option', {
+                    text: facets.volumes[vi],
+                    value: facets.volumes[vi]
+                });
+                if (this._timelineVolume === facets.volumes[vi]) vOpt.selected = true;
+            }
+            volSelect.value = this._timelineVolume || '';
+            volSelect.addEventListener('change', function () {
+                self._timelineVolume = volSelect.value || '';
+                self.fillTimelineList();
+            });
+        }
+
+        var clearTlBtn = toolbar.createEl('button', {
+            text: '清除筛选',
+            cls: 'my-char-btn-ghost my-char-btn-sm'
+        });
+        clearTlBtn.addEventListener('click', function () {
+            self.clearTimelineFilters();
+        });
+
+        if (facets.tags.length > 0) {
+            var chipBar = section.createEl('div', { cls: 'my-char-detail-chip-bar' });
+            var allChip = chipBar.createEl('button', { text: '全部标签', cls: 'my-char-chip' });
+            setFilterChip(allChip, !this._timelineTag, '#4a90e2');
+            allChip.addEventListener('click', function () {
+                self._timelineTag = '';
+                self.refreshInteractiveSections();
+            });
+            for (var ti = 0; ti < facets.tags.length; ti++) {
+                (function (tagValue) {
+                    var label = getTagLabel(self.view.plugin, tagValue) || tagValue;
+                    var color = getTagColor(self.view.plugin, tagValue);
+                    var chip = chipBar.createEl('button', { text: label, cls: 'my-char-chip' });
+                    setFilterChip(chip, self._timelineTag === tagValue, color);
+                    chip.addEventListener('click', function () {
+                        self._timelineTag = (self._timelineTag === tagValue) ? '' : tagValue;
+                        self.refreshInteractiveSections();
+                    });
+                })(facets.tags[ti]);
+            }
+        }
+
+        this._timelineMetaEl = section.createEl('div', { cls: 'my-char-detail-filter-meta' });
+        this._timelineListEl = section.createEl('div', { cls: 'my-char-detail-scroll-list my-char-detail-scroll-list-tall' });
+        this.fillTimelineList();
+    };
 
     DetailModal.prototype.onOpen = function () {
         var self = this;
@@ -7016,14 +7631,25 @@ var DetailModal = /** @class */ (function (_super) {
         el.empty();
         el.className = 'my-char-modal-body';
         if (this._editMode === undefined) this._editMode = false;
+        if (this._filterCoChar === undefined) this._filterCoChar = null;
+        if (this._coAppearQuery === undefined) this._coAppearQuery = '';
+        if (this._timelineQuery === undefined) this._timelineQuery = '';
+        if (this._timelineTag === undefined) this._timelineTag = '';
+        if (this._timelineYear === undefined) this._timelineYear = '';
+        if (this._timelineVolume === undefined) this._timelineVolume = '';
         this._fieldInputs = {};
+        this._interactiveRoot = null;
+        this._coAppearListEl = null;
+        this._timelineListEl = null;
 
         var headerRow = el.createEl('div', { cls: 'my-char-detail-header' });
         headerRow.createEl('h2', { text: this.charData.name, cls: 'my-char-section-title' });
-        var editBtn = headerRow.createEl('button', { text: '✏️ 编辑', cls: 'my-char-btn-ghost my-char-btn-sm' });
-        editBtn.addEventListener('click', function() {
+        var editBtn = headerRow.createEl('button', {
+            text: this._editMode ? '取消编辑' : '✏️ 编辑',
+            cls: 'my-char-btn-ghost my-char-btn-sm'
+        });
+        editBtn.addEventListener('click', function () {
             self._editMode = !self._editMode;
-            editBtn.textContent = self._editMode ? '取消编辑' : '✏️ 编辑';
             self.onOpen();
         });
         if (this._editMode) {
@@ -7032,43 +7658,35 @@ var DetailModal = /** @class */ (function (_super) {
         }
 
         var infoDiv = el.createEl('div', { cls: 'my-char-detail-panel' });
-
-        var fields = this.charData.fields;
+        var fields = this.charData.fields || {};
         var customFields = this.view.plugin.settings.customFields || '';
-        var fieldOrder = customFields ? customFields.split(',').map(function(s) { return s.trim(); }) : 
+        var fieldOrder = customFields ? customFields.split(',').map(function (s) { return s.trim(); }) :
             ['身份', '阵营', '首次出场', '死亡', '死亡时间', '出生', '出生时间', '年龄', '性别', '种族', '职业', '居住地', '别名', '亲密人物'];
-        
-        var displayed = [];
 
+        var displayed = [];
         for (var i = 0; i < fieldOrder.length; i++) {
             var key = fieldOrder[i];
             if (fields[key]) {
                 displayed.push(key);
-                var row = infoDiv.createEl('div');
-                row.style.cssText = 'margin-bottom:6px;font-size:13px;';
-                row.createEl('strong', { text: key + '：' }).style.cssText = 'display:inline-block;width:70px;color:#555;';
-                row.createEl('span', { text: fields[key] });
+                this.renderFieldRow(infoDiv, key, fields[key]);
             }
         }
-        for (var key in fields) {
-            if (fields.hasOwnProperty(key) && displayed.indexOf(key) === -1) {
-                var row = infoDiv.createEl('div');
-                row.style.cssText = 'margin-bottom:6px;font-size:13px;';
-                row.createEl('strong', { text: key + '：' }).style.cssText = 'display:inline-block;width:70px;color:#555;';
-                row.createEl('span', { text: fields[key] });
+        for (var fKey in fields) {
+            if (fields.hasOwnProperty(fKey) && displayed.indexOf(fKey) === -1) {
+                this.renderFieldRow(infoDiv, fKey, fields[fKey]);
             }
         }
-
         if (Object.keys(fields).length === 0) {
-            infoDiv.createEl('p', { text: '暂无其他信息' }).style.cssText = 'color:var(--text-muted);font-size:12px;text-align:center;';
+            infoDiv.createEl('p', { text: '暂无其他信息', cls: 'my-char-view-muted' });
         }
 
         var lc = getCharLifecycle(this.view, this.charData);
         if (lc.birth || lc.firstAppear || lc.death) {
-            el.createEl('h3', { text: '⏳ 生命周期' }).style.cssText = 'margin:12px 0 6px;font-size:15px;';
-            var lcPanel = el.createEl('div', { cls: 'my-char-detail-panel' });
+            var lcSec = el.createEl('div', { cls: 'my-char-detail-section' });
+            lcSec.createEl('h3', { text: '⏳ 生命周期', cls: 'my-char-detail-section-title' });
+            var lcPanel = lcSec.createEl('div', { cls: 'my-char-detail-panel' });
             if (lc.birth) {
-                var birthRow = lcPanel.createEl('div');
+                var birthRow = lcPanel.createEl('div', { cls: 'my-char-lifecycle-row' });
                 birthRow.createEl('strong', { text: '出生：' });
                 birthRow.createEl('span', { text: lc.birth });
                 if (lc.birthParsed && lc.birthParsed.sortValue !== null) {
@@ -7076,7 +7694,7 @@ var DetailModal = /** @class */ (function (_super) {
                 }
             }
             if (lc.firstAppear) {
-                var appearRow = lcPanel.createEl('div');
+                var appearRow = lcPanel.createEl('div', { cls: 'my-char-lifecycle-row' });
                 appearRow.createEl('strong', { text: '首次出场：' });
                 appearRow.createEl('span', { text: lc.firstAppear });
                 if (lc.firstAppearParsed && lc.firstAppearParsed.sortValue !== null) {
@@ -7084,7 +7702,7 @@ var DetailModal = /** @class */ (function (_super) {
                 }
             }
             if (lc.death) {
-                var deathRow = lcPanel.createEl('div');
+                var deathRow = lcPanel.createEl('div', { cls: 'my-char-lifecycle-row' });
                 deathRow.createEl('strong', { text: '死亡：' });
                 deathRow.createEl('span', { text: lc.death });
                 if (lc.deathParsed && lc.deathParsed.sortValue !== null) {
@@ -7094,110 +7712,75 @@ var DetailModal = /** @class */ (function (_super) {
         }
 
         if (this.manualRels.length > 0) {
-            el.createEl('h3', { text: '人物关系 (' + this.manualRels.length + ')' }).style.cssText = 'margin:12px 0 6px;font-size:15px;';
-            for (var i = 0; i < this.manualRels.length; i++) {
-                var rel = this.manualRels[i];
-                var other = rel.charA === this.charData.name ? rel.charB : rel.charA;
-                var item = el.createEl('div');
-                item.style.cssText = 'padding:8px 10px;margin:3px 0;border:1px solid #e0e0e0;border-radius:4px;';
-                
-                var intimacyVal = (rel.intimacy !== undefined) ? rel.intimacy : 0;
-                var intimacyLabel = getIntimacyLabel(intimacyVal);
-                var intimacyColor = getIntimacyColor(intimacyVal);
+            var relSec = el.createEl('div', { cls: 'my-char-detail-section' });
+            relSec.createEl('h3', {
+                text: '人物关系 (' + this.manualRels.length + ')',
+                cls: 'my-char-detail-section-title'
+            });
+            for (var ri = 0; ri < this.manualRels.length; ri++) {
+                (function (rel) {
+                    var other = rel.charA === self.charData.name ? rel.charB : rel.charA;
+                    var item = relSec.createEl('div', { cls: 'my-char-detail-rel-card' });
 
-                var otherLink = item.createEl('strong', { text: other, cls: 'my-char-view-link' });
-                var typeBadge = item.createEl('span', { text: rel.type });
-                typeBadge.style.cssText = 'background:var(--interactive-accent);color:var(--text-on-accent);padding:2px 8px;border-radius:10px;font-size:11px;margin-left:6px;';
-                var intimacyBadge = item.createEl('span', { text: '❤️ ' + intimacyLabel });
-                intimacyBadge.style.cssText = 'padding:2px 6px;border-radius:8px;font-size:10px;color:white;background:' + intimacyColor + ';margin-left:4px;';
-                if (rel.desc) {
-                    item.createEl('div', { text: rel.desc }).style.cssText = 'font-size:12px;color:#666;margin-top:4px;';
-                }
-                if (rel.startTime || rel.endTime) {
-                    var timeText = '';
-                    if (rel.startTime) timeText += '📅 始于 ' + rel.startTime;
-                    if (rel.endTime) timeText += (timeText ? ' · ' : '') + '⌛ 止于 ' + rel.endTime;
-                    item.createEl('div', { text: timeText }).style.cssText = 'font-size:10px;color:#888;margin-top:2px;';
-                }
-                
-                otherLink.addEventListener('click', (function(targetName) {
-                    return function() {
-                        var targetChar = self.view.findChar(targetName);
+                    var intimacyVal = (rel.intimacy !== undefined) ? rel.intimacy : 0;
+                    var intimacyLabel = getIntimacyLabel(intimacyVal);
+                    var intimacyColor = getIntimacyColor(intimacyVal);
+
+                    var otherLink = item.createEl('strong', { text: other, cls: 'my-char-view-link' });
+                    item.createEl('span', { text: rel.type, cls: 'my-char-rel-type-badge' });
+                    var intimacyBadge = item.createEl('span', {
+                        text: '❤️ ' + intimacyLabel,
+                        cls: 'my-char-rel-intimacy-badge'
+                    });
+                    intimacyBadge.style.background = intimacyColor;
+                    if (rel.desc) {
+                        item.createEl('div', { text: rel.desc, cls: 'my-char-rel-desc' });
+                    }
+                    if (rel.startTime || rel.endTime) {
+                        var timeText = '';
+                        if (rel.startTime) timeText += '📅 始于 ' + rel.startTime;
+                        if (rel.endTime) timeText += (timeText ? ' · ' : '') + '⌛ 止于 ' + rel.endTime;
+                        item.createEl('div', { text: timeText, cls: 'my-char-rel-time' });
+                    }
+
+                    otherLink.addEventListener('click', function () {
+                        var targetChar = self.view.findChar(other);
                         if (targetChar) {
                             self.close();
                             self.view.showCharDetail(targetChar);
                         }
-                    };
-                })(other));
-                // 🆕 新增：变化摘要
-                var historySummary = getChangeSummary(getRelationHistory(self.view.plugin, rel.charA, rel.charB));
-                var histSummarySpan = item.createEl('div');
-                histSummarySpan.style.cssText = 'font-size:10px;color:#888;margin-top:2px;';
-                histSummarySpan.textContent = '📈 ' + historySummary;
+                    });
 
-                // 🆕 新增：查看历史按钮
-                var histBtn = item.createEl('button', { text: '📊 查看变化历史' });
-                histBtn.style.cssText = 'margin-top:4px;padding:2px 8px;border:1px solid #ddd;border-radius:3px;cursor:pointer;font-size:10px;background:white;color:#9b59b6;';
-                histBtn.addEventListener('click', function(e) {
-                    e.stopPropagation();
-                    self.view.showChangeHistory(rel);
-                });
+                    var historySummary = getChangeSummary(getRelationHistory(self.view.plugin, rel.charA, rel.charB));
+                    item.createEl('div', {
+                        text: '📈 ' + historySummary,
+                        cls: 'my-char-rel-history-summary'
+                    });
+
+                    var histBtn = item.createEl('button', {
+                        text: '📊 查看变化历史',
+                        cls: 'my-char-rel-history-btn'
+                    });
+                    histBtn.addEventListener('click', function (e) {
+                        e.stopPropagation();
+                        self.view.showChangeHistory(rel);
+                    });
+                })(this.manualRels[ri]);
             }
         }
 
-        var relNames = Object.keys(this.relations);
-        if (relNames.length > 0) {
-            el.createEl('h3', { text: '共同出场人物 (' + relNames.length + '人)' }).style.cssText = 'margin:12px 0 6px;font-size:15px;';
-            for (var i = 0; i < relNames.length; i++) {
-                var name = relNames[i];
-                var evts = this.relations[name];
-                var item = el.createEl('div');
-                item.style.cssText = 'padding:6px 10px;margin:3px 0;background:#f9f9f9;border-radius:4px;';
-                item.createEl('strong', { text: name }).style.cssText = 'cursor:pointer;color:#4a90e2;text-decoration:underline;';
-                item.createEl('div', { text: '共同出场: ' + evts.length + '次' }).style.cssText = 'font-size:12px;color:#666;';
-                
-                item.querySelector('strong').addEventListener('click', (function(targetName) {
-                    return function() {
-                        var targetChar = self.view.findChar(targetName);
-                        if (targetChar) {
-                            self.close();
-                            self.view.showCharDetail(targetChar);
-                        }
-                    };
-                })(name));
-            }
-        }
+        this._interactiveRoot = el.createEl('div', { cls: 'my-char-detail-interactive' });
+        this.renderCoAppearSection(this._interactiveRoot);
+        this.renderTimelineSection(this._interactiveRoot);
 
-        if (this.events.length > 0) {
-            el.createEl('h3', { text: '时间线出场 (' + this.events.length + '次)' }).style.cssText = 'margin:12px 0 6px;font-size:15px;';
-            var showCount = Math.min(50, this.events.length);
-            for (var i = 0; i < showCount; i++) {
-                var item = el.createEl('div', { cls: 'my-char-timeline-event' });
-                var loc = this.events[i].volume ? this.events[i].volume + ' / ' : '';
-                item.createEl('small', { text: '[' + loc + this.events[i].year + ' ' + this.events[i].month + '] ' }).style.color = '#999';
-                var evtSpan = item.createEl('span');
-                evtSpan.textContent = this.events[i].event;
-                if (this.events[i].chapterNote) {
-                    item.createEl('span', { text: ' → ' + this.events[i].chapterNote, cls: 'my-char-link' })
-                        .addEventListener('click', (function(note) {
-                            return function() {
-                                var m = note.match(/\[\[([^\]|]+)/);
-                                if (m) self.app.workspace.openLinkText(m[1], '');
-                            };
-                        })(this.events[i].chapterNote));
-                }
-            }
-            if (this.events.length > 50) {
-                el.createEl('p', { text: '...还有 ' + (this.events.length - 50) + ' 条' }).style.cssText = 'color:#888;font-size:12px;';
-            }
-        }
-        
-        var closeBtn = el.createEl('button', { text: '关闭', cls: 'my-char-view-btn' });
-        closeBtn.style.cssText = 'margin-top:15px;width:100%;';
+        var closeBtn = el.createEl('button', {
+            text: '关闭',
+            cls: 'my-char-view-btn my-char-modal-close-btn'
+        });
         closeBtn.addEventListener('click', function () { self.close(); });
     };
 
-    DetailModal.prototype.renderEditForm = function(el) {
+    DetailModal.prototype.renderEditForm = function (el) {
         var self = this;
         var form = el.createEl('div', { cls: 'my-char-detail-panel' });
         var fields = Object.assign({}, this.charData.fields);
@@ -7219,7 +7802,7 @@ var DetailModal = /** @class */ (function (_super) {
         var newKeyInput = addRow.createEl('input', { type: 'text', cls: 'my-char-form-input', placeholder: '如：外貌、性格' });
         var newValInput = addRow.createEl('input', { type: 'text', cls: 'my-char-form-input', placeholder: '字段值' });
         var saveBtn = el.createEl('button', { text: '💾 保存到人物索引', cls: 'my-char-view-btn my-char-btn-block' });
-        saveBtn.addEventListener('click', async function() {
+        saveBtn.addEventListener('click', async function () {
             var out = {};
             for (var k in self._fieldInputs) {
                 if (self._fieldInputs[k].value.trim()) out[k] = self._fieldInputs[k].value.trim();
@@ -7994,7 +8577,7 @@ el.createEl('p', {
 
         new obsidian.Setting(el)
             .setName('关系写入人物 MD')
-            .setDesc('把关系与亲密度变化写入人物索引的「### 关系 / ### 关系变化」小节，删除时一并清除')
+            .setDesc('把关系与亲密度变化写成人物索引里的「### 关系 / ### 关系变化」表格，方便在 MD 里直接改；仍兼容旧的列表写法')
             .addToggle(function (toggle) {
                 toggle.setValue(self.plugin.settings.syncRelationsToCharMd !== false)
                     .onChange(async function (value) {
@@ -8193,13 +8776,13 @@ el.createEl('p', {
 }(obsidian.PluginSettingTab));
 
 // ========== 主插件 ==========
-var MyPlugin = /** @class */ (function (_super) {
-    __extends(MyPlugin, _super);
-    function MyPlugin() {
+var RelationWeaverPlugin = /** @class */ (function (_super) {
+    __extends(RelationWeaverPlugin, _super);
+    function RelationWeaverPlugin() {
         return _super !== null && _super.apply(this, arguments) || this;
     }
 
-    MyPlugin.prototype.onload = async function () {
+    RelationWeaverPlugin.prototype.onload = async function () {
         await this.loadSettings();
 
         this.registerView(VIEW_TYPE, function (leaf) {
@@ -8361,11 +8944,11 @@ var MyPlugin = /** @class */ (function (_super) {
         this.addSettingTab(new SettingTab(this.app, this));
     };
 
-    MyPlugin.prototype.onunload = function () {
+    RelationWeaverPlugin.prototype.onunload = function () {
         this.app.workspace.detachLeavesOfType(VIEW_TYPE);
     };
 
-    MyPlugin.prototype.loadSettings = async function () {
+    RelationWeaverPlugin.prototype.loadSettings = async function () {
         var defaults = { 
             charFile: '人物索引.md',
             charFolder: '',
@@ -8408,11 +8991,11 @@ var MyPlugin = /** @class */ (function (_super) {
         this.settings = Object.assign({}, defaults, await this.loadData());
     };
 
-    MyPlugin.prototype.saveSettings = async function () {
+    RelationWeaverPlugin.prototype.saveSettings = async function () {
         await this.saveData(this.settings);
     };
 
-    return MyPlugin;
+    return RelationWeaverPlugin;
 }(obsidian.Plugin));
 // ============================================================
 // 🆕 亲密度动态演化 - 数据模型和工具函数
@@ -10196,8 +10779,8 @@ SettingTab.prototype.display = function() {
 
 // ========== 扩展默认设置 ==========
 
-var __origLoadSettingsFinal = MyPlugin.prototype.loadSettings;
-MyPlugin.prototype.loadSettings = async function() {
+var __origLoadSettingsFinal = RelationWeaverPlugin.prototype.loadSettings;
+RelationWeaverPlugin.prototype.loadSettings = async function() {
     var defaults = {
         charFile: '人物索引.md', charFolder: '', timelineFile: '时间线.md', timelineFolder: '',
         customFields: '', customRelationTypes: '', factionFieldName: '阵营',
@@ -11001,5 +11584,5 @@ for (var si5 = 0; si5 < data.timeSlots.length; si5++) {
     hint.className = 'my-char-muted'; hint.style.fontSize = '10px'; hint.style.marginLeft = 'auto';
 };
 
-module.exports = MyPlugin;
+module.exports = RelationWeaverPlugin;
 console.log('✅ 人物关系谱系插件加载完成');
