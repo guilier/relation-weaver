@@ -62,6 +62,56 @@ function showUserError(message, error) {
     new obsidian.Notice('❌ ' + message);
 }
 
+function isVaultMdFile(file) {
+    return !!(file && file instanceof obsidian.TFile);
+}
+
+function beginVaultWriteSuppress(plugin) {
+    if (!plugin) return;
+    plugin._suppressVaultRefresh = (plugin._suppressVaultRefresh || 0) + 1;
+}
+
+function endVaultWriteSuppress(plugin) {
+    if (!plugin) return;
+    plugin._suppressVaultRefresh = Math.max(0, (plugin._suppressVaultRefresh || 0) - 1);
+}
+
+function isVaultRefreshSuppressed(plugin) {
+    return !!(plugin && plugin._suppressVaultRefresh > 0);
+}
+
+async function withVaultWriteSuppress(plugin, fn) {
+    beginVaultWriteSuppress(plugin);
+    try {
+        return await fn();
+    } finally {
+        await new Promise(function(resolve) {
+            setTimeout(function() {
+                endVaultWriteSuppress(plugin);
+                resolve();
+            }, 80);
+        });
+    }
+}
+
+/** 按行精确匹配二级标题，避免「张三」误命中「张三丰」、「1」误命中「10」 */
+function findExactH2LineIndex(lines, title) {
+    var target = '## ' + String(title || '').trim();
+    for (var i = 0; i < lines.length; i++) {
+        if (lines[i].trim() === target) return i;
+    }
+    return -1;
+}
+
+function contentHasExactH2(content, title) {
+    if (!content || typeof content !== 'string') return false;
+    return findExactH2LineIndex(content.split('\n'), title) !== -1;
+}
+
+function normalizeMonthHeadingTitle(month) {
+    return String(month || '').replace(/[：:]/g, '').trim();
+}
+
 function escapeHtml(text) {
     return String(text)
         .replace(/&/g, '&amp;')
@@ -867,85 +917,87 @@ async function syncRelationsIntoCharMd(app, plugin, relations, intimacyHistory) 
     // 与加载路径一致，避免写入/读取落到不同文件
     var fullPath = getCharFullPath(plugin);
     var file = app.vault.getAbstractFileByPath(fullPath);
-    if (!file) {
+    if (!isVaultMdFile(file)) {
         fullPath = getCharFullPathForExt(plugin);
         file = app.vault.getAbstractFileByPath(fullPath);
     }
-    if (!file) {
+    if (!isVaultMdFile(file)) {
         console.log('同步关系到人物 MD 失败：未找到人物索引', fullPath);
         return;
     }
-    try {
-        var content = await app.vault.read(file);
-        var lines = content.split('\n');
-        var out = [];
-        var currentChar = null;
-        var skippingRelSection = false;
-        var fieldLines = [];
-        var afterFieldLines = [];
-        var inFields = false;
+    return withVaultWriteSuppress(plugin, async function() {
+        try {
+            var content = await app.vault.read(file);
+            var lines = content.split('\n');
+            var out = [];
+            var currentChar = null;
+            var skippingRelSection = false;
+            var fieldLines = [];
+            var afterFieldLines = [];
+            var inFields = false;
 
-        function flushChar() {
-            if (!currentChar) return;
-            for (var fi = 0; fi < fieldLines.length; fi++) out.push(fieldLines[fi]);
-            appendCharRelationSections(out, currentChar, relations, intimacyHistory);
-            for (var ai = 0; ai < afterFieldLines.length; ai++) out.push(afterFieldLines[ai]);
-            currentChar = null;
-            fieldLines = [];
-            afterFieldLines = [];
-            inFields = false;
-            skippingRelSection = false;
-        }
-
-        for (var i = 0; i < lines.length; i++) {
-            var line = lines[i];
-            var trimmed = line.trim();
-            if (trimmed.startsWith('## ') && !trimmed.startsWith('### ')) {
-                flushChar();
-                currentChar = trimmed.substring(3).trim();
-                out.push(line);
-                inFields = true;
-                continue;
-            }
-            if (currentChar && (trimmed === '### 关系' || trimmed === '###关系' ||
-                trimmed === '### 关系变化' || trimmed === '###关系变化')) {
-                skippingRelSection = true;
+            function flushChar() {
+                if (!currentChar) return;
+                for (var fi = 0; fi < fieldLines.length; fi++) out.push(fieldLines[fi]);
+                appendCharRelationSections(out, currentChar, relations, intimacyHistory);
+                for (var ai = 0; ai < afterFieldLines.length; ai++) out.push(afterFieldLines[ai]);
+                currentChar = null;
+                fieldLines = [];
+                afterFieldLines = [];
                 inFields = false;
-                continue;
+                skippingRelSection = false;
             }
-            if (skippingRelSection) {
-                if (trimmed.startsWith('### ') || (trimmed.startsWith('## ') && !trimmed.startsWith('### '))) {
-                    skippingRelSection = false;
-                    i--;
+
+            for (var i = 0; i < lines.length; i++) {
+                var line = lines[i];
+                var trimmed = line.trim();
+                if (trimmed.startsWith('## ') && !trimmed.startsWith('### ')) {
+                    flushChar();
+                    currentChar = trimmed.substring(3).trim();
+                    out.push(line);
+                    inFields = true;
                     continue;
                 }
-                continue;
-            }
-            if (!currentChar) {
-                out.push(line);
-                continue;
-            }
-            // 人物信息字段（- xxx：yyy）紧跟在 ## 名下；其后的其它小节仍保留在关系之后
-            if (inFields && (trimmed.startsWith('- ') || trimmed.startsWith('* ') || trimmed === '')) {
-                fieldLines.push(line);
-                continue;
-            }
-            if (inFields && trimmed.startsWith('### ')) {
-                inFields = false;
+                if (currentChar && (trimmed === '### 关系' || trimmed === '###关系' ||
+                    trimmed === '### 关系变化' || trimmed === '###关系变化')) {
+                    skippingRelSection = true;
+                    inFields = false;
+                    continue;
+                }
+                if (skippingRelSection) {
+                    if (trimmed.startsWith('### ') || (trimmed.startsWith('## ') && !trimmed.startsWith('### '))) {
+                        skippingRelSection = false;
+                        i--;
+                        continue;
+                    }
+                    continue;
+                }
+                if (!currentChar) {
+                    out.push(line);
+                    continue;
+                }
+                // 人物信息字段（- xxx：yyy）紧跟在 ## 名下；其后的其它小节仍保留在关系之后
+                if (inFields && (trimmed.startsWith('- ') || trimmed.startsWith('* ') || trimmed === '')) {
+                    fieldLines.push(line);
+                    continue;
+                }
+                if (inFields && trimmed.startsWith('### ')) {
+                    inFields = false;
+                    afterFieldLines.push(line);
+                    continue;
+                }
+                if (inFields) {
+                    inFields = false;
+                }
                 afterFieldLines.push(line);
-                continue;
             }
-            if (inFields) {
-                inFields = false;
-            }
-            afterFieldLines.push(line);
+            flushChar();
+            var next = out.join('\n').replace(/\n{3,}/g, '\n\n');
+            if (next !== content) await app.vault.modify(file, next);
+        } catch (e) {
+            showUserError('同步关系到人物 MD 失败', e);
         }
-        flushChar();
-        var next = out.join('\n').replace(/\n{3,}/g, '\n\n');
-        if (next !== content) await app.vault.modify(file, next);
-    } catch (e) {
-        showUserError('同步关系到人物 MD 失败', e);
-    }
+    });
 }
 
 function mergeCsvSetting(existing, additions) {
@@ -1248,35 +1300,40 @@ function buildEventMdLine(evt) {
 }
 
 async function deleteEventFromMd(app, plugin, lineIndex) {
-    var fullPath = getTimelineFullPathForExt(plugin);
-    var file = app.vault.getAbstractFileByPath(fullPath);
-    if (!file || lineIndex == null || lineIndex < 0) return false;
-    var content = await app.vault.read(file);
-    var lines = content.split('\n');
-    if (lineIndex >= lines.length) return false;
-    lines.splice(lineIndex, 1);
-    await app.vault.modify(file, lines.join('\n'));
-    return true;
+    return withVaultWriteSuppress(plugin, async function() {
+        var fullPath = getTimelineFullPathForExt(plugin);
+        var file = app.vault.getAbstractFileByPath(fullPath);
+        if (!isVaultMdFile(file) || lineIndex == null || lineIndex < 0) return false;
+        var content = await app.vault.read(file);
+        var lines = content.split('\n');
+        if (lineIndex >= lines.length) return false;
+        lines.splice(lineIndex, 1);
+        await app.vault.modify(file, lines.join('\n'));
+        return true;
+    });
 }
 
 async function updateEventInMd(app, plugin, originalEvt, newEvt) {
-    var locChanged = (originalEvt.volume || '') !== (newEvt.volume || '') ||
-        originalEvt.year !== newEvt.year ||
-        (originalEvt.month || '未标注') !== (newEvt.month || '未标注');
-    if (locChanged) {
-        await deleteEventFromMd(app, plugin, originalEvt._lineIndex);
-        await appendEventToMd(app, plugin, newEvt);
-    } else {
-        var fullPath = getTimelineFullPathForExt(plugin);
-        var file = app.vault.getAbstractFileByPath(fullPath);
-        if (!file || originalEvt._lineIndex == null) return false;
-        var content = await app.vault.read(file);
-        var lines = content.split('\n');
-        if (originalEvt._lineIndex >= lines.length) return false;
-        lines[originalEvt._lineIndex] = buildEventMdLine(newEvt);
-        await app.vault.modify(file, lines.join('\n'));
-    }
-    return true;
+    return withVaultWriteSuppress(plugin, async function() {
+        var locChanged = (originalEvt.volume || '') !== (newEvt.volume || '') ||
+            originalEvt.year !== newEvt.year ||
+            (originalEvt.month || '未标注') !== (newEvt.month || '未标注');
+        if (locChanged) {
+            // 内层写入函数自带 suppress（引用计数可嵌套）
+            await deleteEventFromMd(app, plugin, originalEvt._lineIndex);
+            await appendEventToMd(app, plugin, newEvt);
+        } else {
+            var fullPath = getTimelineFullPathForExt(plugin);
+            var file = app.vault.getAbstractFileByPath(fullPath);
+            if (!isVaultMdFile(file) || originalEvt._lineIndex == null) return false;
+            var content = await app.vault.read(file);
+            var lines = content.split('\n');
+            if (originalEvt._lineIndex >= lines.length) return false;
+            lines[originalEvt._lineIndex] = buildEventMdLine(newEvt);
+            await app.vault.modify(file, lines.join('\n'));
+        }
+        return true;
+    });
 }
 
 function getPlotLineGroup(timeline, plotLineName) {
@@ -1299,74 +1356,125 @@ function buildCharMdBlock(name, fields, relations, intimacyHistory) {
 }
 
 async function appendCharToMd(app, plugin, name, fields) {
-    var path = plugin.settings.charFile ? resolveCharPathForExt(plugin) : '人物索引.md';
-    var fullPath = getCharFullPathForExt(plugin);
-    var block = buildCharMdBlock(name, fields);
-    var existing = app.vault.getAbstractFileByPath(fullPath);
-    if (existing) {
-        var content = await app.vault.read(existing);
-        if (content.indexOf('## ' + name) !== -1) {
-            return updateCharInMd(app, plugin, name, fields);
+    return withVaultWriteSuppress(plugin, async function() {
+        var fullPath = getCharFullPathForExt(plugin);
+        var block = buildCharMdBlock(name, fields);
+        var existing = app.vault.getAbstractFileByPath(fullPath);
+        if (isVaultMdFile(existing)) {
+            var content = await app.vault.read(existing);
+            if (contentHasExactH2(content, name)) {
+                await updateCharInMd(app, plugin, name, fields, { merge: true });
+                return { merged: true };
+            }
+            await app.vault.modify(existing, content.trim() + '\n\n' + block + '\n');
+            return { merged: false };
         }
-        await app.vault.modify(existing, content.trim() + '\n\n' + block + '\n');
-    } else {
         var folder = fullPath.substring(0, fullPath.lastIndexOf('/'));
         if (folder && !await app.vault.adapter.exists(folder)) await app.vault.adapter.mkdir(folder);
         await app.vault.create(fullPath, '# 人物索引\n\n' + block + '\n');
-    }
+        return { merged: false };
+    });
 }
 
-async function updateCharInMd(app, plugin, name, fields) {
-    var fullPath = getCharFullPathForExt(plugin);
-    var file = app.vault.getAbstractFileByPath(fullPath);
-    if (!file) return false;
-    var content = await app.vault.read(file);
-    var lines = content.split('\n');
-    var out = [];
-    var inTarget = false;
-    var inSubSection = false;
-    var replaced = false;
+/**
+ * 更新人物字段块。
+ * options.merge=true：合并非空新字段，保留未提交的旧字段与 ### 小节（快速添加用）
+ * options.merge=false/缺省：用本次 fields 整块替换字段行（详情保存用）
+ */
+async function updateCharInMd(app, plugin, name, fields, options) {
+    options = options || {};
+    var merge = !!options.merge;
+    return withVaultWriteSuppress(plugin, async function() {
+        var fullPath = getCharFullPathForExt(plugin);
+        var file = app.vault.getAbstractFileByPath(fullPath);
+        if (!isVaultMdFile(file)) return false;
+        var content = await app.vault.read(file);
+        var lines = content.split('\n');
+        var out = [];
+        var inTarget = false;
+        var inSubSection = false;
+        var replaced = false;
+        var pendingFields = null;
 
-    for (var i = 0; i < lines.length; i++) {
-        var line = lines[i];
-        var trimmed = line.trim();
-        if (trimmed.startsWith('## ') && !trimmed.startsWith('### ')) {
-            inTarget = false;
-            inSubSection = false;
-            if (trimmed === '## ' + name) {
-                inTarget = true;
-                out.push(line);
-                for (var k2 in fields) {
-                    if (fields.hasOwnProperty(k2) && fields[k2]) out.push('- ' + k2 + '：' + fields[k2]);
+        function flushPendingFields() {
+            if (!pendingFields) return;
+            for (var k in pendingFields) {
+                if (pendingFields.hasOwnProperty(k) && pendingFields[k]) {
+                    out.push('- ' + k + '：' + pendingFields[k]);
                 }
-                replaced = true;
-                continue;
             }
-            out.push(line);
-            continue;
+            pendingFields = null;
         }
-        if (inTarget) {
-            if (trimmed.startsWith('### ')) {
-                inSubSection = true;
+
+        for (var i = 0; i < lines.length; i++) {
+            var line = lines[i];
+            var trimmed = line.trim();
+            if (trimmed.startsWith('## ') && !trimmed.startsWith('### ')) {
+                if (inTarget) flushPendingFields();
+                inTarget = false;
+                inSubSection = false;
+                if (trimmed === '## ' + name) {
+                    inTarget = true;
+                    replaced = true;
+                    out.push(line);
+                    if (merge) {
+                        pendingFields = {};
+                        for (var mk in fields) {
+                            if (fields.hasOwnProperty(mk) && fields[mk]) pendingFields[mk] = fields[mk];
+                        }
+                    } else {
+                        for (var k2 in fields) {
+                            if (fields.hasOwnProperty(k2) && fields[k2]) out.push('- ' + k2 + '：' + fields[k2]);
+                        }
+                    }
+                    continue;
+                }
                 out.push(line);
                 continue;
             }
-            if (inSubSection) {
+            if (inTarget) {
+                if (trimmed.startsWith('### ')) {
+                    flushPendingFields();
+                    inSubSection = true;
+                    out.push(line);
+                    continue;
+                }
+                if (inSubSection) {
+                    out.push(line);
+                    continue;
+                }
+                if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+                    if (merge) {
+                        var fieldLine = trimmed.substring(2);
+                        var colonIdx = fieldLine.indexOf('：');
+                        if (colonIdx === -1) colonIdx = fieldLine.indexOf(':');
+                        if (colonIdx !== -1) {
+                            var key = fieldLine.substring(0, colonIdx).trim();
+                            if (pendingFields && pendingFields.hasOwnProperty(key) && pendingFields[key]) {
+                                out.push('- ' + key + '：' + pendingFields[key]);
+                                delete pendingFields[key];
+                                continue;
+                            }
+                        }
+                        out.push(line);
+                        continue;
+                    }
+                    continue;
+                }
+                flushPendingFields();
                 out.push(line);
                 continue;
             }
-            if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) continue;
             out.push(line);
-            continue;
         }
-        out.push(line);
-    }
-    if (!replaced) {
-        out.push('');
-        out.push(buildCharMdBlock(name, fields));
-    }
-    await app.vault.modify(file, out.join('\n'));
-    return true;
+        if (inTarget) flushPendingFields();
+        if (!replaced) {
+            out.push('');
+            out.push(buildCharMdBlock(name, fields));
+        }
+        await app.vault.modify(file, out.join('\n'));
+        return true;
+    });
 }
 
 function resolveCharPathForExt(plugin) {
@@ -1399,41 +1507,75 @@ function getTimelineFullPathForExt(plugin) {
 }
 
 async function appendEventToMd(app, plugin, evt) {
-    var fullPath = getTimelineFullPathForExt(plugin);
-    var existing = app.vault.getAbstractFileByPath(fullPath);
-    var tagPart = evt.tag ? '[' + evt.tag + '] ' : '';
-    var line = '- ' + tagPart + serializeEventMeta(evt);
-    var section = '';
+    return withVaultWriteSuppress(plugin, async function() {
+        var fullPath = getTimelineFullPathForExt(plugin);
+        var existing = app.vault.getAbstractFileByPath(fullPath);
+        var eventLine = buildEventMdLine(evt);
+        var month = (evt.month && evt.month !== '未标注') ? String(evt.month).trim() : '';
+        var monthNorm = normalizeMonthHeadingTitle(month);
 
-    if (plugin.settings.timelineMode === 'chapter' && evt.volume) {
-        section += '# ' + evt.volume + '\n\n';
-    }
-    section += '## ' + evt.year + '\n';
-    if (evt.month && evt.month !== '未标注') section += '### ' + evt.month + '：\n';
-    section += line + '\n';
-
-    if (existing) {
-        var content = await app.vault.read(existing);
-        if (content.indexOf('## ' + evt.year) !== -1) {
-            var idx = content.indexOf('## ' + evt.year);
-            var after = content.indexOf('\n', idx) + 1;
-            var before = content.substring(0, after);
-            var rest = content.substring(after);
-            var nextH2 = rest.search(/\n## /);
-            if (nextH2 === -1) {
-                await app.vault.modify(existing, content.trim() + '\n' + line + '\n');
-            } else {
-                var insertAt = after + nextH2;
-                await app.vault.modify(existing, content.substring(0, insertAt) + line + '\n' + content.substring(insertAt));
-            }
-        } else {
-            await app.vault.modify(existing, content.trim() + '\n\n' + section);
+        var sectionLines = [];
+        if (plugin.settings.timelineMode === 'chapter' && evt.volume) {
+            sectionLines.push('# ' + evt.volume);
+            sectionLines.push('');
         }
-    } else {
+        sectionLines.push('## ' + evt.year);
+        if (month) sectionLines.push('### ' + month + '：');
+        sectionLines.push(eventLine);
+
+        if (isVaultMdFile(existing)) {
+            var content = await app.vault.read(existing);
+            var lines = content.split('\n');
+            var yearIdx = findExactH2LineIndex(lines, evt.year);
+
+            if (yearIdx === -1) {
+                await app.vault.modify(existing, content.trim() + '\n\n' + sectionLines.join('\n') + '\n');
+                return;
+            }
+
+            var yearEnd = lines.length;
+            for (var i = yearIdx + 1; i < lines.length; i++) {
+                var t = lines[i].trim();
+                if (t.startsWith('## ') && !t.startsWith('### ')) {
+                    yearEnd = i;
+                    break;
+                }
+            }
+
+            if (month) {
+                var monthIdx = -1;
+                for (var j = yearIdx + 1; j < yearEnd; j++) {
+                    var mt = lines[j].trim();
+                    if (mt.startsWith('### ')) {
+                        if (normalizeMonthHeadingTitle(mt.substring(4)) === monthNorm) {
+                            monthIdx = j;
+                            break;
+                        }
+                    }
+                }
+                if (monthIdx !== -1) {
+                    var monthEnd = yearEnd;
+                    for (var k = monthIdx + 1; k < yearEnd; k++) {
+                        if (lines[k].trim().startsWith('### ')) {
+                            monthEnd = k;
+                            break;
+                        }
+                    }
+                    lines.splice(monthEnd, 0, eventLine);
+                } else {
+                    lines.splice(yearEnd, 0, '### ' + month + '：', eventLine);
+                }
+            } else {
+                lines.splice(yearEnd, 0, eventLine);
+            }
+            await app.vault.modify(existing, lines.join('\n'));
+            return;
+        }
+
         var folder = fullPath.substring(0, fullPath.lastIndexOf('/'));
         if (folder && !await app.vault.adapter.exists(folder)) await app.vault.adapter.mkdir(folder);
-        await app.vault.create(fullPath, '# 时间线\n\n' + section);
-    }
+        await app.vault.create(fullPath, '# 时间线\n\n' + sectionLines.join('\n') + '\n');
+    });
 }
 
 function renderWikiLinksInElement(container, app, onClick) {
@@ -1649,66 +1791,68 @@ function auditFirstAppearSync(view) {
 }
 
 async function setCharFieldInMd(app, plugin, charName, fieldName, fieldValue) {
-    var fullPath = getCharFullPathForExt(plugin);
-    var file = app.vault.getAbstractFileByPath(fullPath);
-    if (!file) return false;
-    var content = await app.vault.read(file);
-    var lines = content.split('\n');
-    var out = [];
-    var inTarget = false;
-    var inSubSection = false;
-    var fieldUpdated = false;
-    var foundChar = false;
+    return withVaultWriteSuppress(plugin, async function() {
+        var fullPath = getCharFullPathForExt(plugin);
+        var file = app.vault.getAbstractFileByPath(fullPath);
+        if (!isVaultMdFile(file)) return false;
+        var content = await app.vault.read(file);
+        var lines = content.split('\n');
+        var out = [];
+        var inTarget = false;
+        var inSubSection = false;
+        var fieldUpdated = false;
+        var foundChar = false;
 
-    for (var i = 0; i < lines.length; i++) {
-        var line = lines[i];
-        var trimmed = line.trim();
-        if (trimmed.startsWith('## ') && !trimmed.startsWith('### ')) {
-            if (inTarget && !fieldUpdated) {
-                out.push('- ' + fieldName + '：' + fieldValue);
-                fieldUpdated = true;
-            }
-            inTarget = trimmed === '## ' + charName;
-            inSubSection = false;
-            if (inTarget) foundChar = true;
-            out.push(line);
-            continue;
-        }
-        if (inTarget && trimmed.startsWith('### ')) {
-            if (!fieldUpdated) {
-                out.push('- ' + fieldName + '：' + fieldValue);
-                fieldUpdated = true;
-            }
-            inSubSection = true;
-            out.push(line);
-            continue;
-        }
-        if (inTarget && inSubSection) {
-            out.push(line);
-            continue;
-        }
-        if (inTarget && (trimmed.startsWith('- ') || trimmed.startsWith('* '))) {
-            var fieldLine = trimmed.substring(2);
-            var colonIdx = fieldLine.indexOf('：');
-            if (colonIdx === -1) colonIdx = fieldLine.indexOf(':');
-            if (colonIdx !== -1) {
-                var key = fieldLine.substring(0, colonIdx).trim();
-                if (key === fieldName) {
+        for (var i = 0; i < lines.length; i++) {
+            var line = lines[i];
+            var trimmed = line.trim();
+            if (trimmed.startsWith('## ') && !trimmed.startsWith('### ')) {
+                if (inTarget && !fieldUpdated) {
                     out.push('- ' + fieldName + '：' + fieldValue);
                     fieldUpdated = true;
-                    continue;
+                }
+                inTarget = trimmed === '## ' + charName;
+                inSubSection = false;
+                if (inTarget) foundChar = true;
+                out.push(line);
+                continue;
+            }
+            if (inTarget && trimmed.startsWith('### ')) {
+                if (!fieldUpdated) {
+                    out.push('- ' + fieldName + '：' + fieldValue);
+                    fieldUpdated = true;
+                }
+                inSubSection = true;
+                out.push(line);
+                continue;
+            }
+            if (inTarget && inSubSection) {
+                out.push(line);
+                continue;
+            }
+            if (inTarget && (trimmed.startsWith('- ') || trimmed.startsWith('* '))) {
+                var fieldLine = trimmed.substring(2);
+                var colonIdx = fieldLine.indexOf('：');
+                if (colonIdx === -1) colonIdx = fieldLine.indexOf(':');
+                if (colonIdx !== -1) {
+                    var key = fieldLine.substring(0, colonIdx).trim();
+                    if (key === fieldName) {
+                        out.push('- ' + fieldName + '：' + fieldValue);
+                        fieldUpdated = true;
+                        continue;
+                    }
                 }
             }
+            out.push(line);
         }
-        out.push(line);
-    }
-    if (inTarget && !fieldUpdated) {
-        out.push('- ' + fieldName + '：' + fieldValue);
-        fieldUpdated = true;
-    }
-    if (!foundChar) return false;
-    await app.vault.modify(file, out.join('\n'));
-    return true;
+        if (inTarget && !fieldUpdated) {
+            out.push('- ' + fieldName + '：' + fieldValue);
+            fieldUpdated = true;
+        }
+        if (!foundChar) return false;
+        await app.vault.modify(file, out.join('\n'));
+        return true;
+    });
 }
 
 async function syncFirstAppearFromEvent(app, plugin, view, evt) {
@@ -2954,8 +3098,11 @@ function refreshCharView(app, options) {
     var leaves = app.workspace.getLeavesOfType(VIEW_TYPE);
     if (leaves.length > 0) {
         var view = leaves[0].view;
+        if (view && view.plugin && isVaultRefreshSuppressed(view.plugin)) return;
         if (view && view.loadAllData) {
-            view.loadAllData(options).then(function() { view.render(); });
+            view.loadAllData(options).then(function() { view.render(); }).catch(function(e) {
+                showUserError('刷新人物视图失败', e);
+            });
         }
     }
 }
@@ -3084,99 +3231,109 @@ var MyView = /** @class */ (function (_super) {
         this._rendering = true;
 
         var container = this.contentEl;
-        container.empty();
-        container.addClass('my-char-view-root');
-        var self = this;
-        var topCollapsed = !!this.plugin.settings.topChromeCollapsed;
+        try {
+            container.empty();
+            container.addClass('my-char-view-root');
+            var self = this;
+            var topCollapsed = !!this.plugin.settings.topChromeCollapsed;
 
-        if (topCollapsed) {
-            this.renderCompactTopBar(container);
-        }
+            if (topCollapsed) {
+                this.renderCompactTopBar(container);
+            }
 
-        var topChrome = container.createEl('div', { cls: 'my-char-top-chrome' + (topCollapsed ? ' is-collapsed' : '') });
+            var topChrome = container.createEl('div', { cls: 'my-char-top-chrome' + (topCollapsed ? ' is-collapsed' : '') });
 
-        var headerRow = topChrome.createEl('div', { cls: 'my-char-view-header' });
-        headerRow.createEl('h2', { text: getViewTitle(this.plugin) });
+            var headerRow = topChrome.createEl('div', { cls: 'my-char-view-header' });
+            headerRow.createEl('h2', { text: getViewTitle(this.plugin) });
 
-        var headerActions = headerRow.createEl('div', { cls: 'my-char-header-actions' });
+            var headerActions = headerRow.createEl('div', { cls: 'my-char-header-actions' });
 
-        if (this.tab !== 'chars' && this.tab !== 'dashboard') {
-            var backBtn = headerActions.createEl('button', { text: '🏠 返回主页', cls: 'my-char-view-btn my-char-view-btn-secondary my-char-btn-xs' });
-            backBtn.addEventListener('click', function() {
-                self.tab = 'chars';
-                self.searchText = '';
-                self.selectedTag = '';
-                self.render();
-            });
-        }
-
-        var collapseBtn = headerActions.createEl('button', {
-            text: '▲ 收起顶栏',
-            cls: 'my-char-view-btn my-char-view-btn-secondary my-char-btn-xs my-char-top-toggle-btn'
-        });
-        collapseBtn.title = '收起标题、工具栏与 Tab，腾出内容空间';
-        collapseBtn.addEventListener('click', async function () {
-            self.plugin.settings.topChromeCollapsed = true;
-            await self.plugin.saveSettings();
-            self.render();
-        });
-
-        var toolbar = topChrome.createEl('div', { cls: 'my-char-view-toolbar' });
-        toolbar.createEl('button', { text: '🔄 刷新数据', cls: 'my-char-view-btn' })
-            .addEventListener('click', function() { self.loadAllData().then(function() { self.render(); }); });
-        toolbar.createEl('button', { text: '🔍 搜索', cls: 'my-char-view-btn my-char-view-btn-secondary' })
-            .addEventListener('click', function() { self.tab = 'search'; self.render(); });
-        toolbar.createEl('button', { text: '应用字段设置', cls: 'my-char-view-btn my-char-view-btn-success' })
-            .addEventListener('click', function() {
-                self.loadAllData().then(function() { self.render(); });
-                new obsidian.Notice('已重新加载并应用字段设置');
-            });
-        toolbar.createEl('span', { text: getToolbarStatsText(this), cls: 'my-char-view-stats' });
-
-        self.renderGlobalTimeBar(topChrome);
-
-        var tabs = topChrome.createEl('div', { cls: 'my-char-view-tabs' });
-        ensureValidTab(this);
-        var tabNames = getVisibleTabs(this.plugin);
-        var tabSplit = novelExt.splitTabsForNovelUI(this.plugin, tabNames, this._showMoreTabs);
-        var tabsToRender = tabSplit.primary.slice();
-        if (tabSplit.compact && tabSplit.showMore) {
-            tabsToRender = tabsToRender.concat(tabSplit.secondary);
-        }
-        for (var i = 0; i < tabsToRender.length; i++) {
-            (function(tab) {
-                var btn = tabs.createEl('button', { text: tab.label });
-                btn.className = 'my-char-view-tab-btn' + (self.tab === tab.id ? ' is-active' : '');
-                btn.addEventListener('click', function() {
-                    self.tab = tab.id;
+            if (this.tab !== 'chars' && this.tab !== 'dashboard') {
+                var backBtn = headerActions.createEl('button', { text: '🏠 返回主页', cls: 'my-char-view-btn my-char-view-btn-secondary my-char-btn-xs' });
+                backBtn.addEventListener('click', function() {
+                    self.tab = 'chars';
                     self.searchText = '';
                     self.selectedTag = '';
                     self.render();
                 });
-            })(tabsToRender[i]);
-        }
-        if (tabSplit.compact && tabSplit.secondary.length > 0) {
-            var moreBtn = tabs.createEl('button', { text: self._showMoreTabs ? '▲ 收起' : '▼ 更多功能' });
-            moreBtn.className = 'my-char-view-tab-btn my-char-tab-more';
-            moreBtn.addEventListener('click', function() {
-                self._showMoreTabs = !self._showMoreTabs;
+            }
+
+            var collapseBtn = headerActions.createEl('button', {
+                text: '▲ 收起顶栏',
+                cls: 'my-char-view-btn my-char-view-btn-secondary my-char-btn-xs my-char-top-toggle-btn'
+            });
+            collapseBtn.title = '收起标题、工具栏与 Tab，腾出内容空间';
+            collapseBtn.addEventListener('click', async function () {
+                self.plugin.settings.topChromeCollapsed = true;
+                await self.plugin.saveSettings();
                 self.render();
             });
-        }
 
-        var content = container.createEl('div', { cls: 'my-char-view-content' });
-        if (needsEmptyStateGuide(this)) {
-            this.renderEmptyStateGuide(content);
-        } else {
-            try {
-                this.renderCurrentTab(content);
-            } catch (err) {
-                console.error('渲染错误:', err);
-                content.createEl('p', { text: '渲染出错，请查看控制台', cls: 'my-char-view-empty' });
+            var toolbar = topChrome.createEl('div', { cls: 'my-char-view-toolbar' });
+            toolbar.createEl('button', { text: '🔄 刷新数据', cls: 'my-char-view-btn' })
+                .addEventListener('click', function() { self.loadAllData().then(function() { self.render(); }); });
+            toolbar.createEl('button', { text: '🔍 搜索', cls: 'my-char-view-btn my-char-view-btn-secondary' })
+                .addEventListener('click', function() { self.tab = 'search'; self.render(); });
+            toolbar.createEl('button', { text: '应用字段设置', cls: 'my-char-view-btn my-char-view-btn-success' })
+                .addEventListener('click', function() {
+                    self.loadAllData().then(function() { self.render(); });
+                    new obsidian.Notice('已重新加载并应用字段设置');
+                });
+            toolbar.createEl('span', { text: getToolbarStatsText(this), cls: 'my-char-view-stats' });
+
+            self.renderGlobalTimeBar(topChrome);
+
+            var tabs = topChrome.createEl('div', { cls: 'my-char-view-tabs' });
+            ensureValidTab(this);
+            var tabNames = getVisibleTabs(this.plugin);
+            var tabSplit = novelExt.splitTabsForNovelUI(this.plugin, tabNames, this._showMoreTabs);
+            var tabsToRender = tabSplit.primary.slice();
+            if (tabSplit.compact && tabSplit.showMore) {
+                tabsToRender = tabsToRender.concat(tabSplit.secondary);
             }
+            for (var i = 0; i < tabsToRender.length; i++) {
+                (function(tab) {
+                    var btn = tabs.createEl('button', { text: tab.label });
+                    btn.className = 'my-char-view-tab-btn' + (self.tab === tab.id ? ' is-active' : '');
+                    btn.addEventListener('click', function() {
+                        self.tab = tab.id;
+                        self.searchText = '';
+                        self.selectedTag = '';
+                        self.render();
+                    });
+                })(tabsToRender[i]);
+            }
+            if (tabSplit.compact && tabSplit.secondary.length > 0) {
+                var moreBtn = tabs.createEl('button', { text: self._showMoreTabs ? '▲ 收起' : '▼ 更多功能' });
+                moreBtn.className = 'my-char-view-tab-btn my-char-tab-more';
+                moreBtn.addEventListener('click', function() {
+                    self._showMoreTabs = !self._showMoreTabs;
+                    self.render();
+                });
+            }
+
+            var content = container.createEl('div', { cls: 'my-char-view-content' });
+            if (needsEmptyStateGuide(this)) {
+                this.renderEmptyStateGuide(content);
+            } else {
+                try {
+                    this.renderCurrentTab(content);
+                } catch (err) {
+                    console.error('渲染错误:', err);
+                    content.createEl('p', { text: '渲染出错，请查看控制台', cls: 'my-char-view-empty' });
+                }
+            }
+            this.updateCharFloatPanel();
+        } catch (err) {
+            console.error('视图渲染失败:', err);
+            try {
+                container.empty();
+                container.addClass('my-char-view-root');
+                container.createEl('p', { text: '视图渲染失败，请点击刷新或查看控制台', cls: 'my-char-view-empty' });
+            } catch (e2) { /* ignore */ }
+        } finally {
+            this._rendering = false;
         }
-                this.updateCharFloatPanel();
-        this._rendering = false;
     };
 
     MyView.prototype.renderEmptyStateGuide = function (container) {
@@ -3314,6 +3471,8 @@ var MyView = /** @class */ (function (_super) {
     MyView.prototype.loadAllData = async function (options) {
         options = options || {};
         var silent = !!options.silent;
+        // 从 MD 编辑器改文件触发的刷新：只读解析，禁止写回，避免抢焦点/打断输入
+        var skipWriteBack = !!options.skipWriteBack;
         
         if (this.plugin.settings.charFile) {
             var fullCharPath = getCharFullPath(this.plugin);
@@ -3385,7 +3544,7 @@ var MyView = /** @class */ (function (_super) {
             }
 
             var usesOldListFormat = /(?:^|\n)###\s*关系(?:变化)?\s*\n(?:\s*\n)*-\s/.test(charRaw);
-            var needSyncToMd = this.plugin.settings.syncRelationsToCharMd !== false && (
+            var needSyncToMd = !skipWriteBack && this.plugin.settings.syncRelationsToCharMd !== false && (
                 (!hasRelSection && (this.relations.length > 0 || (this.plugin._intimacyHistory || []).length > 0)) ||
                 (this.relations.length > 0 && hasRelSection && embedded.relations.length === 0) ||
                 ((this.plugin._intimacyHistory || []).length > 0 && (!hasHistSection || embedded.history.length === 0)) ||
@@ -3412,20 +3571,22 @@ var MyView = /** @class */ (function (_super) {
             );
             if (factionSync.added) {
                 this.factions = factionSync.factions;
-                try {
-                    await saveData(this.plugin, {
-                        factions: this.factions,
-                        relations: this.relations
-                    });
-                    await novelExt.saveRelationsToMd(this.plugin, this.factions, this.relations);
-                } catch (e) {
-                    console.log('自动保存阵营失败:', e);
+                if (!skipWriteBack) {
+                    try {
+                        await saveData(this.plugin, {
+                            factions: this.factions,
+                            relations: this.relations
+                        });
+                        await novelExt.saveRelationsToMd(this.plugin, this.factions, this.relations);
+                    } catch (e) {
+                        console.log('自动保存阵营失败:', e);
+                    }
                 }
             }
         }
 
         var settingsChanged = syncSettingsFromParsedData(this.plugin, this.chars, this.relations, this.timeline);
-        if (settingsChanged) {
+        if (settingsChanged && !skipWriteBack) {
             try { await this.plugin.saveSettings(); } catch (e) { console.log('自动同步设定失败:', e); }
         }
 
@@ -6271,11 +6432,17 @@ MyView.prototype.renderTimeline = function (container) {
     MyView.prototype.showQuickAddChar = function () {
         var self = this;
         var modal = new QuickAddCharModal(this.app, this.plugin, function(data) {
-            novelExt.appendCharToMd(self.app, self.plugin, data.name, data.fields).then(function() {
-                return self.loadAllData({ silent: true });
-            }).then(function() {
+            novelExt.appendCharToMd(self.app, self.plugin, data.name, data.fields).then(function(result) {
+                return self.loadAllData({ silent: true }).then(function() { return result; });
+            }).then(function(result) {
                 self.render();
-                new obsidian.Notice('✅ 已添加人物：' + data.name);
+                if (result && result.merged) {
+                    new obsidian.Notice('✅ 人物已存在，已合并更新：' + data.name);
+                } else {
+                    new obsidian.Notice('✅ 已添加人物：' + data.name);
+                }
+            }).catch(function(e) {
+                showUserError('添加人物失败', e);
             });
         });
         modal.open();
@@ -6306,6 +6473,8 @@ MyView.prototype.renderTimeline = function (container) {
             }).then(function(result) {
                 self.render();
                 if (result && result.notice) new obsidian.Notice(result.notice, result.duration);
+            }).catch(function(e) {
+                showUserError('添加事件失败', e);
             });
         });
         modal.open();
@@ -6340,6 +6509,8 @@ MyView.prototype.renderTimeline = function (container) {
             }).then(function(result) {
                 self.render();
                 if (result && result.notice) new obsidian.Notice(result.notice, result.duration);
+            }).catch(function(e) {
+                showUserError('更新事件失败', e);
             });
         }, existingEvent, function(evt) {
             novelExt.deleteEventFromMd(self.app, self.plugin, evt._lineIndex).then(function() {
@@ -6347,6 +6518,8 @@ MyView.prototype.renderTimeline = function (container) {
             }).then(function() {
                 self.render();
                 new obsidian.Notice('已删除事件');
+            }).catch(function(e) {
+                showUserError('删除事件失败', e);
             });
         });
         modal.open();
@@ -7808,12 +7981,16 @@ var DetailModal = /** @class */ (function (_super) {
                 if (self._fieldInputs[k].value.trim()) out[k] = self._fieldInputs[k].value.trim();
             }
             if (newKeyInput.value.trim()) out[newKeyInput.value.trim()] = newValInput.value.trim();
-            await novelExt.updateCharInMd(self.app, self.view.plugin, self.charData.name, out);
-            await self.view.loadAllData({ silent: true });
-            self.charData = self.view.findChar(self.charData.name) || self.charData;
-            self._editMode = false;
-            new obsidian.Notice('✅ 人物信息已保存');
-            self.onOpen();
+            try {
+                await novelExt.updateCharInMd(self.app, self.view.plugin, self.charData.name, out);
+                await self.view.loadAllData({ silent: true });
+                self.charData = self.view.findChar(self.charData.name) || self.charData;
+                self._editMode = false;
+                new obsidian.Notice('✅ 人物信息已保存');
+                self.onOpen();
+            } catch (e) {
+                showUserError('保存人物信息失败', e);
+            }
         });
     };
 
@@ -8908,12 +9085,34 @@ var RelationWeaverPlugin = /** @class */ (function (_super) {
         });
 
         var pluginRef = this;
+        pluginRef._suppressVaultRefresh = 0;
+        pluginRef._pendingMdEditorSync = false;
+        // 停顿约 1 秒后再刷新面板，避免边打字边抢编辑器焦点；且只读不写回
+        pluginRef._debouncedRefreshCharView = debounce(function(options) {
+            if (isVaultRefreshSuppressed(pluginRef)) return;
+            refreshCharView(pluginRef.app, options || { silent: true, skipWriteBack: true });
+        }, 1000);
         this.registerEvent(this.app.vault.on('modify', function(file) {
+            if (isVaultRefreshSuppressed(pluginRef)) return;
             var charPath = getCharFullPath(pluginRef);
             var timelinePath = getTimelineFullPath(pluginRef);
-            if (file.path === charPath || file.path === timelinePath) {
-                refreshCharView(pluginRef.app, { silent: true });
+            if (file.path !== charPath && file.path !== timelinePath) return;
+            var active = pluginRef.app.workspace.getActiveFile();
+            if (active && (active.path === charPath || active.path === timelinePath)) {
+                pluginRef._pendingMdEditorSync = true;
             }
+            pluginRef._debouncedRefreshCharView({ silent: true, skipWriteBack: true });
+        }));
+        // 从数据 MD 切走时立刻再同步一次，保证面板尽快跟上
+        this.registerEvent(this.app.workspace.on('active-leaf-change', function() {
+            if (isVaultRefreshSuppressed(pluginRef)) return;
+            if (!pluginRef._pendingMdEditorSync) return;
+            var active = pluginRef.app.workspace.getActiveFile();
+            var charPath = getCharFullPath(pluginRef);
+            var timelinePath = getTimelineFullPath(pluginRef);
+            if (active && (active.path === charPath || active.path === timelinePath)) return;
+            pluginRef._pendingMdEditorSync = false;
+            refreshCharView(pluginRef.app, { silent: true, skipWriteBack: true });
         }));
         // 加载亲密度变化历史
         this._intimacyHistory = [];
