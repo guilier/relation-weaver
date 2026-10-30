@@ -1,25 +1,21 @@
-# OS
+# Local Obsidian vault and user data
+.obsidian/
+.vault/
+data.json
+intimacy_history.json
+relations-data.json
+relations-data.json.bak
+relations-data.json.corrupt-*
+人物索引.md
+时间线.md
+关系与阵营.md
+世界观资料库.md
+抽签池.md
+故事大纲.md
+
+# Development artifacts
+node_modules/
+dist/
 .DS_Store
 Thumbs.db
-Desktop.ini
-
-# Editor / IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# Node (if you add a build later)
-node_modules/
-npm-debug.log*
-yarn-error.log*
-package-lock.json
-
-# Obsidian / local
-.obsidian/
-data.json
-
-# Temp / local test artifacts
-_test_*.js
-*_patch.js
-*.tmp
+*.log
