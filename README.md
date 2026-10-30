@@ -1,429 +1,363 @@
-# 📚 Relation Weaver (人物关系谱系)
+# Relation Weaver · 人物关系谱系
 
-> An Obsidian plugin for managing characters, factions, relationships, and timelines in novels, TTRPG campaigns, and worldbuilding projects.
->
-> 一个 Obsidian 插件，用于管理小说、跑团、世界构建中的人物、阵营、关系和时间线。
+**A local-first story planning and worldbuilding workspace for Obsidian.**  
+**一款面向小说创作、跑团与世界观构建的 Obsidian 本地创作工作台。**
 
-[![GitHub release (latest by date)](https://img.shields.io/github/v/release/guilier/relation-weaver)](https://github.com/guilier/relation-weaver/releases)
-[![Obsidian Community](https://img.shields.io/badge/Obsidian-Community%20Plugin-7c3aed)](https://obsidian.md)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[中文](#中文说明) · [English](#english) · [功能对照](#版本演进与功能对照--feature-evolution) · [安装](#安装--installation) · [隐私与数据安全](#隐私与数据安全--privacy--data-safety)
 
----
+<p align="center">
+  <strong>Characters · Relationships · Factions · Timeline · Plot Threads · Story Audit · Worldbuilding · Outlines</strong>
+</p>
 
-## 📖 Table of Contents / 目录
-
-- [About / 插件简介](#about--插件简介)
-- [Installation / 安装与使用](#installation--安装与使用)
-- [What's New in v3.0.1 / v301-新功能](#whats-new-in-v301--v301-新功能)
-- [Data Format / 数据文件格式](#data-format--数据文件格式)
-- [Features Overview / 功能详解](#features-overview--功能详解)
-- [Customization / 自定义配置](#customization--自定义配置)
-- [FAQ / 常见问题](#faq--常见问题)
-- [Changelog / 更新日志](#changelog--更新日志)
+- **Plugin ID:** `relation-weaver`
+- **Current version:** `3.7.8`
+- **Author:** [guilier](https://github.com/guilier)
+- **Repository:** https://github.com/guilier/relation-weaver
+- **License:** [MIT](./LICENSE)
+- **Minimum Obsidian version declared:** `1.4.0` (please see compatibility notes below)
 
 ---
 
-## About / 插件简介
+## 中文说明
 
-### What is Relation Weaver? / 这是什么？
+### 这是什么？
 
-**Relation Weaver** helps you track character connections, analyze appearance frequency, visualize intimacy changes over time, and maintain a consistent narrative timeline — all within your Obsidian vault.
+**人物关系谱系（Relation Weaver）** 是一个运行在 Obsidian 内部的小说创作辅助插件。它把人物档案、人物关系、阵营、时间线、情节线 / 伏笔、故事逻辑检查、世界观资料和故事大纲整合到一个工作台中。
 
-**「人物关系谱系」** 是一款专为创作者设计的 Obsidian 插件，特别适合：
+它适合需要长期维护复杂人物群像、跨章节时间线、阵营关系和世界设定的小说作者，也可用于跑团资料、原创世界观、系列故事和角色设定管理。
 
-| English | 中文 |
-|---------|------|
-| ✍️ **Novelists** — Manage character relationships, track appearance frequency, plant and resolve plot threads | ✍️ **小说作者** — 管理小说人物关系，追踪出场频率，埋设与回收伏笔 |
-| 🎮 **Game Masters / DMs** — Record NPC connections, adventure timelines, and faction politics | 🎮 **跑团主持人 (GM/DM)** — 记录 NPC 关系和冒险时间线，管理势力阵营 |
-| 📚 **Worldbuilders** — Map out character networks and historical timelines | 📚 **世界构建者** — 梳理世界观中的人物网络与历史脉络 |
-| 📝 **Reading Notes** — Analyze character interactions and relationship dynamics in books | 📝 **读书笔记** — 分析书中人物关系与互动频率 |
-| 🧠 **Knowledge Management** — Concept association and knowledge graph building | 🧠 **知识管理** — 概念关联与知识图谱构建 |
+插件以当前 Vault 为工作空间，尽量沿用 Markdown 文件，让设定可以被 Obsidian 搜索、链接、备份和同步。它不是在线写作平台，也不要求注册账号。
 
-### Key Advantages / 核心优势
+### 功能地图
 
-| Feature | 说明 |
-|---------|------|
-| 📁 **Pure Markdown Storage** — All data stored in `.md` files, editable manually anytime | 📁 **纯 Markdown 存储** — 所有数据都是 `.md` 文件，你随时可以手动编辑 |
-| 🔄 **Bidirectional Sync** — Relationships and factions backed up in both Markdown and JSON | 🔄 **双向同步** — 关系与阵营在 Markdown 和 JSON 之间双备份 |
-| 🕸️ **Native Graph Integration** — One-click sync to Obsidian's native graph view | 🕸️ **原生图谱集成** — 一键同步到 Obsidian 原生关系图谱，拖拽探索 |
-| 📱 **Cross-Platform** — Works on both desktop and mobile | 📱 **全平台支持** — 桌面端和移动端均可使用 |
-| 🎨 **Highly Customizable** — Field names, tags, intimacy levels, and relation types are all configurable | 🎨 **高度可定制** — 字段名、标签、亲密度等级、关系类型全部可自定义 |
+| 模块 | 能做什么 | 适用场景 |
+|---|---|---|
+| **创作工作台 / Dashboard** | 汇总人物、事件、关系、阵营等数据；提供模块入口、最近活动和快捷跳转 | 打开插件后快速了解项目状态 |
+| **人物档案 / Characters** | 以 Markdown 人物档案为基础管理姓名、身份、阵营、出生、首次出场、死亡等字段；支持自定义字段和别名搜索 | 管理主角团、配角、历史人物与群像 |
+| **人物关系 / Relationships** | 创建和编辑人物双方关系、关系类型、亲密度；记录关系变化历史，支持快速编辑和双方互换 | 追踪亲属、盟友、师徒、敌对、感情等关系 |
+| **阵营 / Factions** | 管理阵营资料，并将阵营信息与人物、关系及时间线视图关联 | 管理国家、组织、宗门、家族、派系 |
+| **关系图谱 / Relationship Graph** | 将人物关系呈现为网络图；布局突出关系较多的人物；支持节点交互，并可由用户选择同步到 Obsidian 原生图谱 | 查看人物网络、核心角色和关系结构 |
+| **亲密度历史 / Intimacy History** | 记录人物关系亲密度变化，查看变化轨迹 | 追踪角色感情、信任或关系进展 |
+| **故事时间线 / Timeline** | 按事件组织故事时间；支持事件标签、情节线状态、搜索与筛选、人物速查和时间点概览 | 整理跨章节事件、战争进程、角色经历 |
+| **古代纪年 / BCE & CE Dating** | 识别公元前 / 公元后日期；公元前年份按历史时间顺序比较；支持自动或指定纪年方式 | 古代、架空历史和跨纪元故事 |
+| **人物生命周期 / Character Lifecycle** | 结合出生、首次出场、死亡字段查看人物时间节点 | 检查角色年龄与出场阶段 |
+| **伏笔与情节线 / Plot Threads** | 记录情节线状态，查看埋设、推进和回收情况，并提示未完成的伏笔 | 管理悬念、线索、支线和长期回收点 |
+| **故事逻辑体检 / Story Audit** | 检查首次出场、出生前出场、死亡后出场、年龄线索、关系时间范围、伏笔状态和时间线顺序等潜在问题 | 在章节调整或完稿前进行结构审校 |
+| **全局搜索 / Global Search** | 跨人物、关系、事件、情节线和阵营搜索；支持字段筛选与快捷编辑 | 快速定位设定，减少页面跳转 |
+| **世界观资料库 / Worldbuilding Library** | 分类新增、搜索、编辑和删除设定卡，涵盖道具、地点、组织、功法、种族历史和世界规则 | 管理世界设定百科 |
+| **灵感抽签 / Inspiration Draw** | 从本地 Markdown 抽签池按分类随机抽取候选项，结果可复制 | 随机生成姓名、地点、道具、组织或灵感 |
+| **故事大纲 / Story Outline** | 按章节或情节段组织大纲，在插件中查看并打开 Markdown 原文编辑 | 规划卷、章、幕和情节段落 |
+| **设定集导出 / Compendium Export** | 汇总人物卡、关系表、Mermaid 关系图、未回收伏笔和一致性检查，生成可归档的设定集 | 项目归档、审阅或分享设定摘要 |
+| **导入与智能合并 / Import & Merge** | 导入前预览新增、重复和冲突；按人物、事件、阵营及关系规则识别重复；默认保留现有冲突项 | 合并不同阶段或不同文件中的设定数据 |
+| **快照与恢复 / Snapshots & Restore** | 创建数据快照、预览文件内容与差异、校验快照；恢复前先备份当前状态 | 大规模修改前留档，必要时回退 |
+| **自定义资料路径 / Custom File Paths** | 为世界观资料库、抽签池和故事大纲设置 Vault 相对路径；文件移动后可尝试唯一同名文件定位 | 按个人 Vault 目录结构组织资料 |
 
----
+### 从 3.3.3 到 3.7.8：版本演进与功能对照
 
-## Installation / 安装与使用
+3.7.8 不是一次简单的界面换肤，而是在原有人物、关系和故事资料管理基础上，逐步补上数据安全、导入合并、故事逻辑检查、时间线能力、工作台导航和世界观工具。下表按项目版本记录归纳主要变化；原有核心资料管理仍是插件基础。
 
-### Method 1: Obsidian Community Plugin Marketplace (Recommended) / 方式一：Obsidian 社区插件市场（推荐）
+| 能力维度 | 3.3.x 初始阶段 | 3.7.8 当前版本 |
+|---|---|---|
+| 人物与关系管理 | 已有的人物、关系和阵营资料管理 | 保留原有管理，并增加人物工作台快捷操作、关系快速编辑、双方互换、关系变化历史与字段搜索 |
+| 数据保存 | 早期数据保存与关系数据耦合，缺少完整的恢复工作流 | 关系数据独立保存、串行写入、备份回退、损坏留档、写入校验、快照校验与恢复前备份 |
+| 导入 | 基础数据导入 | 导入预览、重复识别、冲突处理、智能合并；合并前自动创建快照 |
+| 搜索 | 基础查找 | 跨人物、关系、事件、情节线、阵营搜索；字段筛选和快捷编辑 |
+| 故事逻辑 | 主要依赖作者人工检查 | 新增规则辅助体检，检查出场、出生 / 死亡、年龄线索、关系时间、伏笔与时间线问题 |
+| 时间线 | 基础事件时间线 | 公元前 / 公元后纪年、当前时间过滤、时间点概览、事件搜索、阵营颜色同步与自适应正文展示 |
+| 人物关系可视化 | 以关系资料管理为主 | 关系网络布局、核心人物突出、可选同步 Obsidian 原生图谱；自动同步默认关闭 |
+| 创作工作台 | 以功能页面和侧栏操作为主 | 统一首页、分类导航、数据统计卡片、模块快捷跳转 |
+| 世界观资料 | 以文本设定为主 | 分类设定卡，可搜索、编辑和删除；支持自定义资料文件路径 |
+| 灵感与大纲 | 无独立互动工作台 | Markdown 抽签池、分类随机抽取、章节 / 情节段大纲工作台 |
+| 文件控制 | 部分资料使用固定默认位置 | 世界观、抽签池和大纲文件可自定义路径；移动后尝试定位；缺失文件由用户明确创建 |
+| 图谱笔记生成 | 可通过同步功能生成节点笔记 | 节点笔记不再默认批量生成；必须由用户主动执行同步 |
+| 界面与小屏 | 早期布局 | 紧凑玻璃质感界面、浅色 / 深色主题适配、窄侧栏与笔记本布局优化 |
 
-1. Open Obsidian Settings → Community Plugins → Browse
-2. Search for `Relation Weaver`
-3. Click Install and Enable
+**重要说明：** 表格概括的是版本演进重点，并不意味着 3.3.x 的所有能力都已被替换。3.7.8 延续人物、关系、阵营和时间线等原有核心工作流，并在其上增加新能力与保护措施。
 
-> 1. 打开 Obsidian 设置 → 社区插件 → 浏览
-> 2. 搜索 `Relation Weaver`
-> 3. 点击安装并启用
+### 数据安全设计
 
-### Method 2: Manual Installation / 方式二：手动安装
+- 关系与阵营数据使用独立数据文件，避免与 Obsidian 插件设置文件混用。
+- 保存采用串行队列和安全写入流程，并保留最近一次有效数据备份。
+- 检测到损坏数据时尝试从备份恢复，同时保留损坏文件供排查。
+- 快照包含结构化索引和完整性校验；不完整或路径不可信的快照不会允许恢复。
+- 恢复前会先创建当前状态快照；恢复后会回读校验，失败时尝试回滚。
+- 删除重要关系、阵营、事件或历史记录时提供二次确认。
+- 导入合并前会预览变更，并自动创建快照。
+- 3.7.8 中图谱自动同步默认关闭；批量生成或同步节点笔记需要用户主动操作。
 
-1. Download the latest release from [Releases](https://github.com/guilier/relation-weaver/releases)
-2. Extract to your vault's `.obsidian/plugins/relation-weaver/` directory
-3. Enable the plugin in Obsidian settings
+这些保护措施用于降低误覆盖和误删除风险，但**不能替代 Vault 的独立备份**。建议使用 Git、系统备份或 Obsidian Sync 等方式另行备份整个 Vault。
 
-> 1. 从 [Releases](https://github.com/guilier/relation-weaver/releases) 下载最新版本
-> 2. 解压到 Vault 的 `.obsidian/plugins/relation-weaver/` 目录
-> 3. 在 Obsidian 中启用插件
+### 隐私与本地处理
 
----
+- 不集成云端 AI，不需要 API Key，也不要求注册插件外部账号。
+- 小说人物、关系、时间线、世界观和大纲资料在当前 Obsidian Vault 内处理。
+- 插件不以远程服务器作为资料存储或分析服务。
+- 插件会按功能需要在 Vault 中读写 Markdown、JSON 和快照文件；用户可以在设置中指定部分资料文件的位置。
 
-## What's New in v3.0.1 / v3.0.1 新功能
+请勿将包含个人创作内容的 Vault 数据文件、备份或快照提交到公开 GitHub 仓库。
 
-### 📌 Markdown Bidirectional Sync for Relationships / 关系与阵营 Markdown 双写
+### 快速开始
 
-Relationship data is now stored in both JSON and Markdown:
+1. 在 Obsidian 中启用插件并打开 **Relation Weaver / 人物关系谱系**。
+2. 进入人物模块，创建或连接人物 Markdown 档案；按需要填写姓名、身份、阵营、出生、首次出场和死亡等字段。
+3. 在关系模块中选择已有的人物，创建关系类型和亲密度记录。
+4. 在时间线模块中添加事件，并按需要填写年份、事件标签和情节线状态。
+5. 在伏笔 / 故事逻辑检查模块查看未回收线索和规则提示。
+6. 在世界观资料库、灵感抽签和故事大纲模块补充项目资料。
+7. 大规模导入、批量修改或恢复前，先创建快照并备份 Vault。
 
-- New `关系与阵营.md` (Relationships & Factions) file in human-readable Markdown format
-- Edit the file directly in Obsidian — the plugin automatically syncs changes
-- JSON + Markdown dual backup for extra data safety
+### 文件与路径
 
-关系数据现在同时保存在 JSON 和 Markdown 中：
+插件的资料文件位于当前 Vault 中。部分默认文件名及路径如下（可在设置中调整的项目以插件设置为准）：
 
-- 新增 `关系与阵营.md` 文件，采用易读的 Markdown 格式
-- 在 Obsidian 中直接编辑该文件，插件会自动同步
-- JSON + MD 双备份，数据更安全
+| 文件 / 目录 | 用途 |
+|---|---|
+| `data.json` | Obsidian 插件设置 |
+| `relations-data.json` | 人物关系与阵营数据 |
+| `relations-data.json.bak` | 最近一次有效关系数据备份 |
+| `时间线.md` | 时间线事件资料（使用当前设置的路径） |
+| `世界观资料库.md` | 分类世界观资料库（可自定义路径） |
+| `抽签池.md` | 灵感抽签候选池（可自定义路径） |
+| `故事大纲.md` | 故事大纲（可自定义路径） |
+| `设定快照/` | 数据快照与恢复索引 |
 
-**Format Example / 格式示例**：
-```markdown
-# Factions / 阵营
-
-## Northern Kingdom / 北境王国
-- Color / 颜色：#4a90e2
-- Description / 描述：The icy kingdom of the north
-
-# Relationships / 关系
-
-## Zhang San · Li Si / 张三 · 李四
-- Type / 类型：Close Friend / 挚友
-- Intimacy / 亲密度：4
-- Description / 描述：Grew up together / 从小一起长大的生死之交
-- Start / 开始：280 BC / 前280年
-```
-
-### 📌 Visual Relation Type Manager / 关系类型管理 UI
-
-A new UI panel in Settings for managing relation types:
-
-- Freely add, edit, or delete relation types
-- Changes take effect immediately — no restart required
-
-设置页新增「管理关系类型」可视化面板：
-
-- 自由添加/编辑/删除关系类型
-- 实时生效，无需重启
-
-### 📌 Visual Intimacy Level Manager / 亲密度等级管理 UI
-
-A new UI panel in Settings for managing intimacy levels:
-
-- Freely add, edit, or delete intimacy levels
-- Customize numeric values, display names, and colors
-- Changes take effect immediately
-
-设置页新增「管理亲密度等级」可视化面板：
-
-- 自由添加/编辑/删除亲密度等级
-- 自定义数值、显示名称、颜色
-- 实时生效
-
-### 📌 Enhanced Setting Collection / 设定集增强
-
-- **One-click Update Setting Collection**: Overwrites `设定集.md` in your character folder for easy collaboration
-- Setting collection now includes **Mermaid relationship diagrams**
-- Setting collection includes **first appearance consistency check** results
-- Setting collection includes **plot thread validation** results
-
-- **一键更新设定集**：覆盖人物文件夹下的 `设定集.md`，方便共创编辑
-- 设定集新增 **Mermaid 关系图**
-- 设定集新增 **首次出场一致性检查** 结果
-- 设定集新增 **伏笔逻辑校验** 结果
-
-### 📌 Enhanced Dashboard / 仪表盘增强
-
-- **MD Parse Error Panel**: Invalid relationship lines in character index are displayed with fix suggestions
-- **Appearance Consistency Check**: Detects "appeared before birth" timeline contradictions
-- **One-click Fix Missing First Appearances**: Automatically writes first appearance to character profiles when a `[出场]` event exists in the timeline
-- **Create Snapshot**: Backup directly from the dashboard
-
-- **MD 解析错误面板**：人物索引中格式错误的关系行会显示并提示修复方法
-- **出场一致性检查**：检测「出生前出场」的穿帮问题
-- **一键补全首次出场**：时间线已有 `[出场]` 事件但档案未填的人物，一键写入
-- **创建设定快照**：直接从仪表盘备份
-
-### 📌 Floating Character Quick Reference Panel / 时间线人物速查浮窗
-
-- A draggable character tab panel in the timeline view
-- Click character names to quickly view details
-- Supports search filtering
-- Toggle on/off as needed
-
-- 时间线视图显示可拖动的人物 Tab 弹窗
-- 点击人物名快速查看详情
-- 支持搜索过滤
-- 可开启/关闭
-
-### 📌 Event Tag Manager UI Rewrite / 事件标签管理 UI 重写
-
-- Completely free management of event tags — add, edit, or delete any tag
-- Tag value uniqueness validation
-- No longer forced to keep default tags
-
-- 完全自由添加/编辑/删除事件标签
-- 标签值唯一性校验
-- 不再强制保留默认标签
-
-### 📌 Bug Fixes / 修复
-
-- Character index MD parsing: Now correctly handles `* ` list items
-- Bidirectional relationship sync: Editing relationships now correctly writes to character MD
-- Relationship deletion cascade: Deleting a relationship now cleans up records in character MD
-
-- 人物索引 MD 解析：现在正确处理 `* ` 开头的列表项
-- 关系双向同步：编辑关系时正确写入人物 MD
-- 关系删除联动：删除关系时同步清除人物 MD 中的记录
-
----
-
-## Data Format / 数据文件格式
-
-### Character Index / 人物索引（`人物索引.md`）
+**抽签池格式示例：**
 
 ```markdown
-## Character Name / 姓名
-- Field1: Value1 / 字段1：值1
-- Field2: Value2 / 字段2：值2
-- Type: Protagonist/Supporting/Extra / 类型：主角/配角/龙套
+## 姓名池
+- 沈知微
+- 顾长风
 
-### Relationships / 关系
-- Other: Li Si | Type: Close Friend | Intimacy: 4
-- 对方：李四｜类型：挚友｜亲密度：4
-
-### Relationship Changes / 关系变化
-- Other: Li Si | Old: 3 | New: 4 | Reason: Survived a crisis together | Time: 280 BC
-- 对方：李四｜旧：3｜新：4｜原因：共同经历生死｜时间：前280年
+## 地点池
+- 归云渡
+- 白石城
 ```
 
-### Timeline / 时间线（`时间线.md`）
+**故事大纲格式示例：**
 
 ```markdown
-## Year/Chapter / 年份/章节
+## 第一卷：风起
+章节核心目标、主要冲突与人物变化……
 
-### Month/Scene: / 月份/场景：
-- [Tag] Event description | Plot: Main-A | Status: Plant/Advance/Resolve | Note: [[Link]]
-- [标签] 事件内容 | 情节线:xxx | 状态:埋设/推进/回收 | 笔记:[[链接]]
+## 第二卷：入局
+新的线索、阵营变化与阶段性转折……
 ```
 
-### Relationships & Factions / 关系与阵营（`关系与阵营.md`）
+插件支持的具体字段名称可在设置中调整。对于人物出生、首次出场、死亡和关系时间等自动检查，建议使用清晰、稳定且可解析的日期表达。
 
-```markdown
-# Factions / 阵营
+### 规则检查的边界
 
-## Faction Name / 阵营名
-- Color / 颜色：#4a90e2
-- Description / 描述：Description text
+故事逻辑体检是**基于字段和明确文本线索的规则辅助检查**，不是能够理解整部小说语义的 AI 编辑器。例如：
 
-# Relationships / 关系
+- 年龄检查需要人物出生年份，并且事件文本明确出现“18岁”等年龄表达。
+- 关系时间检查需要填写关系开始 / 结束时间。
+- 首次出场检查依赖人物字段和时间线中的 `[出场]` 事件标记。
+- 时间线顺序提示可能把倒叙、插叙识别为疑似顺序问题；作者应结合叙事意图判断。
+- 伏笔提示依据情节线状态与记录节点，不能自动判断文学意义上的伏笔是否真正回收。
 
-## Character A · Character B / 人物A · 人物B
-- Type / 类型：Relationship type
-- Intimacy / 亲密度：Number
-- Description / 描述：Description text
-- Start / 开始：Start time
-- End / 结束：End time
-```
+所有检查结果都是提示，不会自动替作者修改人物、关系或事件数据。
 
----
+### 安装与升级
 
-## Features Overview / 功能详解
+#### 从 Obsidian 社区插件市场安装
 
-### 👥 Character Management / 人物管理
+社区目录审核通过并上架后：
 
-| English | 中文 |
-|---------|------|
-| Markdown-based character index (`## Name` + `- Field: Value`) | 基于 Markdown 的人物索引（`## 姓名` + `- 字段：值`） |
-| Customizable fields (identity, faction, birth, death, first appearance, etc.) | 自定义字段（身份、阵营、出生、死亡、首次出场……） |
-| Auto-updating status badges (Alive/Deceased/Unborn/Unknown) based on the **current timeline point** | 人物状态徽章（存活/已故/未出生/未知），基于**当前时间点**自动判断 |
+1. 打开 **设置 → 第三方插件 → 浏览**。
+2. 搜索 **Relation Weaver**。
+3. 安装并启用。
 
-### 🔗 Relationship Graph / 关系图谱
+#### 手动安装
 
-| English | 中文 |
-|---------|------|
-| Bidirectional character relationships (fully customizable) | 双向人物关系（父子、师徒、恋人、敌人……完全自定义） |
-| Intimacy system (-3 to 5 levels, fully customizable) | 亲密度系统（-3 ~ 5 级，支持自定义等级） |
-| **Intimacy Evolution**: Track relationship changes over time with visual intimacy curves | **亲密度动态演化**：记录关系变化历史，可视化亲密度曲线 |
-| Relationship time ranges (start/end dates) with timeline filtering | 关系时间范围（开始/结束时间），配合时间点过滤 |
+1. 从 [GitHub Releases](https://github.com/guilier/relation-weaver/releases) 下载对应版本的 `main.js`、`manifest.json` 和 `styles.css`。
+2. 在当前 Vault 的 `.obsidian/plugins/` 下创建或打开 `relation-weaver/` 文件夹。
+3. 将这三个文件放入该文件夹。
+4. 在 Obsidian 设置 → 第三方插件中启用插件；升级时可关闭后重新启用，必要时重启 Obsidian。
 
-### 📅 Timeline / 时间线
+#### 从旧版本升级
 
-| English | 中文 |
-|---------|------|
-| Year + month structure with auto-parsing | 支持「年份+月份」结构，自动解析 |
-| Fully customizable event tag system | 事件标签系统（完全自定义） |
-| **Plot Thread Tracking**: Plant → Advance → Resolve | **情节线追踪**：埋设 → 推进 → 回收 |
-| Auto-validation of plot logic (events after resolution, status regression, etc.) | 伏笔逻辑自动校验（回收后仍有事件、状态倒退等） |
+升级前请备份：
 
-### 🔥 Appearance Heatmap / 出场热力图
+- `.obsidian/plugins/relation-weaver/` 插件目录；
+- 人物档案、时间线、关系与阵营数据文件；
+- 亲密度历史、世界观资料库、抽签池、故事大纲和设定快照；
+- 你在设置中自定义的资料文件路径。
 
-| English | 中文 |
-|---------|------|
-| Three modes: Consolidated / Single Character / Multiple Characters | 集中/单人/多人 三种视图模式 |
-| Granularity: Year / Half-year / Quarter | 年/半年/季度 粒度切换 |
-| Selectable year range | 年份范围自由选择 |
-| Hover to see specific events | 悬停显示具体事件 |
+3.7.8 的重要行为变化：
 
-### 🔍 Global Search / 全局搜索
+- 世界观资料库、抽签池和故事大纲支持自定义 Vault 相对路径。
+- 模块打开或刷新时不再自动创建缺失资料文件；需要时请通过明确的创建操作生成。
+- 文件移动后，只有在 Vault 中找到唯一同名 Markdown 文件时才自动重新定位；多个同名候选需要用户手动指定。
+- 人物图谱节点笔记默认不再自动批量生成；需要时由用户主动执行同步。
+- 图谱自动同步默认关闭。请检查设置，不要假设旧版本的自动同步开关会继续生效。
+- 不会主动删除已有文件，也不会批量迁移或覆盖人物、关系、阵营和时间线数据。
 
-- Search across characters, relationships, events, plot threads, and factions simultaneously
-- Click results to jump directly
+### 兼容性与已知限制
 
-- 同时搜索人物、关系、事件、情节线、阵营
-- 点击结果直接跳转
+- Manifest 当前声明 `minAppVersion: 1.4.0`、`isDesktopOnly: false`。这表示清单声明的最低版本和平台标记，不等同于已经在所有 Obsidian 桌面端、移动端及主题组合中完成验证。
+- 发布前已进行 JavaScript 静态语法检查；静态检查不能替代真实 Obsidian Vault 的端到端测试。
+- 建议首次升级先在 Vault 副本中验证导入、保存、快照恢复、图谱同步和自定义路径。
+- 大型 Vault、第三方同步工具、特殊文件系统行为及自定义主题可能影响实际体验。
 
-### 🎯 Current Timeline Point Filtering / 当前时间点过滤
+### 反馈与问题
 
-- Set the current narrative progress
-- Relationships filtered by start/end dates
-- Timeline hides "future" events
-- Character status auto-updates
-
-- 设置故事当前进度
-- 关系按开始/结束时间过滤
-- 时间线隐藏「未来」事件
-- 人物状态自动更新
-
-### 🕸️ Obsidian Native Graph Sync / Obsidian 原生图谱同步
-
-- Filter sync scope by character "Type" (Protagonist/Supporting/Extra)
-- Generates independent notes with `[[wikilinks]]`
-- One-click open native graph (global/local)
-
-- 按人物「类型」筛选同步范围（主角/配角/龙套）
-- 生成含 `[[双向链接]]` 的独立笔记
-- 一键打开原生图谱（全局/本地）
-
-### 📊 Writing Dashboard / 写作仪表盘
-
-- Data overview (characters/events/relationships/factions)
-- Character status distribution
-- Action items (unappeared characters, isolated characters, deceased but still appearing issues)
-- First appearance consistency check
-- Unresolved plot thread list
-- Timeline progress bar
-- **MD Format Validation**: Parse errors displayed in dashboard with fix suggestions
-
-- 数据概览（人物/事件/关系/阵营）
-- 人物状态分布
-- 待办提醒（未出场人物、孤立人物、已故后出场穿帮）
-- 首次出场联动检查
-- 未回收伏笔清单
-- 时间线进度条
-- **MD 格式校验**：解析失败的行会显示在仪表盘
-
-### 📚 Setting Collection Export / 设定集导出
-
-- One-click complete setting collection Markdown (character cards + relationship tables + timelines + plot threads)
-- Includes Mermaid relationship diagrams
-- Print preview (with PDF export support)
-- Save to vault or download
-
-- 一键生成完整设定集 Markdown（人物卡 + 关系表 + 时间线 + 伏笔）
-- 包含 Mermaid 关系图
-- 打印预览（支持另存为 PDF）
-- 支持保存到 Vault 或下载
-
-### 🧊 Setting Snapshots / 设定快照
-
-- One-click backup of character index + timeline + relationships & factions
-- Timestamped archives — a safety net before major changes
-
-- 一键备份人物索引 + 时间线 + 关系与阵营
-- 按时间戳存档，大改设定前的安全网
-
-### 🎨 Multi-Scene Presets / 多场景预设
-
-- 📖 Novel / Historical Writing / 小说 / 历史创作
-- 📔 Daily Journal / 日常日记
-- 🎲 TTRPG / Campaigns / 跑团 / TRPG
-- 🧠 Knowledge / Concept Relationships / 知识 / 概念关系
+请通过 [GitHub Issues](https://github.com/guilier/relation-weaver/issues) 提交问题或功能建议。反馈时请说明 Obsidian 版本、操作系统、插件版本和复现步骤。请勿上传包含私人小说正文或个人资料的 Vault 文件。
 
 ---
 
-## Customization / 自定义配置
+## English
 
-| Setting / 配置项 | Description / 说明 |
-|------------------|-------------------|
-| Data Folder / 实体数据文件夹 | Directory for character index and related files / 存放人物索引等文件的目录 |
-| Timeline Mode / 时间线结构模式 | auto / chapter / historical |
-| Current Timeline Point / 当前时间点 | Current narrative progress for status and filtering / 故事当前进度，用于状态判断和过滤 |
-| Graph Sync Scope / 图谱同步范围 | All types / Selected types only / 全部类型 / 仅选中类型 |
-| Auto-sync First Appearance / 出场事件自动同步首次出场 | `[出场]` tag auto-writes to character profiles / `[出场]` 标签自动写入人物档案 |
-| Default Collapse Top Bar / 默认收起顶栏 | Save space on small screens / 小屏幕省空间 |
+### What is Relation Weaver?
+
+**Relation Weaver** is a local-first Obsidian plugin for novel planning, tabletop campaign management, and fictional-world development. It brings character profiles, relationships, factions, timelines, plot threads, rule-based story checks, worldbuilding notes, and story outlines into one workspace.
+
+It is designed for writers who need to maintain large casts, interconnected character arcs, long-running timelines, faction structures, and extensive world lore. Project data stays in your current Obsidian vault and can be managed as Markdown or local data files.
+
+### Feature overview
+
+| Area | Features |
+|---|---|
+| **Dashboard** | A central creative workspace with project statistics, recent activity, module navigation, and quick links. |
+| **Characters** | Markdown-based character profiles with configurable fields, aliases, faction, birth, first appearance, and death information. |
+| **Relationships** | Create and edit character-to-character relationships, relationship types, intimacy values, and relationship change history. Swap relationship endpoints and edit records from contextual actions. |
+| **Factions** | Manage factions and connect faction information with character and timeline views. |
+| **Relationship Graph** | Visualize the character network, emphasize highly connected characters, interact with graph nodes, and optionally sync notes to Obsidian's native graph. |
+| **Intimacy History** | Track changes in relationship intimacy over time. |
+| **Timeline** | Organize events by date, search and filter events, use event labels and plot-line states, and inspect timeline points and character references. |
+| **BCE / CE Dating** | Parse BCE and CE dates and compare BCE years in historical chronological order. Useful for ancient and historical fiction. |
+| **Character Lifecycle** | Review birth, first-appearance, and death milestones using character profile fields. |
+| **Plot Threads** | Track planted, developing, and resolved plot threads, and review unresolved hooks. |
+| **Story Audit** | Rule-based checks for first appearances, appearances before birth or after death, explicit age clues, relationship date ranges, plot-thread states, and possible timeline ordering issues. |
+| **Global Search** | Search characters, relationships, events, plot threads, and factions; use field filters and contextual editing actions. |
+| **Worldbuilding Library** | Organize searchable editable entries for items, locations, organizations, abilities, species history, and world rules. |
+| **Inspiration Draw** | Randomly draw entries from user-maintained, category-based local Markdown pools. Copy the result into your notes. |
+| **Story Outline** | Organize outlines by chapters, acts, or story sections and open the source Markdown for editing in Obsidian. |
+| **Compendium Export** | Generate a reference document containing character profiles, relationship tables, a Mermaid relationship diagram, unresolved plot threads, and consistency notes. |
+| **Import & Merge** | Preview additions, duplicates, and conflicts before merging. Existing conflicting data is preserved by default; a snapshot is created before applying the merge. |
+| **Snapshots & Restore** | Create snapshots, preview saved content and differences, verify snapshot integrity, and restore with a pre-restore backup. |
+| **Custom File Paths** | Configure vault-relative paths for the worldbuilding library, inspiration pool, and story outline. The plugin can relocate a moved file when exactly one matching Markdown filename is found. |
+
+### Version evolution: 3.3.3 to 3.7.8
+
+Version 3.7.8 builds on the original character, relationship, faction, and timeline workflows. The project has since added safer persistence, import preview and merging, story-logic checks, BCE/CE chronology, a redesigned workspace, and dedicated worldbuilding tools.
+
+| Area | Early 3.3.x baseline | Version 3.7.8 |
+|---|---|---|
+| Character and relationship management | Core character, relationship, and faction records | Retains the core workflows; adds contextual character actions, faster relationship editing, endpoint swapping, change history, and field-aware search |
+| Data persistence | Earlier data storage and fewer recovery safeguards | Separate relationship data, serialized writes, safe replacement, backups, corruption preservation, verified snapshots, and guarded restore |
+| Import | Basic data import workflow | Import preview, duplicate detection, conflict handling, smart merge, and automatic pre-merge snapshots |
+| Search | Basic lookup | Cross-module search across characters, relationships, events, plot threads, and factions, with field filters and quick actions |
+| Story consistency | Primarily manual review | Rule-based checks for appearances, birth/death chronology, explicit age clues, relationship periods, plot threads, and timeline order |
+| Timeline | Basic event timeline | BCE/CE chronology, current-time filtering, timeline overview, event search, faction-colored character names, and adaptive event text display |
+| Relationship visualization | Relationship records as the primary view | Network layout and optional sync to the native Obsidian graph; automatic sync is off by default |
+| Workspace | Earlier sidebar and module navigation | Unified creative dashboard, grouped navigation, statistics, and quick module access |
+| Worldbuilding | Primarily text-based notes | Categorized, searchable, editable worldbuilding entries with configurable file paths |
+| Inspiration and outline | No dedicated interactive workspace | Markdown-based random inspiration pool and chapter/section outline workspace |
+| File management | Some fixed default file locations | Configurable vault-relative paths, cautious relocation of uniquely named files, and explicit file creation |
+| Graph note generation | Graph sync could generate node notes | No default bulk generation; users explicitly trigger graph-note synchronization |
+| Interface | Earlier layout | Compact refined UI, light/dark theme adaptation, and improved narrow-pane and laptop layouts |
+
+This table summarizes the major development milestones; it does not imply that every feature from earlier releases was replaced. The original character, relationship, faction, and timeline workflows remain the foundation.
+
+### Privacy and local-first design
+
+- No cloud AI integration, API key, or external account is required.
+- Character, relationship, timeline, worldbuilding, and outline data are processed within the current Obsidian vault.
+- The plugin does not use a remote server as a storage or analysis service.
+- The plugin reads and writes local Markdown, JSON, and snapshot files as required by its features.
+
+Do not commit private vault data, story drafts, backups, or snapshots to a public repository.
+
+### Data safety
+
+Relation Weaver includes serialized relationship-data writes, safe file replacement, backup fallback, corruption preservation, snapshot integrity checks, pre-restore backups, post-restore verification, and confirmation steps for destructive actions. Import merging also previews changes and creates a snapshot before applying them.
+
+These safeguards reduce accidental data loss but are **not a substitute for backing up your entire vault**. Keep an independent backup of your vault before major imports, migrations, or restores.
+
+### Quick start
+
+1. Install and enable Relation Weaver in Obsidian.
+2. Open the Relation Weaver workspace.
+3. Create or connect Markdown character profiles and fill in relevant fields such as faction, birth, first appearance, and death.
+4. Add relationships between existing characters and optionally record intimacy changes.
+5. Add timeline events with dates, labels, and plot-thread states.
+6. Review plot threads and the Story Audit results.
+7. Add worldbuilding entries, configure an inspiration pool, and organize your story outline.
+8. Create a snapshot and back up your vault before large imports or structural changes.
+
+### Local files
+
+The plugin stores data in the current vault. Default names may include:
+
+| File / folder | Purpose |
+|---|---|
+| `data.json` | Obsidian plugin settings |
+| `relations-data.json` | Relationship and faction data |
+| `relations-data.json.bak` | Previous valid relationship-data backup |
+| `时间线.md` | Timeline events, using the configured path |
+| `世界观资料库.md` | Categorized worldbuilding library; configurable path |
+| `抽签池.md` | Inspiration draw pool; configurable path |
+| `故事大纲.md` | Story outline; configurable path |
+| `设定快照/` | Data snapshots and restore indexes |
+
+The inspiration pool uses Markdown level-two headings for categories and bullet items for candidates. The outline uses headings to organize chapters or story sections. You can edit these files directly in Obsidian.
+
+### Story Audit: scope and limitations
+
+Story Audit is a **rule-based assistant, not an AI semantic editor**. It relies on structured profile fields and explicit text patterns:
+
+- Age checks require a parseable birth year and an explicit age expression in an event (for example, “18 years old”).
+- Relationship-period checks require start and/or end dates.
+- First-appearance checks rely on the configured profile field and `[出场]` timeline events.
+- Timeline-order warnings may flag flashbacks or non-linear storytelling; review them in context.
+- Plot-thread checks use recorded statuses and milestones and cannot determine literary meaning automatically.
+
+Results are read-only suggestions. The plugin does not automatically rewrite character, relationship, or event data based on audit findings.
+
+### Installation
+
+#### Community plugins
+
+After the plugin is accepted into the Obsidian Community Plugins directory:
+
+1. Open **Settings → Community plugins → Browse**.
+2. Search for **Relation Weaver**.
+3. Install and enable the plugin.
+
+#### Manual installation
+
+1. Download `main.js`, `manifest.json`, and `styles.css` from [GitHub Releases](https://github.com/guilier/relation-weaver/releases).
+2. Place the three files in `<your-vault>/.obsidian/plugins/relation-weaver/`.
+3. Enable the plugin in **Settings → Community plugins**. When upgrading, disable and re-enable it or restart Obsidian if needed.
+
+### Upgrade notes for 3.7.8
+
+- The worldbuilding library, inspiration pool, and story outline now support custom vault-relative paths.
+- Missing files are no longer created automatically when a module opens or refreshes. Use the explicit create-file action when needed.
+- When a file has moved, automatic relocation occurs only if exactly one Markdown file with the same name is found. Multiple matches require manual path selection.
+- Character graph node notes are no longer generated in bulk by default. Use the explicit graph synchronization action when you want them.
+- Automatic graph synchronization is off by default. Review the setting instead of assuming an older preference remains enabled.
+- Existing files are not proactively deleted, and character, relationship, faction, or timeline data is not bulk-migrated or overwritten by these changes.
+
+Before upgrading, back up the plugin folder and all related Markdown / JSON files, including files stored at custom paths.
+
+### Compatibility and testing
+
+The current manifest declares `minAppVersion: 1.4.0` and `isDesktopOnly: false`. These are manifest declarations, not a guarantee that every desktop/mobile device, theme, or sync setup has been tested. JavaScript syntax checks do not replace end-to-end testing inside Obsidian. Test the plugin in a copy of your vault first, especially import, save, snapshot restore, graph synchronization, and custom file paths.
+
+### Support
+
+Please report bugs and feature requests through [GitHub Issues](https://github.com/guilier/relation-weaver/issues). Include your Obsidian version, operating system, plugin version, and reproduction steps. Do not attach private story drafts or your full vault.
 
 ---
 
-## FAQ / 常见问题
+## Development
 
-### Q: Can I edit the data files manually? / 可以手动编辑数据文件吗？
+- `main.js` — bundled Obsidian plugin entry point.
+- `styles.css` — plugin styles.
+- `manifest.json` — Obsidian plugin manifest.
+- `modules/` — maintainable local source modules used for development and testing; runtime logic required by the current build is bundled into `main.js`.
 
-**A:** Yes! All data is stored in standard Markdown files. You can edit them in Obsidian or any text editor. The plugin will automatically sync changes on refresh.
+## License
 
-**A:** 可以！所有数据都存储在标准 Markdown 文件中。你可以在 Obsidian 或任何文本编辑器中编辑，插件会在刷新时自动同步更改。
-
-### Q: How do I migrate from v2.x? / 如何从 v2.x 迁移？
-
-**A:** v3.0 uses the same data format as v2.x. Simply install the new version — your existing data will work without migration.
-
-**A:** v3.0 使用与 v2.x 相同的数据格式。直接安装新版本即可，现有数据无需迁移。
-
-### Q: Does this work with Obsidian Mobile? / 支持 Obsidian 移动端吗？
-
-**A:** Yes, the plugin is fully compatible with Obsidian Mobile.
-
-**A:** 支持，插件完全兼容 Obsidian 移动端。
-
-### Q: Can I use this for non-fiction knowledge management? / 可以用于非虚构类的知识管理吗？
-
-**A:** Absolutely. Switch to the "Knowledge" scene preset to rename entities as "Concepts", factions as "Categories", and relationships as "Associations".
-
-**A:** 当然可以。切换到「知识库」场景预设，实体将显示为「概念」，阵营为「分类」，关系为「关联」。
-
----
-
-## Changelog / 更新日志
-
-### v3.0.1 (2026-08-02)
-
-**New Features / 新增功能：**
-- Markdown bidirectional sync for relationships & factions / 关系与阵营 Markdown 双写
-- Visual relation type manager / 关系类型管理可视化界面
-- Visual intimacy level manager / 亲密度等级管理可视化界面
-- Floating character quick reference panel / 时间线人物速查浮窗
-- Event tag manager UI rewrite / 事件标签管理界面重写
-
-**Enhancements / 功能增强：**
-- Setting collection now includes Mermaid diagrams and consistency checks / 设定集新增 Mermaid 关系图和一致性检查
-- Dashboard now shows MD parse errors and appearance consistency issues / 仪表盘新增 MD 解析错误和出场一致性检查
-- One-click fix for missing first appearances / 一键补全缺失的首次出场
-
-**Bug Fixes / 问题修复：**
-- Fixed MD parsing for `* ` list items / 修复 `* ` 列表项的 MD 解析
-- Fixed bidirectional relationship sync / 修复关系双向同步
-- Fixed relationship deletion cascade / 修复关系删除联动清理
-
----
-
-## License / 开源协议
-
-MIT License
-
----
-
-**If this plugin helps you, give it a ⭐ on GitHub! / 如果这个插件对你有帮助，给个 ⭐ 支持一下吧！**
+MIT. See [LICENSE](./LICENSE).
