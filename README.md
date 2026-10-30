@@ -10,7 +10,8 @@
 </p>
 
 - **Plugin ID:** `relation-weaver`
-- **Current version:** `3.7.8`（以 `manifest.json` 和 [GitHub Releases](https://github.com/guilier/relation-weaver/releases) 为准）
+- **Current version:** `3.7.8`
+- **Latest release / 最新版本下载:** [GitHub Releases · v3.7.8](https://github.com/guilier/relation-weaver/releases/latest)
 - **Author:** [guilier](https://github.com/guilier)
 - **Repository:** https://github.com/guilier/relation-weaver
 - **License:** [MIT](./LICENSE)
