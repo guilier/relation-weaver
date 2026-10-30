@@ -404,4 +404,3 @@ Build instructions: see the `scripts` section of `package.json` (for example, th
 ## License
 
 MIT. See [LICENSE](./LICENSE).
-```
