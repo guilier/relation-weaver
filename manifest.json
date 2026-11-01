@@ -1,6 +1,6 @@
 {
   "id": "relation-weaver",
-  "name": "人物关系谱系",
+  "name": "relation-weaver",
   "version": "3.15.3",
   "minAppVersion": "1.4.0",
   "description": "管理人物档案、关系图谱、时间线、伏笔与世界观；关系图谱姓名顶层常驻显示修复；保留阵营颜色、关系标签与图谱交互",
