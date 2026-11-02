@@ -3930,3 +3930,143 @@
 /* 3.15.3：姓名作为独立 SVG 顶层图层常驻显示；悬停不再改变节点半径以免遮挡姓名。 */
 .my-char-view-root .my-char-graph-node-label-layer { display:inline !important; visibility:visible !important; opacity:1 !important; pointer-events:none !important; }
 .my-char-view-root .my-char-graph-node-label-layer .my-char-graph-node-label { display:inline !important; visibility:visible !important; opacity:1 !important; fill:#fff !important; color:#fff !important; font-weight:700 !important; text-anchor:middle !important; dominant-baseline:middle !important; pointer-events:none !important; }
+
+
+/* 3.15.4：HTML 常驻姓名层，绕开 SVG text 在部分 Obsidian 主题/缩放下不绘制的问题。 */
+.my-char-view-root .rw-graph-stage { position:relative !important; flex:none !important; }
+.my-char-view-root .rw-graph-html-label-layer { position:absolute !important; inset:0 auto auto 0 !important; display:block !important; visibility:visible !important; opacity:1 !important; pointer-events:none !important; z-index:4 !important; transform-origin:0 0 !important; }
+.my-char-view-root .rw-graph-node-name-label { position:absolute !important; display:flex !important; align-items:center !important; justify-content:center !important; color:#fff !important; -webkit-text-fill-color:#fff !important; font-weight:750 !important; text-align:center !important; white-space:pre-line !important; overflow-wrap:anywhere !important; pointer-events:none !important; opacity:1; visibility:visible !important; text-shadow:0 1px 2px rgba(0,0,0,.8),0 0 4px rgba(0,0,0,.45) !important; }
+
+
+/* 时间线：彩色标签本身即筛选控件，合并展示层 */
+.my-char-view-root .rw-timeline-tag-filter {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin: 0 0 0 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.my-char-view-root .rw-timeline-tag-filter .rw-timeline-filter-chip {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  padding: 4px 11px;
+  margin: 0;
+  min-height: 25px;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: opacity .16s ease, transform .16s ease, box-shadow .16s ease;
+}
+.my-char-view-root .rw-timeline-tag-filter .rw-timeline-filter-chip.is-active {
+  border-color: var(--text-normal);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--background-primary) 70%, transparent);
+  transform: translateY(-1px);
+  opacity: 1;
+}
+.my-char-view-root .rw-timeline-tag-filter .rw-timeline-filter-chip.is-filter-inactive {
+  opacity: .58;
+  filter: saturate(.78);
+}
+.my-char-view-root .rw-timeline-tag-filter .rw-timeline-filter-chip:hover {
+  opacity: 1;
+  filter: none;
+  transform: translateY(-1px);
+}
+
+
+/* 伏笔提醒：默认紧凑、可折叠、可逐条处理 */
+.my-char-plot-warn-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: 10px;
+}
+.my-char-plot-warn-toggle,
+.my-char-plot-warn-link {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.my-char-plot-warn-toggle:hover,
+.my-char-plot-warn-link:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+.my-char-plot-warn-meta,
+.my-char-plot-warn-history {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 100%;
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.my-char-plot-warn-entry {
+  padding: 5px 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.my-char-plot-warn-entry:last-child { border-bottom: 0; }
+.my-char-plot-warn-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+.my-char-plot-warn-actions .my-char-plot-warn-link {
+  padding: 2px 6px;
+  font-size: 10px;
+}
+
+/* 3.15.7 compact graph canvas: remove legacy minimum width that forced horizontal stretching. */
+.my-char-view-root .my-char-graph-svg { min-width:0 !important; width:auto; }
+.my-char-view-root .my-char-graph-canvas-wrap { max-width:100%; }
+.my-char-view-root .rw-graph-stage { max-width:none; }
+.my-char-view-root .rw-graph-node-name-label { letter-spacing:-.02em; }
+
+
+/* 3.15.8 relationship graph layout controls */
+.my-char-view-root .rw-graph-layout-controls {
+  display:flex; align-items:center; flex-wrap:wrap; gap:6px;
+  margin:7px 0 9px; padding:6px 8px;
+  border:1px solid var(--background-modifier-border);
+  border-radius:10px; background:var(--background-secondary);
+}
+.my-char-view-root .rw-graph-layout-controls .rw-graph-layout-btn {
+  min-height:27px; padding:3px 9px; font-size:11px;
+}
+.my-char-view-root .rw-graph-layout-controls .rw-graph-layout-btn.is-active {
+  color:var(--text-on-accent); background:var(--interactive-accent);
+  border-color:var(--interactive-accent);
+}
+.my-char-view-root .rw-graph-node-size-label { margin-left:3px; font-size:10px; }
+@media (max-width: 520px) {
+  .my-char-view-root .rw-graph-layout-controls { gap:4px; padding:5px; }
+  .my-char-view-root .rw-graph-layout-controls .rw-graph-layout-btn { padding:3px 7px; }
+}
+
+
+/* 3.15.9 graph layout correction: no forced SVG min-width or clipping. */
+.my-char-view-root .my-char-graph-canvas-wrap { overflow:auto !important; min-width:0 !important; }
+.my-char-view-root .my-char-graph-svg { min-width:0 !important; max-width:none !important; }
+.my-char-view-root .rw-graph-stage { min-width:0 !important; }
+.my-char-view-root .my-char-graph-edge-label { font-size:10px !important; font-weight:650 !important; paint-order:stroke !important; stroke:var(--background-primary, #f8fafc) !important; stroke-width:5px !important; stroke-linejoin:round !important; }
+
+
+/* 3.15.9 graph readability correction: dense relation labels are revealed on focus/zoom. */
+.my-char-view-root .my-char-graph-edge-group.rw-edge-label-hidden .my-char-graph-edge-label { display:none !important; }
+.my-char-view-root .my-char-graph-edge-label { fill:#334155 !important; font-size:10px !important; font-weight:700 !important; paint-order:stroke !important; stroke:var(--background-primary, #f8fafc) !important; stroke-width:5px !important; stroke-linejoin:round !important; }
+.my-char-view-root .my-char-graph-node-name-label { text-shadow:0 1px 2px rgba(0,0,0,.8),0 0 3px rgba(0,0,0,.45) !important; }
+
+.my-char-view-root .my-char-graph-svg { min-width:0 !important; }
