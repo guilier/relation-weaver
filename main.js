@@ -50,10 +50,10 @@ function rwHighlightCharacterMentions(root, view) {
 }
 
 /* P3 self-contained modules: bundled into main.js for Obsidian's plugin loader. */
-/** Deterministic, dependency-free relationship graph layout. */
-function buildGraphLayout(chars, relations, width, height) {
+/** Deterministic, dependency-free compact relationship graph layout. */
+function buildGraphLayout(chars, relations, width, height, layoutMode, layoutSeed) {
     chars = chars || []; relations = relations || [];
-    var w = Math.max(320, Number(width) || 600), h = Math.max(280, Number(height) || 420);
+    var w = Math.max(320, Number(width) || 600), h = Math.max(320, Number(height) || 520);
     var byName = {}, degree = {}, edges = [];
     chars.forEach(function(c) { if (c && c.name) { byName[c.name] = c; degree[c.name] = 0; } });
     relations.forEach(function(r) {
@@ -65,24 +65,37 @@ function buildGraphLayout(chars, relations, width, height) {
     var positions = {};
     if (!names.length) return { positions: positions, edges: edges, degree: degree, names: names };
 
-    // 自适应网格布局：人物越多，画布自动扩展；每个节点保留足够的姓名标签空间。
-    // 按关系度排序后蛇形排布，避免固定画布中节点与姓名标签挤成一团。
-    var cols = Math.max(1, Math.ceil(Math.sqrt(names.length * 1.35)));
-    var rows = Math.ceil(names.length / cols);
-    var cellW = Math.max(180, w / cols), cellH = Math.max(154, h / rows);
+    // Radial, collision-aware layout: one clear hub, then evenly spaced rings.
+    // Unlike the previous force simulation, linked nodes are never pulled into a pile.
+    layoutMode = layoutMode === 'comfortable' ? 'comfortable' : 'compact';
+    layoutSeed = Number(layoutSeed) || 0;
+    var centerX = w / 2, centerY = h / 2;
+    var count = names.length;
+    var baseRadius = layoutMode === 'comfortable' ? 158 : 138;
+    var ringGap = layoutMode === 'comfortable' ? 142 : 124;
+    var nodeBase = 24;
     var points = {};
-    names.forEach(function(name, i) {
-        var row = Math.floor(i / cols), col = i % cols;
-        if (row % 2) col = cols - 1 - col;
-        points[name] = { x:(col + .5) * w / cols, y:(row + .5) * h / rows };
-    });
+    var hub = names[0];
+    points[hub] = { x:centerX, y:centerY };
+    var remaining = names.slice(1), cursor = 0, ring = 0;
+    while (cursor < remaining.length) {
+        var radius = baseRadius + ring * ringGap;
+        var capacity = Math.max(7, Math.floor((Math.PI * 2 * radius) / (nodeBase * 3.45)));
+        var takeLimit = ring === 0 && remaining.length - cursor > capacity - 1 ? Math.min(8, capacity) : capacity;
+        var take = Math.min(takeLimit, remaining.length - cursor);
+        var phase = ring % 2 ? Math.PI / capacity : -Math.PI / 2;
+        for (var i = 0; i < take; i++) {
+            var name = remaining[cursor + i];
+            var angle = phase + (Math.PI * 2 * i / take) + (((layoutSeed + i * 7 + ring * 11) % 5) - 2) * .012;
+            points[name] = { x:centerX + Math.cos(angle) * radius, y:centerY + Math.sin(angle) * radius };
+        }
+        cursor += take; ring++;
+    }
     names.forEach(function(name) {
-        var q=points[name], c=byName[name];
-        var nameLen = Array.from(String(name || '')).length;
-        var nameLines = Math.max(1, Math.ceil(nameLen / 4));
-        var lineChars = Math.min(4, nameLen || 1);
-        var nameRadius = Math.max(30, Math.min(48, 17 + lineChars * 5 + (nameLines - 1) * 5));
-        positions[name] = { x:q.x, y:q.y, char:c, degree:degree[name]||0, radius:Math.max(nameRadius, Math.min(34,22+Math.min(12,degree[name]||0))) };
+        var c = byName[name];
+        // Keep nodes compact; degree changes size gently instead of creating oversized hubs.
+        var radius = Math.max(19, Math.min(27, 19 + Math.min(8, degree[name] || 0) * .85));
+        positions[name] = { x:points[name].x, y:points[name].y, char:c, degree:degree[name]||0, radius:radius };
     });
     return { positions: positions, edges: edges, degree: degree, names: names };
 }
@@ -1461,7 +1474,8 @@ function syncSettingsFromParsedData(plugin, chars, relations, timeline) {
     }
 
     var tagMap = {};
-    var customTags = plugin.settings.customEventTags || [];
+    var customTags = Array.isArray(plugin.settings.customEventTags) ? plugin.settings.customEventTags : [];
+    var deletedTagValues = Array.isArray(plugin.settings.deletedEventTagValues) ? plugin.settings.deletedEventTagValues : [];
     var tagsNormalized = false;
     for (var ti = 0; ti < customTags.length; ti++) {
         var ct = normalizeEventTag(customTags[ti]);
@@ -1476,7 +1490,7 @@ function syncSettingsFromParsedData(plugin, chars, relations, timeline) {
     var palette = ['#4a90e2', '#e74c3c', '#2ecc71', '#9b59b6', '#f39c12', '#1abc9c', '#e67e22', '#34495e'];
     for (var ei = 0; ei < (timeline || []).length; ei++) {
         var tag = (timeline[ei].tag || '').trim();
-        if (!tag || tagMap[tag]) continue;
+        if (!tag || tagMap[tag] || deletedTagValues.indexOf(tag) >= 0) continue;
         tagMap[tag] = {
             value: tag,
             label: tag,
@@ -1876,8 +1890,47 @@ async function updateEventInMd(app, plugin, originalEvt, newEvt) {
         new obsidian.Notice('⚠️ 事件位置已变化，未执行修改。请刷新时间线后重试。', 7000);
         return false;
     }
-    // 无论事件是否更换年月/卷册，都在内存中完成替换后只写入一次，避免先删后增造成事件丢失。
-    lines[originalEvt._lineIndex] = buildEventMdLine(newEvt);
+    // 先移除旧事件行，再按新年份/月份放回对应分组；仅一次 Vault 写入，避免先删后增造成丢失。
+    lines.splice(originalEvt._lineIndex, 1);
+    var yearHeading = '## ' + String(newEvt.year || '').trim();
+    var monthValue = String(newEvt.month || '未标注').trim();
+    var yearIndex = -1;
+    for (var yi = 0; yi < lines.length; yi++) {
+        if (String(lines[yi] || '').trim() === yearHeading) { yearIndex = yi; break; }
+    }
+    if (yearIndex < 0) {
+        while (lines.length && !String(lines[lines.length - 1]).trim()) lines.pop();
+        if (lines.length) lines.push('');
+        lines.push(yearHeading);
+        yearIndex = lines.length - 1;
+    }
+    var sectionEnd = lines.length;
+    for (var se = yearIndex + 1; se < lines.length; se++) {
+        if (/^##\s+/.test(String(lines[se] || '').trim())) { sectionEnd = se; break; }
+    }
+    var insertAt = yearIndex + 1;
+    if (monthValue && monthValue !== '未标注') {
+        var monthHeading = '### ' + monthValue;
+        var monthIndex = -1;
+        for (var mi = yearIndex + 1; mi < sectionEnd; mi++) {
+            if (String(lines[mi] || '').trim() === monthHeading) { monthIndex = mi; break; }
+        }
+        if (monthIndex < 0) {
+            // 在该年份分组末尾创建月份标题，避免插入到相邻年份。
+            insertAt = sectionEnd;
+            while (insertAt > yearIndex + 1 && !String(lines[insertAt - 1] || '').trim()) insertAt--;
+            lines.splice(insertAt, 0, monthHeading);
+            monthIndex = insertAt;
+        }
+        insertAt = monthIndex + 1;
+        while (insertAt < lines.length && !String(lines[insertAt] || '').trim()) insertAt++;
+        while (insertAt < lines.length && !/^#{1,3}\s+/.test(String(lines[insertAt] || '').trim())) insertAt++;
+    } else {
+        insertAt = yearIndex + 1;
+        while (insertAt < sectionEnd && !/^#{1,2}\s+/.test(String(lines[insertAt] || '').trim())) insertAt++;
+    }
+    lines.splice(insertAt, 0, buildEventMdLine(newEvt));
+    originalEvt._lineIndex = insertAt;
     await app.vault.modify(file, lines.join('\n'));
     await rwUpdateEventRegistryAfterEdit(plugin, originalEvt, newEvt);
     return true;
@@ -2802,13 +2855,14 @@ function normalizeEventTag(tag) {
 
 // ========== 直接使用保存的标签；自动发现时合并而非覆盖 ==========
 function getEventTags(plugin) {
-    var customTags = plugin.settings.customEventTags || [];
+    var hasCustomTags = Object.prototype.hasOwnProperty.call(plugin.settings, 'customEventTags');
+    var customTags = hasCustomTags && Array.isArray(plugin.settings.customEventTags) ? plugin.settings.customEventTags : null;
     var cacheKey = JSON.stringify(customTags);
     if (plugin._eventTagsCache && plugin._eventTagsCacheKey === cacheKey) {
         return plugin._eventTagsCache;
     }
     var result;
-    if (customTags.length === 0) {
+    if (customTags === null || (!plugin.settings.eventTagsCustomized && customTags.length === 0)) {
         result = deepCloneJson(DEFAULT_EVENT_TAGS);
     } else {
         result = [];
@@ -2816,7 +2870,6 @@ function getEventTags(plugin) {
             var nt = normalizeEventTag(customTags[i]);
             if (nt) result.push(nt);
         }
-        if (result.length === 0) result = deepCloneJson(DEFAULT_EVENT_TAGS);
     }
     plugin._eventTagsCache = result;
     plugin._eventTagsCacheKey = cacheKey;
@@ -6146,10 +6199,29 @@ var MyView = /** @class */ (function (_super) {
         var graphCols = Math.max(1, Math.ceil(Math.sqrt(n * 1.35)));
         var graphRows = Math.ceil(n / graphCols);
         var longestGraphName = graphChars.reduce(function(m, c) { return Math.max(m, Array.from(String(c.name || '')).length); }, 0);
-        var graphCellWidth = Math.max(190, Math.min(230, longestGraphName * 8 + 100));
-        var width = Math.max(560, container.clientWidth || 600, graphCols * graphCellWidth + 40);
-        var height = Math.max(500, graphRows * 190 + 70);
-        var layout = graphModel.buildGraphLayout(graphChars, this.relations, width, height);
+        // 紧凑画布：优先使用当前面板宽度，避免少量人物也被撑成超宽画布。
+        var availableGraphWidth = Math.max(320, container.clientWidth || 600);
+        var graphCellWidth = Math.max(132, Math.min(168, longestGraphName * 6 + 82));
+        var comfortableLayout = (this._graphLayoutMode || 'compact') === 'comfortable';
+        var baseGraphRadius = comfortableLayout ? 158 : 138;
+        var graphRingGap = comfortableLayout ? 142 : 124;
+        var remainingGraphNodes = Math.max(0, n - 1), ringIndex = 0, radialExtent = 0;
+        while (remainingGraphNodes > 0) {
+            var currentRingRadius = baseGraphRadius + ringIndex * graphRingGap;
+            var currentRingCapacity = Math.max(7, Math.floor((Math.PI * 2 * currentRingRadius) / (24 * 3.45)));
+            var currentRingLimit = ringIndex === 0 && remainingGraphNodes > currentRingCapacity - 1 ? Math.min(8, currentRingCapacity) : currentRingCapacity;
+            remainingGraphNodes -= Math.min(currentRingLimit, remainingGraphNodes);
+            radialExtent = currentRingRadius;
+            ringIndex++;
+        }
+        if (!radialExtent) radialExtent = baseGraphRadius;
+        var graphDiameter = Math.ceil(radialExtent * 2 + 100);
+        var width = Math.max(520, Math.min(Math.max(availableGraphWidth, graphDiameter), graphDiameter));
+        var height = Math.max(520, graphDiameter);
+        var graphLayoutMode = this._graphLayoutMode || 'compact';
+        var graphNodeScale = Number(this._graphNodeScale) || 1;
+        var graphLayoutSeed = Number(this._graphLayoutSeed) || 0;
+        var layout = graphModel.buildGraphLayout(graphChars, this.relations, width, height, graphLayoutMode, graphLayoutSeed);
         var nodePositions = layout.positions;
         var graphCharNames = {};
         for (var gi = 0; gi < graphChars.length; gi++) graphCharNames[graphChars[gi].name] = true;
@@ -6163,12 +6235,40 @@ var MyView = /** @class */ (function (_super) {
         var relationTypes = Array.from(new Set(this.relations.map(function(r){ return String(r.type || r.relation || '关系').trim(); }).filter(Boolean)));
         relationTypes.forEach(function(t){ relationFilter.createEl('option', { text: t, attr: { value: t } }); });
         var focusHint = tools.createEl('span', { text: '点击人物聚焦，再次点击取消；双击打开人物资料', cls: 'my-char-view-muted' });
+        var layoutBar = container.createEl('div', { cls: 'rw-graph-layout-controls' });
+        layoutBar.createEl('span', { text: '布局', cls: 'my-char-view-muted' });
+        function addLayoutButton(label, title, active, handler) {
+            var btn = layoutBar.createEl('button', { text: label, cls: 'my-char-view-btn rw-graph-layout-btn' });
+            btn.setAttribute('title', title); btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+            if (active) btn.addClass('is-active');
+            btn.addEventListener('click', handler); return btn;
+        }
+        addLayoutButton('紧凑', '缩短人物间距，适合日常查看', graphLayoutMode === 'compact', function() {
+            self._graphLayoutMode = 'compact'; self.renderGraph(container);
+        });
+        addLayoutButton('舒适', '增加人物间距，适合关系较多时查看', graphLayoutMode === 'comfortable', function() {
+            self._graphLayoutMode = 'comfortable'; self.renderGraph(container);
+        });
+        var nodeSizeLabel = layoutBar.createEl('span', { text: '节点 ' + (graphNodeScale < .95 ? '小' : (graphNodeScale > 1.05 ? '大' : '中')), cls: 'my-char-view-muted rw-graph-node-size-label' });
+        addLayoutButton('−', '缩小人物节点', false, function() {
+            self._graphNodeScale = Math.max(.8, Math.round((graphNodeScale - .1) * 10) / 10); self.renderGraph(container);
+        });
+        addLayoutButton('+', '放大人物节点', false, function() {
+            self._graphNodeScale = Math.min(1.25, Math.round((graphNodeScale + .1) * 10) / 10); self.renderGraph(container);
+        });
+        addLayoutButton('自动整理', '重新计算人物位置，尝试减少连线交叉', false, function() {
+            self._graphLayoutSeed = graphLayoutSeed + 1; self.renderGraph(container);
+        });
         var wrap = container.createEl('div', { cls: 'my-char-graph-canvas-wrap' });
-        // SVG 与布局使用同一组尺寸，避免渲染后节点坐标和视口不一致。
-        wrap.style.overflow='auto'; wrap.style.minHeight=height+'px';
+        // 使用固定尺寸舞台承载 SVG 与 HTML 姓名层；两者共享完全相同的坐标与缩放矩阵。
+        wrap.style.overflow='auto'; wrap.style.minHeight=height+'px'; wrap.style.position='relative';
+        var graphStage = wrap.createEl('div', { cls: 'rw-graph-stage' });
+        graphStage.style.position='relative'; graphStage.style.width=width+'px'; graphStage.style.height=height+'px';
+        graphStage.style.minWidth=width+'px'; graphStage.style.flex='none';
         var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
         svg.setAttribute('width', String(width)); svg.setAttribute('height', String(height));
         svg.setAttribute('viewBox', '0 0 ' + width + ' ' + height); svg.classList.add('my-char-graph-svg'); svg.style.overflow='visible';
+        svg.style.position='absolute'; svg.style.left='0'; svg.style.top='0'; svg.style.width=width+'px'; svg.style.height=height+'px'; svg.style.maxWidth='none';
         var viewportGroup=document.createElementNS('http://www.w3.org/2000/svg','g');
         var graphScale=1, graphTx=0, graphTy=0, focusedName=null, searchName=null;
         var edgeGroup=document.createElementNS('http://www.w3.org/2000/svg','g');
@@ -6181,13 +6281,19 @@ var MyView = /** @class */ (function (_super) {
             var eg=document.createElementNS('http://www.w3.org/2000/svg','g'); eg.setAttribute('class','my-char-graph-edge-group');
             var line=document.createElementNS('http://www.w3.org/2000/svg','line');
             line.setAttribute('x1',String(pa.x)); line.setAttribute('y1',String(pa.y)); line.setAttribute('x2',String(pb.x)); line.setAttribute('y2',String(pb.y));
-            line.setAttribute('stroke',getIntimacyColor(rel.intimacy||0)); line.setAttribute('stroke-width','2'); line.setAttribute('stroke-opacity','0.55'); line.setAttribute('class','my-char-graph-edge'); eg.appendChild(line);
+            line.setAttribute('stroke',getIntimacyColor(rel.intimacy||0)); line.setAttribute('stroke-width','1.6'); line.setAttribute('stroke-opacity','0.58'); line.setAttribute('class','my-char-graph-edge'); eg.appendChild(line);
             var label=document.createElementNS('http://www.w3.org/2000/svg','text');
             var edgeDx=pb.x-pa.x, edgeDy=pb.y-pa.y, edgeLen=Math.sqrt(edgeDx*edgeDx+edgeDy*edgeDy)||1;
-            var edgeOffset=12 + (ri % 4) * 5;
-            if (ri % 2) edgeOffset = -edgeOffset;
-            label.setAttribute('x',String((pa.x+pb.x)/2-(edgeDy/edgeLen)*edgeOffset)); label.setAttribute('y',String((pa.y+pb.y)/2+(edgeDx/edgeLen)*edgeOffset-5)); label.setAttribute('text-anchor','middle'); label.setAttribute('font-size','10'); label.setAttribute('class','my-char-graph-edge-label'); label.textContent=relType(rel); eg.appendChild(label);
-            eg.dataset.type=relType(rel); eg.dataset.a=rel.charA; eg.dataset.b=rel.charB; edgeGroup.appendChild(eg); edgeEls.push(eg);
+            // 标签沿连线偏向中段但不压在节点边缘；同一人物对的多条关系使用不同偏移。
+            var pairKey=[rel.charA,rel.charB].sort().join('|||');
+            var samePairIndex=0;
+            for(var rj=0;rj<ri;rj++){var prior=layout.edges[rj];if([prior.charA,prior.charB].sort().join('|||')===pairKey)samePairIndex++;}
+            var edgeOffset=(samePairIndex%2===0?1:-1)*(13+Math.floor(samePairIndex/2)*12);
+            var labelT=samePairIndex>0?0.56:0.5;
+            label.setAttribute('x',String(pa.x+(pb.x-pa.x)*labelT-(edgeDy/edgeLen)*edgeOffset));
+            label.setAttribute('y',String(pa.y+(pb.y-pa.y)*labelT+(edgeDx/edgeLen)*edgeOffset-5));
+            label.setAttribute('text-anchor','middle'); label.setAttribute('font-size','10'); label.setAttribute('class','my-char-graph-edge-label'); label.setAttribute('paint-order','stroke'); label.setAttribute('stroke','#f8fafc'); label.setAttribute('stroke-width','5'); label.setAttribute('stroke-linejoin','round'); label.textContent=relType(rel); eg.appendChild(label);
+            eg.dataset.type=relType(rel); eg.dataset.a=rel.charA; eg.dataset.b=rel.charB; if(layout.edges.length >= 10) eg.classList.add('rw-edge-label-hidden'); edgeGroup.appendChild(eg); edgeEls.push(eg);
         }
         var names=Object.keys(nodePositions);
         for(var ni=0; ni<names.length; ni++) (function(name){
@@ -6198,7 +6304,7 @@ var MyView = /** @class */ (function (_super) {
             var nameChars = validDisplayName ? Array.from(displayName) : [];
             var nameLines = [];
             for (var nameIndex = 0; nameIndex < nameChars.length; nameIndex += 4) nameLines.push(nameChars.slice(nameIndex, nameIndex + 4).join(''));
-            var nodeRadius = Math.max(30, Math.min(52, pos.radius || 30));
+            var nodeRadius = Math.max(17, Math.min(34, (pos.radius || 24) * graphNodeScale));
             var circle=document.createElementNS('http://www.w3.org/2000/svg','circle'); circle.setAttribute('cx',String(pos.x)); circle.setAttribute('cy',String(pos.y)); circle.setAttribute('r',String(nodeRadius)); circle.setAttribute('fill',nodeColor); circle.setAttribute('stroke','var(--background-primary, #fff)'); circle.setAttribute('stroke-width','2.5'); g.appendChild(circle);
             // 姓名数据先收集，稍后统一绘制到所有圆点之上的独立 SVG 图层，防止被后续节点覆盖。
             if (validDisplayName) graphNodeLabels.push({name:displayName, x:pos.x, y:pos.y, radius:nodeRadius});
@@ -6209,64 +6315,68 @@ var MyView = /** @class */ (function (_super) {
             g.addEventListener('keydown',function(ev){if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();focusedName=focusedName===name?null:name;updateGraphEmphasis();if(self.showCharDetail&&pos.char)self.showCharDetail(pos.char);}});
             nodeGroup.appendChild(g); nodeEls[name]=g;
         })(names[ni]);
-        // 独立顶层姓名图层：绘制顺序始终晚于所有关系线和圆形节点，姓名常驻显示，不依赖 hover/title。
-        var nodeLabelGroup=document.createElementNS('http://www.w3.org/2000/svg','g');
-        nodeLabelGroup.setAttribute('class','my-char-graph-node-label-layer');
+        // HTML 姓名层：不再使用 SVG <text>。它位于 SVG 之上，避免 Obsidian/主题对 SVG 文本的样式覆盖。
+        var nodeLabelGroup = graphStage.createEl('div', { cls: 'rw-graph-html-label-layer' });
         nodeLabelGroup.setAttribute('aria-hidden','true');
+        nodeLabelGroup.style.position='absolute'; nodeLabelGroup.style.left='0'; nodeLabelGroup.style.top='0';
+        nodeLabelGroup.style.width=width+'px'; nodeLabelGroup.style.height=height+'px';
+        nodeLabelGroup.style.transformOrigin='0 0'; nodeLabelGroup.style.pointerEvents='none';
+        nodeLabelGroup.style.zIndex='2'; nodeLabelGroup.style.overflow='visible';
         for (var nli=0; nli<graphNodeLabels.length; nli++) {
             var labelInfo=graphNodeLabels[nli], chars=Array.from(labelInfo.name), lines=[];
             var maxCharsPerLine = chars.length <= 4 ? 4 : (labelInfo.radius >= 46 ? 4 : 3);
             for (var cli=0; cli<chars.length; cli+=maxCharsPerLine) lines.push(chars.slice(cli,cli+maxCharsPerLine).join(''));
-            var fontSize = chars.length <= 2 ? 13 : (chars.length <= 4 ? 11 : 10);
-            var text=document.createElementNS('http://www.w3.org/2000/svg','text');
-            text.setAttribute('class','my-char-graph-node-label');
-            text.setAttribute('data-node-name',labelInfo.name);
-            text.setAttribute('x',String(labelInfo.x)); text.setAttribute('y',String(labelInfo.y));
-            text.setAttribute('text-anchor','middle'); text.setAttribute('dominant-baseline','middle');
-            text.setAttribute('font-size',String(fontSize)); text.setAttribute('font-weight','700');
-            text.setAttribute('fill','#ffffff'); text.setAttribute('stroke','rgba(0,0,0,0.38)');
-            text.setAttribute('stroke-width','1.4'); text.setAttribute('paint-order','stroke');
-            text.setAttribute('stroke-linejoin','round'); text.setAttribute('pointer-events','none');
-            text.style.setProperty('display','inline','important');
-            text.style.setProperty('visibility','visible','important');
-            text.style.setProperty('opacity','1','important');
-            text.style.setProperty('fill','#ffffff','important');
-            text.style.setProperty('color','#ffffff','important');
-            text.style.setProperty('font-size',fontSize+'px','important');
-            text.style.setProperty('font-weight','700','important');
-            text.style.setProperty('pointer-events','none','important');
-            if (lines.length===1) text.textContent=lines[0];
-            else {
-                var lineHeight=fontSize+2, firstDy=-((lines.length-1)*lineHeight)/2;
-                lines.forEach(function(lineText,lineIndex){
-                    var tspan=document.createElementNS('http://www.w3.org/2000/svg','tspan');
-                    tspan.setAttribute('x',String(labelInfo.x));
-                    tspan.setAttribute('dy',String(lineIndex===0?firstDy:lineHeight));
-                    tspan.textContent=lineText; text.appendChild(tspan);
-                });
-            }
-            nodeLabelGroup.appendChild(text);
+            var fontSize = (chars.length <= 2 ? 13 : (chars.length <= 4 ? 11 : 10)) * graphNodeScale;
+            var htmlLabel=nodeLabelGroup.createEl('div', { cls: 'rw-graph-node-name-label', text: lines.join('\n') });
+            htmlLabel.setAttribute('data-node-name',labelInfo.name);
+            htmlLabel.style.position='absolute'; htmlLabel.style.left=labelInfo.x+'px'; htmlLabel.style.top=labelInfo.y+'px';
+            htmlLabel.style.transform='translate(-50%, -50%)'; htmlLabel.style.width=Math.max(48,labelInfo.radius*1.72)+'px';
+            htmlLabel.style.height=Math.max(34,labelInfo.radius*1.55)+'px'; htmlLabel.style.display='flex';
+            htmlLabel.style.alignItems='center'; htmlLabel.style.justifyContent='center'; htmlLabel.style.textAlign='center';
+            htmlLabel.style.whiteSpace='pre-line'; htmlLabel.style.overflow='hidden'; htmlLabel.style.overflowWrap='anywhere';
+            htmlLabel.style.fontSize=fontSize+'px'; htmlLabel.style.lineHeight='1.15'; htmlLabel.style.fontWeight='750';
+            htmlLabel.style.color='#ffffff'; htmlLabel.style.textShadow='0 1px 2px rgba(0,0,0,.72), 0 0 3px rgba(0,0,0,.38)';
+            htmlLabel.style.opacity='1'; htmlLabel.style.visibility='visible'; htmlLabel.style.pointerEvents='none';
+            htmlLabel.style.zIndex='3'; htmlLabel.style.boxSizing='border-box';
         }
-        viewportGroup.appendChild(edgeGroup); viewportGroup.appendChild(nodeGroup); viewportGroup.appendChild(nodeLabelGroup); svg.appendChild(viewportGroup);
+        viewportGroup.appendChild(edgeGroup); viewportGroup.appendChild(nodeGroup); svg.appendChild(viewportGroup);
+        graphStage.appendChild(svg);
+
         var zoomBar=wrap.createEl('div',{cls:'my-char-graph-zoom-bar'});
         var zoomOut=zoomBar.createEl('button',{text:'−',attr:{'aria-label':'缩小图谱'}}), zoomLabel=zoomBar.createEl('span',{text:'100%',cls:'my-char-graph-zoom-label'}), zoomIn=zoomBar.createEl('button',{text:'+',attr:{'aria-label':'放大图谱'}}), zoomReset=zoomBar.createEl('button',{text:'适应'});
         [zoomOut,zoomIn,zoomReset].forEach(function(btn){btn.addClass('my-char-view-btn');btn.addEventListener('pointerdown',function(ev){ev.stopPropagation();});});
-        function applyGraphZoom(){ viewportGroup.setAttribute('transform','translate('+graphTx+' '+graphTy+') translate('+width/2+' '+height/2+') scale('+graphScale+') translate('+(-width/2)+' '+(-height/2)+')'); zoomLabel.textContent=Math.round(graphScale*100)+'%'; updateGraphEmphasis(); }
+        function applyGraphZoom(){
+            viewportGroup.setAttribute('transform','translate('+graphTx+' '+graphTy+') translate('+width/2+' '+height/2+') scale('+graphScale+') translate('+(-width/2)+' '+(-height/2)+')');
+            var matrixOffsetX=graphTx+(width/2)*(1-graphScale), matrixOffsetY=graphTy+(height/2)*(1-graphScale);
+            nodeLabelGroup.style.transform='matrix('+graphScale+',0,0,'+graphScale+','+matrixOffsetX+','+matrixOffsetY+')';
+            zoomLabel.textContent=Math.round(graphScale*100)+'%'; updateGraphEmphasis();
+        }
         function updateGraphEmphasis(){
             var selectedType=relationFilter.value||'__all__';
             var connected={}; if(focusedName){connected[focusedName]=true;edgeEls.forEach(function(e){if(e.dataset.a===focusedName)connected[e.dataset.b]=true;if(e.dataset.b===focusedName)connected[e.dataset.a]=true;});}
             Object.keys(nodeEls).forEach(function(name){var g=nodeEls[name],dim=(focusedName&&!connected[name])||(searchName&&!name.toLowerCase().includes(searchName.toLowerCase()));g.style.opacity=dim?'0.16':'1';g.classList.toggle('is-focused',name===focusedName);g.classList.toggle('is-search-hit',!!searchName&&name.toLowerCase().includes(searchName.toLowerCase()));});
-            nodeLabelGroup.querySelectorAll('text[data-node-name]').forEach(function(label){var labelName=label.getAttribute('data-node-name')||'',dim=(focusedName&&!connected[labelName])||(searchName&&!labelName.toLowerCase().includes(searchName.toLowerCase()));label.style.opacity=dim?'0.16':'1';});
-            edgeEls.forEach(function(e){var typeOk=selectedType==='__all__'||e.dataset.type===selectedType;var focusOk=!focusedName||(e.dataset.a===focusedName||e.dataset.b===focusedName);e.style.display=typeOk?'':'none';e.style.opacity=focusOk?'1':'.08';var label=e.querySelector('text');if(label){label.style.display=typeOk&&graphScale>=0.88&&(edgeEls.length<35||graphScale>=1.2)?'':'none';if(focusedName&&!focusOk)label.style.display='none';}});
+            nodeLabelGroup.querySelectorAll('[data-node-name]').forEach(function(label){var labelName=label.getAttribute('data-node-name')||'',dim=(focusedName&&!connected[labelName])||(searchName&&!labelName.toLowerCase().includes(searchName.toLowerCase()));label.style.opacity=dim?'0.16':'1';});
+            edgeEls.forEach(function(e){var typeOk=selectedType==='__all__'||e.dataset.type===selectedType;var focusOk=!focusedName||(e.dataset.a===focusedName||e.dataset.b===focusedName);e.style.display=typeOk?'':'none';e.style.opacity=focusOk?'1':'.08';var label=e.querySelector('text');var hideDenseLabel=edgeEls.length>=10&&!focusedName&&graphScale<1.2;e.classList.toggle('rw-edge-label-hidden',hideDenseLabel||(focusedName&&!focusOk));if(label&&(!typeOk||(focusedName&&!focusOk)))e.classList.add('rw-edge-label-hidden');else if(label&&!hideDenseLabel)e.classList.remove('rw-edge-label-hidden');});
         }
-        zoomIn.addEventListener('click',function(){graphScale=Math.min(3.2,graphScale*1.2);applyGraphZoom();}); zoomOut.addEventListener('click',function(){graphScale=Math.max(.4,graphScale/1.2);applyGraphZoom();}); zoomReset.addEventListener('click',function(){graphScale=1;graphTx=0;graphTy=0;searchName=null;searchInput.value='';focusedName=null;applyGraphZoom();});
-        searchInput.addEventListener('input',function(){searchName=searchInput.value.trim();var found=names.find(function(n){return searchName&&n.toLowerCase().includes(searchName.toLowerCase());});if(found){var p=nodePositions[found];graphTx=width/2-p.x*graphScale;graphTy=height/2-p.y*graphScale;}applyGraphZoom();});
+        function fitGraphToView() {
+            var minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+            names.forEach(function(name){var p=nodePositions[name],pad=(p.radius||26)+24;minX=Math.min(minX,p.x-pad);maxX=Math.max(maxX,p.x+pad);minY=Math.min(minY,p.y-pad);maxY=Math.max(maxY,p.y+pad);});
+            if (!isFinite(minX)) { graphScale=1;graphTx=0;graphTy=0;applyGraphZoom();return; }
+            var boundsW=Math.max(1,maxX-minX),boundsH=Math.max(1,maxY-minY),viewW=wrap.clientWidth||width,viewH=wrap.clientHeight||height,pad=24;
+            graphScale=Math.max(.4,Math.min(1.8,(viewW-pad*2)/boundsW,(viewH-pad*2)/boundsH));
+            var centerX=(minX+maxX)/2,centerY=(minY+maxY)/2;
+            graphTx=viewW/2-(width/2+(centerX-width/2)*graphScale);
+            graphTy=viewH/2-(height/2+(centerY-height/2)*graphScale);
+            searchName=null;searchInput.value='';focusedName=null;applyGraphZoom();
+        }
+        zoomIn.addEventListener('click',function(){graphScale=Math.min(3.2,graphScale*1.2);applyGraphZoom();}); zoomOut.addEventListener('click',function(){graphScale=Math.max(.4,graphScale/1.2);applyGraphZoom();}); zoomReset.addEventListener('click',fitGraphToView);
+        searchInput.addEventListener('input',function(){searchName=searchInput.value.trim();var found=names.find(function(n){return searchName&&n.toLowerCase().includes(searchName.toLowerCase());});if(found){var p=nodePositions[found];graphTx=graphScale*(width/2-p.x);graphTy=graphScale*(height/2-p.y);}applyGraphZoom();});
         relationFilter.addEventListener('change',updateGraphEmphasis);
         var drag=null; svg.addEventListener('pointerdown',function(ev){if(ev.target.closest&&ev.target.closest('.my-char-graph-node'))return;if(ev.button!==undefined&&ev.button!==0)return;drag={x:ev.clientX,y:ev.clientY,tx:graphTx,ty:graphTy};if(svg.setPointerCapture)svg.setPointerCapture(ev.pointerId);});
         svg.addEventListener('pointermove',function(ev){if(!drag)return;graphTx=drag.tx+(ev.clientX-drag.x);graphTy=drag.ty+(ev.clientY-drag.y);applyGraphZoom();});
         function endDrag(){drag=null;} svg.addEventListener('pointerup',endDrag);svg.addEventListener('pointercancel',endDrag);svg.addEventListener('lostpointercapture',endDrag);
         svg.addEventListener('wheel',function(ev){ev.preventDefault();graphScale=Math.max(.4,Math.min(3.2,graphScale*(ev.deltaY<0?1.08:.92)));applyGraphZoom();},{passive:false});
-        applyGraphZoom(); wrap.appendChild(svg);
+        fitGraphToView();
     };
     
     MyView.prototype.renderAutoRelationsSuggestions = function(container) {
@@ -7142,32 +7252,27 @@ MyView.prototype.renderTimeline = function (container) {
     self.updateCharFloatPanel();
 
     var currentTags = getEventTags(this.plugin);
-    if (currentTags.length > 0) {
-        var tagDisplay = tagToolbar.createEl('div');
-        tagDisplay.className = 'my-char-chip-list'; tagDisplay.style.marginLeft = '8px';
-        for (var i = 0; i < currentTags.length; i++) {
-            var tag = currentTags[i];
-            var chip = tagDisplay.createEl('span', { text: tag.label });
-            chip.className = 'my-char-tag-chip'; chip.style.setProperty('--tag-bg', tag.color); chip.style.background = tag.color;
-        }
-    }
-
-    var filterBar = container.createEl('div');
-    filterBar.className = 'my-char-filter-bar';
-
+    var filterBar = tagToolbar.createEl('div');
+    filterBar.className = 'my-char-chip-list rw-timeline-tag-filter';
+    filterBar.style.marginLeft = '8px';
     var allBtn = filterBar.createEl('button', { text: '全部' });
     setFilterChip(allBtn, this.selectedTag === '', '#4a90e2');
     allBtn.addEventListener('click', function() {
         self.selectedTag = '';
         self.renderTimeline(container);
     });
-
     for (var i = 0; i < currentTags.length; i++) {
         (function(tag) {
             var btn = filterBar.createEl('button', { text: tag.label });
-            setFilterChip(btn, self.selectedTag === tag.value, tag.color);
+            btn.className = 'my-char-tag-chip rw-timeline-filter-chip';
+            btn.style.background = tag.color;
+            btn.style.setProperty('--tag-bg', tag.color);
+            if (self.selectedTag === tag.value) btn.classList.add('is-active');
+            else btn.classList.add('is-filter-inactive');
+            btn.setAttribute('aria-pressed', self.selectedTag === tag.value ? 'true' : 'false');
+            btn.title = '点击筛选「' + tag.label + '」事件；再次点击取消筛选';
             btn.addEventListener('click', function() {
-                self.selectedTag = tag.value;
+                self.selectedTag = self.selectedTag === tag.value ? '' : tag.value;
                 self.renderTimeline(container);
             });
         })(currentTags[i]);
@@ -8207,28 +8312,104 @@ MyView.prototype.renderTimeline = function (container) {
             : allWarnings;
         if (warnings.length === 0) return;
 
-        var warnPanel = container.createEl('div', { cls: 'my-char-banner my-char-banner-warn my-char-plot-warn-panel' });
-        warnPanel.createEl('span', { text: '⚠️', cls: 'my-char-banner-icon' });
-        var warnTextWrap = warnPanel.createEl('div', { cls: 'my-char-plot-warn-body' });
-        warnTextWrap.createEl('div', {
-            text: '伏笔逻辑提醒（' + warnings.length + ' 条）',
-            cls: 'my-char-banner-text'
-        });
-        var warnBody = warnTextWrap.createEl('div', { cls: 'my-char-plot-warn-list' });
-        var showCount = Math.min(5, warnings.length);
-        for (var wi = 0; wi < showCount; wi++) {
-            (function(w) {
-                var row = warnBody.createEl('div', { cls: 'my-char-plot-warn-item' + (w.severity === 'high' ? ' is-high' : '') });
-                row.textContent = w.message;
-                if (w.event) {
-                    row.style.cursor = 'pointer';
-                    row.title = '点击编辑相关事件';
-                    row.addEventListener('click', function() { self.showEditEvent(w.event); });
-                }
-            })(warnings[wi]);
+        var settings = this.plugin.settings;
+        if (!Array.isArray(settings.plotWarningHandled)) settings.plotWarningHandled = [];
+        if (!Array.isArray(settings.plotWarningHidden)) settings.plotWarningHidden = [];
+        if (settings.plotWarningsCollapsed == null) settings.plotWarningsCollapsed = true;
+
+        function warningKey(w) {
+            var ev = w.event || {};
+            return [w.plotLine || '', w.message || '', ev.year || '', ev.month || '', ev.event || (typeof ev === 'string' ? ev : '')].join('::');
         }
-        if (warnings.length > showCount) {
-            warnBody.createEl('div', { text: '…还有 ' + (warnings.length - showCount) + ' 条', cls: 'my-char-muted' });
+        var visibleWarnings = warnings.filter(function(w) {
+            var key = warningKey(w);
+            return settings.plotWarningHandled.indexOf(key) === -1 &&
+                settings.plotWarningHidden.indexOf(key) === -1;
+        });
+        var handledCount = warnings.filter(function(w) {
+            return settings.plotWarningHandled.indexOf(warningKey(w)) !== -1;
+        }).length;
+        var hiddenCount = warnings.filter(function(w) {
+            return settings.plotWarningHidden.indexOf(warningKey(w)) !== -1;
+        }).length;
+        if (!visibleWarnings.length && !handledCount && !hiddenCount) return;
+
+        var panel = container.createEl('div', { cls: 'my-char-banner my-char-banner-warn my-char-plot-warn-panel' });
+        var header = panel.createEl('div', { cls: 'my-char-plot-warn-header' });
+        var title = header.createEl('div', { cls: 'my-char-banner-text' });
+        title.textContent = '⚠️ 伏笔逻辑提醒（' + visibleWarnings.length + ' 条）';
+        var toggle = header.createEl('button', { cls: 'my-char-plot-warn-toggle' });
+        toggle.textContent = settings.plotWarningsCollapsed ? '展开 ▾' : '收起 ▴';
+        toggle.addEventListener('click', async function() {
+            settings.plotWarningsCollapsed = !settings.plotWarningsCollapsed;
+            await self.plugin.saveSettings();
+            self.render();
+        });
+
+        if (settings.plotWarningsCollapsed) {
+            var meta = panel.createEl('div', { cls: 'my-char-plot-warn-meta' });
+            meta.textContent = visibleWarnings.length
+                ? '提醒已折叠，不影响时间线数据'
+                : '当前提醒均已处理或暂时隐藏';
+            if (handledCount + hiddenCount > 0) {
+                var manage = meta.createEl('button', { cls: 'my-char-plot-warn-link' });
+                manage.textContent = '已处理 ' + handledCount + ' · 暂藏 ' + hiddenCount + '（管理）';
+                manage.addEventListener('click', async function() {
+                    settings.plotWarningsCollapsed = false;
+                    self._showHandledPlotWarnings = true;
+                    await self.plugin.saveSettings();
+                    self.render();
+                });
+            }
+            return;
+        }
+
+        var list = panel.createEl('div', { cls: 'my-char-plot-warn-list' });
+        for (var wi = 0; wi < visibleWarnings.length; wi++) {
+            (function(w) {
+                var key = warningKey(w);
+                var row = list.createEl('div', { cls: 'my-char-plot-warn-entry' });
+                var message = row.createEl('div', { cls: 'my-char-plot-warn-item' + (w.severity === 'high' ? ' is-high' : '') });
+                message.textContent = w.message;
+                if (w.event) {
+                    message.style.cursor = 'pointer';
+                    message.title = '点击编辑相关事件';
+                    message.addEventListener('click', function() { self.showEditEvent(w.event); });
+                }
+                var actions = row.createEl('div', { cls: 'my-char-plot-warn-actions' });
+                var intentional = actions.createEl('button', { cls: 'my-char-plot-warn-link' });
+                intentional.textContent = '标记为作者有意';
+                intentional.title = '这是刻意设置的伏笔，不再作为问题提醒';
+                intentional.addEventListener('click', async function(e) {
+                    e.stopPropagation();
+                    if (settings.plotWarningHandled.indexOf(key) === -1) settings.plotWarningHandled.push(key);
+                    await self.plugin.saveSettings();
+                    self.render();
+                });
+                var hide = actions.createEl('button', { cls: 'my-char-plot-warn-link' });
+                hide.textContent = '暂时隐藏';
+                hide.addEventListener('click', async function(e) {
+                    e.stopPropagation();
+                    if (settings.plotWarningHidden.indexOf(key) === -1) settings.plotWarningHidden.push(key);
+                    await self.plugin.saveSettings();
+                    self.render();
+                });
+            })(visibleWarnings[wi]);
+        }
+        if (!visibleWarnings.length) list.createEl('div', { text: '没有待处理提醒', cls: 'my-char-muted' });
+
+        if (handledCount + hiddenCount > 0) {
+            var history = panel.createEl('div', { cls: 'my-char-plot-warn-history' });
+            history.createEl('span', { text: '已处理 ' + handledCount + ' 条 · 暂时隐藏 ' + hiddenCount + ' 条' });
+            var restore = history.createEl('button', { cls: 'my-char-plot-warn-link' });
+            restore.textContent = '恢复全部';
+            restore.addEventListener('click', async function() {
+                var keys = warnings.map(warningKey);
+                settings.plotWarningHandled = settings.plotWarningHandled.filter(function(k) { return keys.indexOf(k) === -1; });
+                settings.plotWarningHidden = settings.plotWarningHidden.filter(function(k) { return keys.indexOf(k) === -1; });
+                await self.plugin.saveSettings();
+                self.render();
+            });
         }
     };
 
@@ -10272,10 +10453,12 @@ var EventTagModal = /** @class */ (function (_super) {
         var _this = _super.call(this, app) || this;
         _this.plugin = plugin;
         _this.onSave = onSave;
+        _this.originalTagValues = (Array.isArray(plugin.settings.customEventTags) ? plugin.settings.customEventTags : []).map(function(t) { var n = normalizeEventTag(t); return n ? n.value : ''; }).filter(Boolean);
         
         // 直接从设置加载（兼容误存为 id 字段的旧数据）
-        var customTags = plugin.settings.customEventTags || [];
-        if (customTags.length === 0) {
+        var hasCustomTags = Object.prototype.hasOwnProperty.call(plugin.settings, 'customEventTags');
+        var customTags = hasCustomTags && Array.isArray(plugin.settings.customEventTags) ? plugin.settings.customEventTags : null;
+        if (customTags === null || (!plugin.settings.eventTagsCustomized && customTags.length === 0)) {
             _this.tempTags = JSON.parse(JSON.stringify(DEFAULT_EVENT_TAGS));
         } else {
             _this.tempTags = [];
@@ -10283,10 +10466,8 @@ var EventTagModal = /** @class */ (function (_super) {
                 var nt = normalizeEventTag(customTags[i]);
                 if (nt) _this.tempTags.push(nt);
             }
-            if (_this.tempTags.length === 0) {
-                _this.tempTags = JSON.parse(JSON.stringify(DEFAULT_EVENT_TAGS));
-            }
         }
+        _this.originalTagValues = _this.tempTags.map(function(t) { return t.value; });
         return _this;
     }
 
@@ -10402,7 +10583,7 @@ var EventTagModal = /** @class */ (function (_super) {
         
         var saveBtn = btnRow2.createEl('button', { text: '✅ 保存' });
         saveBtn.style.cssText = 'flex:2;padding:10px;background:#4a90e2;color:white;border:none;border-radius:4px;cursor:pointer;font-size:14px;';
-        saveBtn.addEventListener('click', function() {
+        saveBtn.addEventListener('click', async function() {
             var validTags = [];
             for (var i = 0; i < self.tempTags.length; i++) {
                 var tag = self.tempTags[i];
@@ -10415,8 +10596,16 @@ var EventTagModal = /** @class */ (function (_super) {
                 }
             }
             
+            var retainedValues = validTags.map(function(t) { return t.value; });
+            var removedValues = self.originalTagValues.filter(function(v) { return retainedValues.indexOf(v) < 0; });
+            var tombstones = Array.isArray(self.plugin.settings.deletedEventTagValues) ? self.plugin.settings.deletedEventTagValues.slice() : [];
+            removedValues.forEach(function(v) { if (tombstones.indexOf(v) < 0) tombstones.push(v); });
+            // 新增/重新添加的标签解除删除标记
+            retainedValues.forEach(function(v) { tombstones = tombstones.filter(function(x) { return x !== v; }); });
+            self.plugin.settings.deletedEventTagValues = tombstones;
+            self.plugin.settings.eventTagsCustomized = true;
             self.plugin.settings.customEventTags = validTags;
-            self.plugin.saveSettings();
+            await self.plugin.saveSettings();
             invalidateTagCache(self.plugin);
             if (self.onSave) self.onSave();
             self.close();
