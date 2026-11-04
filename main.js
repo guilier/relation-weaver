@@ -4256,7 +4256,7 @@ function getCharLifecycle(view, char) {
 var MyView = /** @class */ (function (_super) {
     __extends(MyView, _super);
     function MyView(leaf, plugin) {
-        var _this = _super.call(this, leaf) || this;
+        var _this = Reflect.construct(_super, [leaf], MyView);
         _this.plugin = plugin;
         _this.chars = [];
         _this.timeline = [];
@@ -8625,7 +8625,7 @@ MyView.prototype.refreshCharFloatPanelBody = function () {
 var QuickAddCharModal = /** @class */ (function (_super) {
     __extends(QuickAddCharModal, _super);
     function QuickAddCharModal(app, plugin, onSubmit) {
-        var _this = _super.call(this, app) || this;
+        var _this = Reflect.construct(_super, [app], QuickAddCharModal);
         _this.plugin = plugin;
         _this.onSubmit = onSubmit;
         return _this;
@@ -8670,7 +8670,7 @@ var QuickAddCharModal = /** @class */ (function (_super) {
 var PrintPreviewModal = /** @class */ (function (_super) {
     __extends(PrintPreviewModal, _super);
     function PrintPreviewModal(app, view) {
-        var _this = _super.call(this, app) || this;
+        var _this = Reflect.construct(_super, [app], PrintPreviewModal);
         _this.view = view;
         return _this;
     }
@@ -8738,7 +8738,7 @@ var PrintPreviewModal = /** @class */ (function (_super) {
 var SnapshotManagerModal = /** @class */ (function (_super) {
     __extends(SnapshotManagerModal, _super);
     function SnapshotManagerModal(app, view) {
-        var _this = _super.call(this, app) || this;
+        var _this = Reflect.construct(_super, [app], SnapshotManagerModal);
         _this.view = view;
         _this.snapshots = [];
         _this.selected = null;
@@ -8844,7 +8844,7 @@ var SnapshotManagerModal = /** @class */ (function (_super) {
 var ImportPreviewModal = /** @class */ (function (_super) {
     __extends(ImportPreviewModal, _super);
     function ImportPreviewModal(app, view, data) {
-        var _this = _super.call(this, app) || this;
+        var _this = Reflect.construct(_super, [app], ImportPreviewModal);
         _this.view = view; _this.data = data; _this.overwriteConflicts = false;
         return _this;
     }
@@ -8948,7 +8948,7 @@ function rwPackStoryDesignEntries(entries) {
 var StoryDesignModal = /** @class */ (function (_super) {
     __extends(StoryDesignModal, _super);
     function StoryDesignModal(app, plugin, view, eventData, designId, chapterRef) {
-        var _this = _super.call(this, app) || this;
+        var _this = Reflect.construct(_super, [app], StoryDesignModal);
         _this.plugin = plugin; _this.view = view; _this.eventData = eventData; _this.designId = designId || null; _this.chapterRef = chapterRef || ''; 
         return _this;
     }
@@ -9021,7 +9021,7 @@ var StoryDesignModal = /** @class */ (function (_super) {
 var QuickAddEventModal = /** @class */ (function (_super) {
     __extends(QuickAddEventModal, _super);
     function QuickAddEventModal(app, plugin, view, onSubmit, existingEvent, onDelete, prefillText) {
-        var _this = _super.call(this, app) || this;
+        var _this = Reflect.construct(_super, [app], QuickAddEventModal);
         _this.plugin = plugin;
         _this.view = view;
         _this.onSubmit = onSubmit;
@@ -9238,7 +9238,7 @@ function classifyOrgMembershipAtProgress(record, progressText) {
 var OrgMembershipModal = /** @class */ (function (_super) {
     __extends(OrgMembershipModal, _super);
     function OrgMembershipModal(app, character, factions, record, onSubmit) {
-        var _this = _super.call(this, app) || this;
+        var _this = Reflect.construct(_super, [app], OrgMembershipModal);
         _this.character = character; _this.factions = factions || []; _this.record = record || null; _this.onSubmit = onSubmit;
         return _this;
     }
@@ -9285,7 +9285,7 @@ var OrgMembershipModal = /** @class */ (function (_super) {
 var OrgRelationModal = /** @class */ (function (_super) {
     __extends(OrgRelationModal, _super);
     function OrgRelationModal(app, factions, relation, onSubmit) {
-        var _this = _super.call(this, app) || this;
+        var _this = Reflect.construct(_super, [app], OrgRelationModal);
         _this.factions = factions || [];
         _this.relation = relation || null;
         _this.onSubmit = onSubmit;
@@ -9409,7 +9409,7 @@ MyView.prototype.renderOrgRelationsPanel = function(container) {
 var FactionModal = /** @class */ (function (_super) {
     __extends(FactionModal, _super);
     function FactionModal(app, faction, onSubmit) {
-        var _this = _super.call(this, app) || this;
+        var _this = Reflect.construct(_super, [app], FactionModal);
         _this.faction = faction;
         _this.onSubmit = onSubmit;
         return _this;
@@ -9471,7 +9471,7 @@ var FactionModal = /** @class */ (function (_super) {
 var RelationModal = /** @class */ (function (_super) {
     __extends(RelationModal, _super);
     function RelationModal(app, chars, prefill, relTypes, onSubmit) {
-        var _this = _super.call(this, app) || this;
+        var _this = Reflect.construct(_super, [app], RelationModal);
         _this.chars = chars;
         _this.prefill = prefill;
         _this.relTypes = relTypes;
@@ -9631,7 +9631,7 @@ var RelationModal = /** @class */ (function (_super) {
 var BatchRelationModal = /** @class */ (function (_super) {
     __extends(BatchRelationModal, _super);
     function BatchRelationModal(app, relations, chars, onConfirm) {
-        var _this = _super.call(this, app) || this;
+        var _this = Reflect.construct(_super, [app], BatchRelationModal);
         _this.relations = relations;
         _this.chars = chars;
         _this.onConfirm = onConfirm;
@@ -9754,7 +9754,7 @@ var BatchRelationModal = /** @class */ (function (_super) {
 var DetailModal = /** @class */ (function (_super) {
     __extends(DetailModal, _super);
     function DetailModal(app, charData, events, relations, manualRels, view) {
-        var _this = _super.call(this, app) || this;
+        var _this = Reflect.construct(_super, [app], DetailModal);
         _this.charData = charData;
         _this.events = events;
         _this.relations = relations;
@@ -10450,7 +10450,7 @@ var DetailModal = /** @class */ (function (_super) {
 var EventTagModal = /** @class */ (function (_super) {
     __extends(EventTagModal, _super);
     function EventTagModal(app, plugin, onSave) {
-        var _this = _super.call(this, app) || this;
+        var _this = Reflect.construct(_super, [app], EventTagModal);
         _this.plugin = plugin;
         _this.onSave = onSave;
         _this.originalTagValues = (Array.isArray(plugin.settings.customEventTags) ? plugin.settings.customEventTags : []).map(function(t) { var n = normalizeEventTag(t); return n ? n.value : ''; }).filter(Boolean);
@@ -10628,7 +10628,7 @@ var EventTagModal = /** @class */ (function (_super) {
 var RelationTypeModal = /** @class */ (function (_super) {
     __extends(RelationTypeModal, _super);
     function RelationTypeModal(app, plugin, onSave) {
-        var _this = _super.call(this, app) || this;
+        var _this = Reflect.construct(_super, [app], RelationTypeModal);
         _this.plugin = plugin;
         _this.onSave = onSave;
         var existing = plugin.settings.customRelationTypes || '';
@@ -10718,7 +10718,7 @@ var RelationTypeModal = /** @class */ (function (_super) {
 var IntimacyLevelModal = /** @class */ (function (_super) {
     __extends(IntimacyLevelModal, _super);
     function IntimacyLevelModal(app, plugin, onSave) {
-        var _this = _super.call(this, app) || this;
+        var _this = Reflect.construct(_super, [app], IntimacyLevelModal);
         _this.plugin = plugin;
         _this.onSave = onSave;
         var existing = plugin.settings.customIntimacyLevels || '';
@@ -10910,7 +10910,7 @@ var IntimacyLevelModal = /** @class */ (function (_super) {
 var SettingTab = /** @class */ (function (_super) {
     __extends(SettingTab, _super);
     function SettingTab(app, plugin) {
-        var _this = _super.call(this, app, plugin) || this;
+        var _this = Reflect.construct(_super, [app, plugin], SettingTab);
         _this.plugin = plugin;
         return _this;
     }
@@ -11423,7 +11423,7 @@ el.createEl('p', {
 var RelationWeaverPlugin = /** @class */ (function (_super) {
     __extends(RelationWeaverPlugin, _super);
     function RelationWeaverPlugin() {
-        return _super !== null && _super.apply(this, arguments) || this;
+        return _super !== null && Reflect.construct(_super, arguments, RelationWeaverPlugin);
     }
 
     RelationWeaverPlugin.prototype.onload = async function () {
@@ -12091,7 +12091,7 @@ function renderIntimacyCurveChart(container, history, options) {
 var ChangeHistoryModal = /** @class */ (function (_super) {
     __extends(ChangeHistoryModal, _super);
     function ChangeHistoryModal(app, relation, view) {
-        var _this = _super.call(this, app) || this;
+        var _this = Reflect.construct(_super, [app], ChangeHistoryModal);
         _this.relation = relation;
         _this.view = view;
         return _this;
@@ -12270,7 +12270,7 @@ var ChangeHistoryModal = /** @class */ (function (_super) {
 var RecordChangeModal = /** @class */ (function (_super) {
     __extends(RecordChangeModal, _super);
     function RecordChangeModal(app, relation, view, onSave) {
-        var _this = _super.call(this, app) || this;
+        var _this = Reflect.construct(_super, [app], RecordChangeModal);
         _this.relation = relation;
         _this.view = view;
         _this.onSave = onSave;
@@ -13099,7 +13099,7 @@ async function rwPersistTimelineEventIds(app, plugin, events) {
 
 var OutlineTemplateModal = /** @class */ (function (_super) {
     __extends(OutlineTemplateModal, _super);
-    function OutlineTemplateModal(app, plugin, view) { var _this = _super.call(this, app) || this; _this.plugin=plugin; _this.view=view; return _this; }
+    function OutlineTemplateModal(app, plugin, view) { var _this = Reflect.construct(_super, [app], OutlineTemplateModal); _this.plugin=plugin; _this.view=view; return _this; }
     OutlineTemplateModal.prototype.onOpen = function () {
         var self=this, el=this.contentEl, plugin=this.plugin; el.className='my-char-modal-body';
         el.createEl('h3',{text:'管理章节模板',cls:'my-char-section-title'});
