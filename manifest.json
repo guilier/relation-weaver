@@ -1,7 +1,7 @@
 {
   "id": "relation-weaver",
   "name": "relation-weaver",
-  "version": "3.15.9",
+  "version": "3.15.10",
   "minAppVersion": "1.4.0",
   "description": "关系图谱采用分层环形布局，优化节点间距与关系标签避让；支持紧凑/舒适布局、节点尺寸调节、自动整理与适应画布；伏笔提醒支持折叠与逐条管理",
   "author": "guilier",
