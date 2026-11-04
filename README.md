@@ -11,7 +11,7 @@
 
 - **Plugin ID:** `relation-weaver`
 - **Current version:** `3.15.10`
-- **Latest release / 最新版本下载:** <a href="https://github.com/guilier/relation-weaver/releases/latest"><img src="https://img.shields.io/badge/Download-v3.15.9-2ea44f?logo=github&logoColor=white" alt="Download v3.15.9"></a>
+- **Latest release / 最新版本下载:** <a href="https://github.com/guilier/relation-weaver/releases/latest"><img src="https://img.shields.io/badge/Download-v3.15.10-2ea44f?logo=github&logoColor=white" alt="Download v3.15.10"></a>
 - **Author:** [guilier](https://github.com/guilier)
 - **Repository:** https://github.com/guilier/relation-weaver
 - **License:** [MIT](./LICENSE)
