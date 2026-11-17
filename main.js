@@ -105,7 +105,7 @@ var graphModel = { buildGraphLayout: buildGraphLayout };
 function buildTimelineOverview(events, parseDate) {
     var buckets = {}, unknown = 0;
     (events || []).forEach(function(evt) {
-        var raw = evt && (evt.storyYear || evt.year) || '';
+        var raw = evt && (evt.storyYear || evt.chapterStoryTime || evt.year) || '';
         var parsed = typeof parseDate === 'function' ? parseDate(raw) : null;
         var sortKey = parsed && parsed.sortValue != null ? String(parsed.sortValue) : String(raw || '未标注');
         if (!sortKey || sortKey === '未标注') unknown++;
@@ -141,7 +141,7 @@ function collectAgeConsistencyIssues(view) {
     if (!view || !view.chars || !view.timeline) return issues;
     for (var i = 0; i < view.timeline.length; i++) {
         var evt = view.timeline[i];
-        var eventTime = getTimeSortValue(evt.storyYear || evt.year);
+        var eventTime = rwGetCalendarSortValue(evt.storyYear || evt.chapterStoryTime || evt.year, evt.month, !!evt.calendarYearExplicit);
         if (eventTime === null) continue;
         var names = findCharsInEvent(evt.event, view.charNames || []);
         for (var j = 0; j < names.length; j++) {
@@ -156,10 +156,10 @@ function collectAgeConsistencyIssues(view) {
             if (!ageMatch) ageMatch = text.match(new RegExp('(\\d{1,3})\\s*岁[^，。；;]{0,18}?' + escapedName));
             if (!ageMatch) continue;
             var stated = parseInt(ageMatch[1], 10);
-            var eventParsed = parseHistoricalDate(evt.storyYear || evt.year);
+            var eventParsed = parseHistoricalDate(evt.storyYear || evt.chapterStoryTime || evt.year);
             var birthParsed = parseHistoricalDate(birth);
-            var eventAgePoint = eventParsed && eventParsed.era === 'modern' ? eventParsed.year : eventTime;
-            var birthAgePoint = birthParsed && birthParsed.era === 'modern' ? birthParsed.year : birthTime;
+            var eventAgePoint = eventParsed && eventParsed.storyYear != null ? eventParsed.storyYear : (eventParsed && eventParsed.era === 'modern' ? eventParsed.year : eventTime);
+            var birthAgePoint = birthParsed && birthParsed.storyYear != null ? birthParsed.storyYear : (birthParsed && birthParsed.era === 'modern' ? birthParsed.year : birthTime);
             var expected = Math.abs(eventAgePoint - birthAgePoint);
             if (Math.abs(expected - stated) > 1) {
                 issues.push(p2Issue('年龄与事件时间', 'medium', ch.name + ' 在「' + (evt.year || '时间未标注') + '」事件中标注 ' + stated + ' 岁；按出生设定「' + birth + '」推算约 ' + Math.round(expected) + ' 岁', { charName: ch.name, event: evt }));
@@ -229,7 +229,7 @@ function collectTimelineOrderIssues(view) {
     var lastByVolume = {};
     for (var i = 0; i < events.length; i++) {
         var e = events[i];
-        var t = getTimeSortValue(e.storyYear || e.year);
+        var t = rwGetCalendarSortValue(e.storyYear || e.chapterStoryTime || e.year, e.month, !!e.calendarYearExplicit);
         if (t === null) continue;
         var vol = e.volume || '（未分卷）';
         if (lastByVolume[vol] && t < lastByVolume[vol].time) {
@@ -240,7 +240,7 @@ function collectTimelineOrderIssues(view) {
     var seen = {};
     for (var j = 0; j < events.length; j++) {
         var ev = events[j];
-        var time = ev.storyYear || ev.year || '';
+        var time = ev.storyYear || ev.chapterStoryTime || ev.year || '';
         var signature = String(time) + '|' + String(ev.event || '').replace(/\s+/g, '').toLowerCase();
         if (ev.event && seen[signature]) {
             issues.push(p2Issue('时间线冲突', 'low', '发现同一时间重复记录的事件：「' + String(ev.event).substring(0, 42) + '」。请确认是否重复录入', { event: ev }));
@@ -330,6 +330,87 @@ function parseChapterHeading(str) {
     return { num: num, display: s, era: 'chapter' };
 }
 
+// 章节关联采用章节序号作为稳定锚点：允许「第十二章」「第12章 雨夜」等标题变化，
+// 不要求事件备注、正文文件名与章节库名称完全一致。
+function rwExtractChapterNumber(value) {
+    var parsed = parseChapterHeading(String(value || ''));
+    if (parsed) return parsed.num;
+    var text = String(value || '');
+    var match = text.match(/第\s*([零〇一二两三四五六七八九十百千万\d]+)\s*章/i);
+    return match ? parseChineseNumeral(match[1]) : null;
+}
+function rwChapterReferenceMatches(ref, chapter) {
+    if (ref == null || !chapter) return false;
+    var value = String(ref).replace(/^\[\[/, '').replace(/\]\]$/, '').split('|')[0].replace(/\.md$/i, '').trim();
+    if (!value) return false;
+    var name = String(chapter.name || '').replace(/\.md$/i, '').trim();
+    var path = String(chapter.path || '').replace(/\.md$/i, '').trim();
+    if (value === name || value === path || value === String(chapter.path || '').trim() || value.toLowerCase() === name.toLowerCase()) return true;
+    // 序号是稳定键：履历填「第五章」可匹配「第五章 初遇.md」。
+    // 同时支持「第5章」「Chapter 5」以及带前后说明文字的引用。
+    var refNo = rwExtractChapterNumber(value);
+    var storedNo = chapter.chapterNumber;
+    var chapterNo = storedNo !== null && storedNo !== undefined && storedNo !== '' ? Number(storedNo) : null;
+    if (chapterNo === null || !isFinite(chapterNo)) chapterNo = rwExtractChapterNumber(name);
+    if (chapterNo === null || chapterNo === undefined) chapterNo = rwExtractChapterNumber(path);
+    return refNo !== null && refNo !== undefined && chapterNo !== null && chapterNo !== undefined && Number(refNo) === Number(chapterNo);
+}
+
+// 全局章节时间解析入口：章节编号/标题/文件路径统一映射到章节库记录，再取 storyTime。
+// 序号是稳定键，因此「第五章」可匹配「第五章 初遇.md」，且不会误匹配第五十章。
+function rwResolveChapterRecord(settings, reference) {
+    // 唯一数据源：时间线「章节库与故事时间」中的 chapterLibrary.chapters。
+    var chapters = settings && settings.chapterLibrary && Array.isArray(settings.chapterLibrary.chapters) ? settings.chapterLibrary.chapters : [];
+    if (reference == null || !chapters.length) return null;
+    var refs = (Array.isArray(reference) ? reference : [reference]).filter(function(v){ return v != null && String(v).trim(); });
+    // 先做完整名称/路径精确匹配，再按章节序号匹配，避免同序号之外的误命中。
+    for (var pass = 0; pass < 2; pass++) {
+        for (var j = 0; j < refs.length; j++) {
+            for (var i = 0; i < chapters.length; i++) {
+                var ch = chapters[i];
+                if (pass === 0) {
+                    var v = String(refs[j]).replace(/^\[\[/, '').replace(/\]\]$/, '').split('|')[0].replace(/\.md$/i, '').trim().toLowerCase();
+                    var n = String(ch.name || '').replace(/\.md$/i, '').trim().toLowerCase();
+                    var p = String(ch.path || '').replace(/\.md$/i, '').trim().toLowerCase();
+                    if (v && (v === n || v === p || v === String(ch.path || '').trim().toLowerCase())) return ch;
+                } else if (rwChapterReferenceMatches(refs[j], ch)) return ch;
+            }
+        }
+    }
+    return null;
+}
+// 章节时间允许填写区间（如「公元前177年3月-9月」）。
+// 区间本身保留作章节展示；需要给人物首次出现/事件默认时间时，取区间结束月份。
+function rwParseChapterTimeRange(raw) {
+    var value = String(raw == null ? '' : raw).trim();
+    if (!value) return null;
+    var m = value.match(/^(公元前\s*\d+\s*年|公元\s*\d+\s*年|前\s*\d+\s*年|\d+\s*年)\s*(\d{1,2}月?)\s*[-—–至到~～]\s*(?:(公元前\s*\d+\s*年|公元\s*\d+\s*年|前\s*\d+\s*年|\d+\s*年)\s*)?(\d{1,2}月?)$/);
+    if (!m) return null;
+    var prefix = (m[3] || m[1]).replace(/\s+/g, '');
+    var start = m[1].replace(/\s+/g, '') + parseInt(m[2], 10) + '月';
+    var end = prefix + parseInt(m[4], 10) + '月';
+    return { start: start, end: end, display: value };
+}
+function rwGetChapterDefaultStoryTime(raw) {
+    var value = String(raw == null ? '' : raw).trim();
+    var range = rwParseChapterTimeRange(value);
+    return range ? range.end : value;
+}
+function rwResolveChapterStoryTime(settings, reference) {
+    var chapter = rwResolveChapterRecord(settings, reference);
+    return chapter && chapter.storyTime != null ? rwGetChapterDefaultStoryTime(chapter.storyTime) : '';
+}
+function rwResolveStoryTimeReference(settings, rawValue, fallbackRefs) {
+    var raw = String(rawValue == null ? '' : rawValue).trim();
+    if (!raw) return '';
+    // 关键修复：parseHistoricalDate 会把「第五章」解析成 era=chapter；
+    // 章节序号不是故事年份，必须继续到时间线章节库读取 storyTime。
+    var parsed = parseHistoricalDate(raw);
+    if (parsed && parsed.sortValue != null && parsed.era !== 'chapter') return raw;
+    var resolved = rwResolveChapterStoryTime(settings, [raw].concat(fallbackRefs || []));
+    return resolved || raw;
+}
+
 /** 小说关系设计用的默认类型（「同期出场」仅作时间线辅助，放最后） */
 var DEFAULT_RELATION_TYPES = [
     '父子', '母子', '父女', '母女', '兄弟', '姐妹', '兄妹', '姐弟',
@@ -341,9 +422,11 @@ var DEFAULT_RELATION_TYPES = [
 function getRelationTypes(plugin) {
     var seen = {};
     var list = [];
+    var deleted = (plugin && plugin.settings && Array.isArray(plugin.settings.deletedRelationTypeValues))
+        ? plugin.settings.deletedRelationTypeValues : [];
     function add(v) {
         var s = String(v || '').trim();
-        if (!s || seen[s]) return;
+        if (!s || seen[s] || deleted.indexOf(s) >= 0) return;
         seen[s] = true;
         list.push(s);
     }
@@ -351,6 +434,55 @@ function getRelationTypes(plugin) {
     var custom = (plugin && plugin.settings && plugin.settings.customRelationTypes) || '';
     String(custom).split(',').forEach(add);
     return list;
+}
+
+var DEFAULT_RELATION_CATEGORIES = ['亲属关系', '朋友关系', '师徒关系', '敌对关系', '组织关系', '其他'];
+
+function inferRelationCategory(type) {
+    var t = String(type || '').trim();
+    var groups = {
+        '亲属关系': ['父子','母子','父女','母女','兄弟','姐妹','兄妹','姐弟','夫妻','亲属','叔侄','祖孙','表亲','堂亲','母女','父女'],
+        '朋友关系': ['朋友','挚友','战友','知己','故交','同事','同学'],
+        '师徒关系': ['师生','师徒','师父','弟子','师兄','师姐','师弟','师妹'],
+        '敌对关系': ['敌人','对手','仇人','宿敌','仇敌','竞争对手'],
+        '组织关系': ['君臣','主仆','同盟','上下级','上级','下属','盟友']
+    };
+    var keys = Object.keys(groups);
+    for (var i = 0; i < keys.length; i++) if (groups[keys[i]].indexOf(t) >= 0) return keys[i];
+    return '其他';
+}
+
+function getRelationCategories(plugin) {
+    if (plugin && plugin.settings && Array.isArray(plugin.settings.relationCategoryNames)) {
+        return plugin.settings.relationCategoryNames.map(function(v){ return String(v || '').trim(); }).filter(function(v,i,a){ return v && a.indexOf(v) === i; });
+    }
+    var result = DEFAULT_RELATION_CATEGORIES.slice();
+    var custom = plugin && plugin.settings ? plugin.settings.customRelationCategories : '';
+    String(custom || '').split(',').forEach(function(v) {
+        var s = String(v || '').trim();
+        if (s && result.indexOf(s) < 0) result.push(s);
+    });
+    var configs = plugin && plugin.settings ? plugin.settings.relationCategoryConfigs : null;
+    if (configs && typeof configs === 'object') Object.keys(configs).forEach(function(k) { if (k && result.indexOf(k) < 0) result.push(k); });
+    return result;
+}
+
+var DEFAULT_RELATION_CATEGORY_CONFIGS = {
+    '亲属关系': { color: '#e67e22', types: ['父子','母子','父女','母女','兄弟','姐妹','兄妹','姐弟','夫妻','叔侄','祖孙','表亲','堂亲'] },
+    '朋友关系': { color: '#3498db', types: ['朋友','挚友','知己','故交','同学','同事','战友'] },
+    '师徒关系': { color: '#9b59b6', types: ['师徒','师生','师父','弟子','师兄','师姐','师弟','师妹'] },
+    '敌对关系': { color: '#e74c3c', types: ['敌人','对手','仇人','宿敌','仇敌','竞争对手'] },
+    '组织关系': { color: '#16a085', types: ['君臣','主仆','上下级','上级','下属','同盟','盟友'] },
+    '其他': { color: '#95a5a6', types: ['其他'] }
+};
+function getRelationCategoryConfig(plugin, category) {
+    var saved = plugin && plugin.settings && plugin.settings.relationCategoryConfigs;
+    var base = DEFAULT_RELATION_CATEGORY_CONFIGS[category] || { color: '#7f8c8d', types: [] };
+    var item = saved && saved[category] ? saved[category] : {};
+    return { color: item.color || base.color, types: Array.isArray(item.types) ? item.types.slice() : base.types.slice() };
+}
+function getRelationCategoryColor(plugin, category) {
+    return getRelationCategoryConfig(plugin, category).color || '#7f8c8d';
 }
 
 function findRelationIndex(relations, target) {
@@ -419,17 +551,82 @@ function createUndoSnapshot(view, label) {
         relations: deepCloneJson(view.relations || []),
         orgRelations: deepCloneJson(view.orgRelations || []),
         orgMemberships: deepCloneJson(view.orgMemberships || []),
+        orgPositionDefs: deepCloneJson(view.orgPositionDefs || []),
+        orgTerritoryChanges: deepCloneJson(view.orgTerritoryChanges || []),
+        worldRecords: deepCloneJson(view.plugin.settings.worldRecords || []),
+        worldCategories: deepCloneJson(view.plugin.settings.worldCategories || []),
+        currentTimePoint: String(view.plugin.settings.currentTimePoint || ''),
         intimacyHistory: deepCloneJson(view.plugin._intimacyHistory || [])
     };
 }
 
+async function captureFullUndoSnapshot(view, label, baseSnapshot) {
+    var snapshot = baseSnapshot || createUndoSnapshot(view, label);
+    snapshot.files = snapshot.files || {};
+    if (!baseSnapshot) {
+        // 撤销/重做前的当前态也必须包含文件内容，不能只保存内存数组。
+        snapshot._fileReads = {};
+        var targets = [
+            { key: 'characters', path: view.plugin.settings.charFile ? getCharFullPath(view.plugin) : '', cached: view._lastCharMd },
+            { key: 'timeline', path: view.plugin.settings.timelineFile ? getTimelineFullPath(view.plugin) : '', cached: view._lastTimelineMd }
+        ];
+        targets.forEach(function(target) {
+            if (!target.path) return;
+            var file = view.app && view.app.vault ? view.app.vault.getAbstractFileByPath(target.path) : null;
+            if (!file) snapshot.files[target.key] = { path: target.path, exists: false, content: '' };
+            else if (typeof target.cached === 'string') snapshot.files[target.key] = { path: target.path, exists: true, content: target.cached };
+            else snapshot._fileReads[target.key] = view.app.vault.read(file).then(function(content) { return { path: target.path, exists: true, content: content }; });
+        });
+    }
+    var reads = snapshot._fileReads || {};
+    for (var key of Object.keys(reads)) {
+        try { snapshot.files[key] = await reads[key]; }
+        catch (e) { console.error('[操作历史] 无法捕获文件快照：' + key, e); throw new Error('无法创建完整撤销快照：' + key); }
+    }
+    delete snapshot._fileReads;
+    return snapshot;
+}
 function pushUndoSnapshot(view, label) {
     if (!view || !view.plugin) return;
+    var plugin = view.plugin;
+    if (!plugin._undoStack) plugin._undoStack = [];
+    if (!plugin._pendingUndoCaptures) plugin._pendingUndoCaptures = [];
+    // 必须在调用点同步冻结内存数据和已加载的 Markdown 缓存；不能等 Promise 队列启动后再读取。
+    var before = createUndoSnapshot(view, label);
+    before.files = {};
+    before._fileReads = {};
+    var targets = [
+        { key: 'characters', path: plugin.settings.charFile ? getCharFullPath(plugin) : '', cached: view._lastCharMd },
+        { key: 'timeline', path: plugin.settings.timelineFile ? getTimelineFullPath(plugin) : '', cached: view._lastTimelineMd }
+    ];
+    targets.forEach(function(target) {
+        if (!target.path) return;
+        try {
+            var file = view.app && view.app.vault ? view.app.vault.getAbstractFileByPath(target.path) : null;
+            if (!file) before.files[target.key] = { path: target.path, exists: false, content: '' };
+            else if (typeof target.cached === 'string') before.files[target.key] = { path: target.path, exists: true, content: target.cached };
+            else if (view.app && view.app.vault) {
+                // 缓存缺失时也立即启动读取，避免排队到修改完成后才读到新内容。
+                before._fileReads[target.key] = view.app.vault.read(file).then(function(content) {
+                    return { path: target.path, exists: true, content: content };
+                });
+            }
+        } catch (e) { console.warn('[操作历史] 无法启动文件快照读取：' + target.path, e); }
+    });
+    var queue = plugin._undoCaptureQueue || Promise.resolve();
+    var capture = queue.then(function(){ return captureFullUndoSnapshot(view, label, before); }).then(function(snapshot) {
+        plugin._undoStack.push(snapshot);
+        if (plugin._undoStack.length > LIMITS.UNDO_HISTORY_MAX) plugin._undoStack.shift();
+        plugin._redoStack = [];
+    }).catch(function(error) { console.error('[操作历史] 创建快照失败：', error); });
+    plugin._undoCaptureQueue = capture;
+    plugin._pendingUndoCaptures.push(capture);
+}
+function commitUndoSnapshot(view, snapshot) {
+    if (!view || !view.plugin || !snapshot) return;
     if (!view.plugin._undoStack) view.plugin._undoStack = [];
-    view.plugin._undoStack.push(createUndoSnapshot(view, label));
-    if (view.plugin._undoStack.length > LIMITS.UNDO_HISTORY_MAX) {
-        view.plugin._undoStack.shift();
-    }
+    view.plugin._undoStack.push(snapshot);
+    if (view.plugin._undoStack.length > LIMITS.UNDO_HISTORY_MAX) view.plugin._undoStack.shift();
     view.plugin._redoStack = [];
 }
 
@@ -439,18 +636,61 @@ function restoreRelationsSnapshot(view, snapshot) {
     view.relations = deepCloneJson(snapshot.relations || []);
     view.orgRelations = normalizeOrgRelations(deepCloneJson(snapshot.orgRelations || []));
     view.orgMemberships = normalizeOrgMemberships(deepCloneJson(snapshot.orgMemberships || []));
+    view.orgPositionDefs = normalizeOrgPositionDefs(deepCloneJson(snapshot.orgPositionDefs || []));
+    view.orgTerritoryChanges = normalizeOrgTerritoryChanges(deepCloneJson(snapshot.orgTerritoryChanges || []));
+    view.plugin.settings.worldRecords = deepCloneJson(snapshot.worldRecords || []);
+    view.plugin.settings.worldCategories = deepCloneJson(snapshot.worldCategories || []);
+    if (snapshot.currentTimePoint !== undefined) view.plugin.settings.currentTimePoint = String(snapshot.currentTimePoint || '');
     view.plugin._intimacyHistory = deepCloneJson(snapshot.intimacyHistory || []);
 }
 
 async function applyHistorySnapshot(view, snapshot) {
     restoreRelationsSnapshot(view, snapshot);
-    // 仅恢复当前历史系统已完整持久化的关系域数据；不伪装恢复人物/时间线/世界观 Markdown。
+    // 恢复人物与时间线原始 Markdown；先写文件，再刷新解析缓存，失败由外层回滚。
+    if (snapshot.files && view.app && view.app.vault) {
+        for (var fileKey of ['characters', 'timeline']) {
+            var fileSnapshot = snapshot.files[fileKey];
+            if (!fileSnapshot || !fileSnapshot.path) continue;
+            var existing = view.app.vault.getAbstractFileByPath(fileSnapshot.path);
+            if (fileSnapshot.exists === false) { if (existing) await view.app.vault.delete(existing); if (fileKey === 'characters') { view._lastCharMd = ''; view.chars = []; } if (fileKey === 'timeline') { view._lastTimelineMd = ''; view.timeline = []; } continue; }
+            if (existing) await view.app.vault.modify(existing, fileSnapshot.content);
+            else await view.app.vault.create(fileSnapshot.path, fileSnapshot.content);
+            if (fileKey === 'characters') { view._lastCharMd = fileSnapshot.content; view.chars = view.parseChars(fileSnapshot.content); }
+            if (fileKey === 'timeline') { view._lastTimelineMd = fileSnapshot.content; view.timeline = view.parseTimeline(fileSnapshot.content); }
+        }
+    }
+    await view.plugin.saveSettings();
     await view.saveFactionsAndRelations({ skipGraphSync: true });
+    // 关系保存链路可能规范化人物 Markdown；再次写回快照字节，保证人物档案撤销精确还原。
+    if (snapshot.files && snapshot.files.characters) {
+        var charSnapshot = snapshot.files.characters;
+        var charExisting = view.app.vault.getAbstractFileByPath(charSnapshot.path);
+        if (charSnapshot.exists === false) { if (charExisting) await view.app.vault.delete(charExisting); view._lastCharMd = ''; view.chars = []; }
+        else { if (charExisting) await view.app.vault.modify(charExisting, charSnapshot.content); else await view.app.vault.create(charSnapshot.path, charSnapshot.content); view._lastCharMd = charSnapshot.content; view.chars = view.parseChars(charSnapshot.content); }
+    }
+    // 文件层也做逐字节校验，防止内存解析正确但 Markdown 实际未恢复。
+    if (snapshot.files && view.app && view.app.vault) {
+        for (var verifyKey of ['characters', 'timeline']) {
+            var expectedFile = snapshot.files[verifyKey];
+            if (!expectedFile || !expectedFile.path) continue;
+            var actualFile = view.app.vault.getAbstractFileByPath(expectedFile.path);
+            if (expectedFile.exists === false) {
+                if (actualFile) throw new Error((verifyKey === 'characters' ? '人物档案' : '时间线') + '文件删除校验未通过');
+            } else {
+                if (!actualFile) throw new Error((verifyKey === 'characters' ? '人物档案' : '时间线') + '文件缺失');
+                var actualContent = await view.app.vault.read(actualFile);
+                if (actualContent !== expectedFile.content) throw new Error((verifyKey === 'characters' ? '人物档案' : '时间线') + '文件内容校验未通过');
+            }
+        }
+    }
     var saved = await loadSavedData(view.plugin);
+    if (JSON.stringify(view.plugin.settings.worldRecords || []) !== JSON.stringify(snapshot.worldRecords || []) || JSON.stringify(view.plugin.settings.worldCategories || []) !== JSON.stringify(snapshot.worldCategories || [])) throw new Error('世界观数据恢复校验未通过');
     if (JSON.stringify(saved.factions || []) !== JSON.stringify(view.factions || []) ||
         JSON.stringify(saved.relations || []) !== JSON.stringify(view.relations || []) ||
         JSON.stringify(normalizeOrgRelations(saved.orgRelations || [])) !== JSON.stringify(view.orgRelations || []) ||
-        JSON.stringify(normalizeOrgMemberships(saved.orgMemberships || [])) !== JSON.stringify(view.orgMemberships || [])) {
+        JSON.stringify(normalizeOrgMemberships(saved.orgMemberships || [])) !== JSON.stringify(view.orgMemberships || []) ||
+        JSON.stringify(normalizeOrgPositionDefs(saved.orgPositionDefs || [])) !== JSON.stringify(view.orgPositionDefs || []) ||
+        JSON.stringify(normalizeOrgTerritoryChanges(saved.orgTerritoryChanges || [])) !== JSON.stringify(view.orgTerritoryChanges || [])) {
         throw new Error('恢复后的数据校验未通过');
     }
     invalidateTagCache(view.plugin);
@@ -462,13 +702,21 @@ async function runHistoryAction(view, direction) {
     var plugin = view.plugin;
     var sourceKey = direction === 'undo' ? '_undoStack' : '_redoStack';
     var targetKey = direction === 'undo' ? '_redoStack' : '_undoStack';
+    if (plugin._pendingUndoCaptures && plugin._pendingUndoCaptures.length) { var pending = plugin._pendingUndoCaptures.splice(0); await Promise.all(pending); }
     var source = plugin[sourceKey] || [];
     if (!source.length) {
         new obsidian.Notice(direction === 'undo' ? '没有可撤销的操作' : '没有可重做的操作');
         return;
     }
     var targetSnapshot = source.pop();
-    var currentSnapshot = createUndoSnapshot(view, direction === 'undo' ? '撤销前状态' : '重做前状态');
+    var currentSnapshot;
+    try {
+        currentSnapshot = await captureFullUndoSnapshot(view, direction === 'undo' ? '撤销前状态' : '重做前状态');
+    } catch (captureError) {
+        source.push(targetSnapshot);
+        new obsidian.Notice('无法执行' + (direction === 'undo' ? '撤销' : '重做') + '：当前数据快照读取失败，原数据未改动。' + (captureError.message || captureError), 9000);
+        return;
+    }
     view._historyBusy = true;
     try {
         await applyHistorySnapshot(view, targetSnapshot);
@@ -479,10 +727,9 @@ async function runHistoryAction(view, direction) {
         view.render();
     } catch (error) {
         // 写入失败时恢复内存与历史栈，避免界面呈现虚假的成功状态。
-        try { restoreRelationsSnapshot(view, currentSnapshot); } catch (restoreError) { console.error('[操作历史] 内存回滚失败', restoreError); }
+        try { await applyHistorySnapshot(view, currentSnapshot); }
+        catch (restoreError) { console.error('[操作历史] 完整回滚失败，尝试恢复内存状态：', restoreError); try { restoreRelationsSnapshot(view, currentSnapshot); await view.plugin.saveSettings(); } catch (memoryRestoreError) { console.error('[操作历史] 内存回滚失败', memoryRestoreError); } }
         source.push(targetSnapshot);
-        try { await view.saveFactionsAndRelations({ skipGraphSync: true }); }
-        catch (rollbackError) { console.error('[操作历史] 保存回滚失败', rollbackError); }
         new obsidian.Notice((direction === 'undo' ? '撤销' : '重做') + '失败，已尝试恢复操作前数据：' + (error.message || error), 9000);
         view.render();
     } finally {
@@ -576,6 +823,24 @@ function normalizeChapterNotes(value) {
     return String(value).split(/[、，,;；\n]+/).map(function(v) { return v.trim(); }).filter(Boolean);
 }
 
+// 事件与章节采用统一的多对多读取入口。chapterNotes 仍作为持久化兼容字段，
+// 因此旧版本时间线 Markdown 无需迁移，所有模块均可读取旧数据与新选择器数据。
+function rwGetEventChapterReferences(event) {
+    if (!event) return [];
+    var refs = normalizeChapterNotes(event.chapterNotes && event.chapterNotes.length ? event.chapterNotes : event.chapterNote);
+    [event.chapter, event.chapterTitle, event.sourceFile, event.sourcePath].forEach(function(v) { if (v && refs.indexOf(String(v)) < 0) refs.push(String(v)); });
+    return refs;
+}
+function rwGetEventLinkedChapters(settings, event) {
+    var chapters = settings && settings.chapterLibrary && Array.isArray(settings.chapterLibrary.chapters) ? settings.chapterLibrary.chapters : [];
+    var refs = rwGetEventChapterReferences(event), out = [];
+    chapters.forEach(function(ch) {
+        if (refs.some(function(ref) { return rwChapterReferenceMatches(ref, ch); }) && !out.some(function(x) { return x.path === ch.path; })) out.push(ch);
+    });
+    return out;
+}
+function rwChapterPickerValue(chapter) { return chapter && chapter.path ? '[[' + chapter.path + ']]' : ''; }
+
 function parseEventMeta(eventText) {
     var text = eventText;
     var plotLine = '';
@@ -658,14 +923,18 @@ function parseTimelineExtended(content, settings) {
             continue;
         }
 
-        if (trimmed.startsWith('## ') && !trimmed.startsWith('### ')) {
-            currentYear = trimmed.substring(3).trim();
+        // Timeline H2 is the authoritative story-year/era heading. Accept both
+        // `## 景和三年` and the compact `##公元前170年` spelling.
+        var yearHeading = trimmed.match(/^##(?!#)\s*(.+)$/);
+        if (yearHeading) {
+            currentYear = yearHeading[1].trim();
             currentMonth = '';
             continue;
         }
 
-        if (trimmed.startsWith('### ')) {
-            currentMonth = trimmed.substring(4).trim();
+        var monthHeading = trimmed.match(/^###\s*(.+)$/);
+        if (monthHeading) {
+            currentMonth = monthHeading[1].trim();
             continue;
         }
 
@@ -683,6 +952,8 @@ function parseTimelineExtended(content, settings) {
             records.push({
                 volume: currentVolume,
                 year: currentYear,
+                yearSource: 'timeline-h2',
+                calendarYearExplicit: true,
                 month: currentMonth || '未标注',
                 event: meta.event,
                 eventId: meta.eventId,
@@ -739,6 +1010,8 @@ function parseFactionsFromMd(content) {
                 var v = body.substring(sep + 1).trim();
                 if (k === '颜色') current.color = v;
                 if (k === '描述') current.desc = v;
+                // 组织上级关系必须写入关系与阵营 Markdown，避免加载时被 MD 数据覆盖后丢失。
+                if (k === '上级组织' || k === '上级') current.parentOrganization = v === '无' || v === '无' ? '' : v;
             }
         }
     }
@@ -800,6 +1073,7 @@ function serializeRelationMetaMd(factions, relations) {
             var f = factions[fi];
             lines.push('## ' + f.name);
             lines.push('- 颜色：' + (f.color || '#4a90e2'));
+            if (f.parentOrganization) lines.push('- 上级组织：' + f.parentOrganization);
             if (f.desc) lines.push('- 描述：' + f.desc);
             lines.push('');
         }
@@ -1381,7 +1655,14 @@ async function syncRelationsIntoCharMd(app, plugin, relations, intimacyHistory) 
         }
         flushChar();
         var next = out.join('\n').replace(/\n{3,}/g, '\n\n');
-        if (next !== content) await app.vault.modify(file, next);
+        if (next !== content) {
+            await app.vault.modify(file, next);
+            var activeView = plugin._rwActiveView;
+            if (activeView && activeView.plugin === plugin) {
+                activeView._lastCharMd = next;
+                if (typeof activeView.parseChars === 'function') activeView.chars = activeView.parseChars(next);
+            }
+        }
     } catch (e) {
         showUserError('同步关系到人物 MD 失败', e);
     }
@@ -1467,6 +1748,8 @@ function syncSettingsFromParsedData(plugin, chars, relations, timeline) {
     for (var ri = 0; ri < (relations || []).length; ri++) {
         if (relations[ri].type) types.push(relations[ri].type);
     }
+    var deletedRelationTypes = Array.isArray(plugin.settings.deletedRelationTypeValues) ? plugin.settings.deletedRelationTypeValues : [];
+    types = types.filter(function(type) { return deletedRelationTypes.indexOf(String(type || '').trim()) < 0; });
     var nextTypes = mergeCsvSetting(plugin.settings.customRelationTypes, types);
     if (nextTypes !== (plugin.settings.customRelationTypes || '')) {
         plugin.settings.customRelationTypes = nextTypes;
@@ -1527,12 +1810,21 @@ function getTimelineTimePoints(timeline, settings) {
 }
 
 function getTimelineStoryTimeLabel(evt) {
-    if (evt && String(evt.storyYear || '').trim()) return String(evt.storyYear).trim();
+    // Preserve the exact authored H2 label (including reign-year suffixes).
+    if (evt && evt.calendarYearExplicit && String(evt.year || '').trim()) return String(evt.year).trim();
+    if (evt && String(evt.storyYear || '').trim()) return rwGetStoryYearLabel(String(evt.storyYear).trim(), evt.month, !!evt.calendarYearExplicit);
     // Legacy records used the H2 heading as a date. Keep those dates usable,
     // but never mistake a chapter heading for story chronology.
     var legacy = evt && String(evt.year || '').trim();
-    var legacyParsed = legacy ? parseHistoricalDate(legacy) : null;
-    if (legacy && !parseChapterHeading(legacy) && legacy !== UNLOCATED_CHAPTER_GROUP && legacyParsed && legacyParsed.sortValue !== null) return legacy;
+    // In the timeline MD, every H2 is an authored era/year label. Numeric dates
+    // (e.g. 公元前170年) can be chronologically sorted; custom reign names
+    // (e.g. 景和三年) remain visible and preserve their source-file order.
+    if (legacy && !parseChapterHeading(legacy) && legacy !== UNLOCATED_CHAPTER_GROUP) {
+        var legacyParsed = parseHistoricalDate(legacy);
+        return legacyParsed && legacyParsed.sortValue !== null
+            ? rwGetStoryYearLabel(legacy, evt && evt.month, !!(evt && evt.calendarYearExplicit))
+            : legacy;
+    }
     return '未注明故事时间';
 }
 
@@ -1553,10 +1845,10 @@ function getSortedTimelineEvents(timeline) {
 function eventSortValue(evt) {
     if (!evt) return null;
     var story = String(evt.storyYear || '').trim();
-    if (story) return getTimeSortValue(story);
+    if (story) return rwGetCalendarSortValue(story, evt.month, !!evt.calendarYearExplicit);
     var legacy = String(evt.year || '').trim();
     if (!legacy || parseChapterHeading(legacy) || legacy === UNLOCATED_CHAPTER_GROUP) return null;
-    return getTimeSortValue(legacy);
+    return rwGetCalendarSortValue(legacy, evt.month, !!evt.calendarYearExplicit);
 }
 
 function getNextTimePoint(timeline, currentTimeStr) {
@@ -1874,7 +2166,10 @@ async function deleteEventFromMd(app, plugin, eventOrLineIndex) {
         }
     }
     lines.splice(lineIndex, 1);
-    await app.vault.modify(file, lines.join('\n'));
+    var nextContent = lines.join('\n');
+    await app.vault.modify(file, nextContent);
+    var activeView = plugin._rwActiveView;
+    if (activeView && activeView.plugin === plugin) activeView._lastTimelineMd = nextContent;
     return true;
 }
 
@@ -1890,48 +2185,11 @@ async function updateEventInMd(app, plugin, originalEvt, newEvt) {
         new obsidian.Notice('⚠️ 事件位置已变化，未执行修改。请刷新时间线后重试。', 7000);
         return false;
     }
-    // 先移除旧事件行，再按新年份/月份放回对应分组；仅一次 Vault 写入，避免先删后增造成丢失。
     lines.splice(originalEvt._lineIndex, 1);
-    var yearHeading = '## ' + String(newEvt.year || '').trim();
-    var monthValue = String(newEvt.month || '未标注').trim();
-    var yearIndex = -1;
-    for (var yi = 0; yi < lines.length; yi++) {
-        if (String(lines[yi] || '').trim() === yearHeading) { yearIndex = yi; break; }
-    }
-    if (yearIndex < 0) {
-        while (lines.length && !String(lines[lines.length - 1]).trim()) lines.pop();
-        if (lines.length) lines.push('');
-        lines.push(yearHeading);
-        yearIndex = lines.length - 1;
-    }
-    var sectionEnd = lines.length;
-    for (var se = yearIndex + 1; se < lines.length; se++) {
-        if (/^##\s+/.test(String(lines[se] || '').trim())) { sectionEnd = se; break; }
-    }
-    var insertAt = yearIndex + 1;
-    if (monthValue && monthValue !== '未标注') {
-        var monthHeading = '### ' + monthValue;
-        var monthIndex = -1;
-        for (var mi = yearIndex + 1; mi < sectionEnd; mi++) {
-            if (String(lines[mi] || '').trim() === monthHeading) { monthIndex = mi; break; }
-        }
-        if (monthIndex < 0) {
-            // 在该年份分组末尾创建月份标题，避免插入到相邻年份。
-            insertAt = sectionEnd;
-            while (insertAt > yearIndex + 1 && !String(lines[insertAt - 1] || '').trim()) insertAt--;
-            lines.splice(insertAt, 0, monthHeading);
-            monthIndex = insertAt;
-        }
-        insertAt = monthIndex + 1;
-        while (insertAt < lines.length && !String(lines[insertAt] || '').trim()) insertAt++;
-        while (insertAt < lines.length && !/^#{1,3}\s+/.test(String(lines[insertAt] || '').trim())) insertAt++;
-    } else {
-        insertAt = yearIndex + 1;
-        while (insertAt < sectionEnd && !/^#{1,2}\s+/.test(String(lines[insertAt] || '').trim())) insertAt++;
-    }
-    lines.splice(insertAt, 0, buildEventMdLine(newEvt));
-    originalEvt._lineIndex = insertAt;
-    await app.vault.modify(file, lines.join('\n'));
+    var nextContent = rwInsertTimelineEventByCalendarOrder(lines.join('\n'), newEvt);
+    await app.vault.modify(file, nextContent);
+    var activeView = plugin._rwActiveView;
+    if (activeView && activeView.plugin === plugin) activeView._lastTimelineMd = nextContent;
     await rwUpdateEventRegistryAfterEdit(plugin, originalEvt, newEvt);
     return true;
 }
@@ -2055,43 +2313,76 @@ function getTimelineFullPathForExt(plugin) {
     return folder ? folder + '/' + fname : fname;
 }
 
+function rwInsertTimelineEventByCalendarOrder(content, evt) {
+    var lines = String(content || '').split('\n');
+    var year = String(evt.year || '').trim() || UNLOCATED_CHAPTER_GROUP;
+    var yearHeading = '## ' + year;
+    var line = buildEventMdLine(evt);
+    var yearIndex = -1;
+    for (var i = 0; i < lines.length; i++) {
+        if (String(lines[i] || '').trim() === yearHeading) { yearIndex = i; break; }
+    }
+    if (yearIndex < 0) {
+        while (lines.length && !String(lines[lines.length - 1]).trim()) lines.pop();
+        if (lines.length) lines.push('');
+        lines.push(yearHeading);
+        yearIndex = lines.length - 1;
+    }
+    var sectionEnd = lines.length;
+    for (var e = yearIndex + 1; e < lines.length; e++) {
+        if (/^##\s+/.test(String(lines[e] || '').trim())) { sectionEnd = e; break; }
+    }
+    var month = String(evt.month || '').trim();
+    if (!month || month === '未标注') {
+        lines.splice(sectionEnd, 0, line);
+        return lines.join('\n');
+    }
+    var monthOrder = rwCalendarMonthOrder(month);
+    var monthBlocks = [];
+    for (var j = yearIndex + 1; j < sectionEnd; j++) {
+        var heading = String(lines[j] || '').trim().match(/^###\s*(.+?)\s*$/);
+        if (heading) {
+            var headingMonth = heading[1].replace(/[：:]$/, '').trim();
+            monthBlocks.push({ index: j, month: headingMonth, order: rwCalendarMonthOrder(headingMonth) });
+        }
+    }
+    var target = null;
+    for (var b = 0; b < monthBlocks.length; b++) {
+        if (monthBlocks[b].month.replace(/[：:]$/, '') === month.replace(/[：:]$/, '')) { target = monthBlocks[b]; break; }
+    }
+    if (target) {
+        var targetEnd = sectionEnd;
+        for (var n = 0; n < monthBlocks.length; n++) if (monthBlocks[n].index > target.index) { targetEnd = monthBlocks[n].index; break; }
+        // Append within the matching month block; same-month author order is preserved.
+        var at = targetEnd;
+        while (at > target.index + 1 && !String(lines[at - 1] || '').trim()) at--;
+        lines.splice(at, 0, line);
+        return lines.join('\n');
+    }
+    var insertAt = sectionEnd;
+    if (monthOrder !== null) {
+        for (var q = 0; q < monthBlocks.length; q++) {
+            if (monthBlocks[q].order !== null && monthBlocks[q].order > monthOrder) { insertAt = monthBlocks[q].index; break; }
+        }
+    }
+    // Unknown month labels stay at the end; known months follow the configured岁首.
+    lines.splice(insertAt, 0, '### ' + month + '：', line);
+    return lines.join('\n');
+}
+
 async function appendEventToMd(app, plugin, evt) {
     var fullPath = getTimelineFullPathForExt(plugin);
     var existing = app.vault.getAbstractFileByPath(fullPath);
-    var tagPart = evt.tag ? '[' + evt.tag + '] ' : '';
-    var line = '- ' + tagPart + serializeEventMeta(evt);
-    var section = '';
-    var eventGroup = String(evt.year || '').trim() || UNLOCATED_CHAPTER_GROUP;
-
-    if (plugin.settings.timelineMode === 'chapter' && evt.volume) {
-        section += '# ' + evt.volume + '\n\n';
-    }
-    section += '## ' + eventGroup + '\n';
-    if (evt.month && evt.month !== '未标注') section += '### ' + evt.month + '：\n';
-    section += line + '\n';
-
-    if (existing) {
-        var content = await app.vault.read(existing);
-        if (content.indexOf('## ' + eventGroup) !== -1) {
-            var idx = content.indexOf('## ' + eventGroup);
-            var after = content.indexOf('\n', idx) + 1;
-            var before = content.substring(0, after);
-            var rest = content.substring(after);
-            var nextH2 = rest.search(/\n## /);
-            if (nextH2 === -1) {
-                await app.vault.modify(existing, content.trim() + '\n' + line + '\n');
-            } else {
-                var insertAt = after + nextH2;
-                await app.vault.modify(existing, content.substring(0, insertAt) + line + '\n' + content.substring(insertAt));
-            }
-        } else {
-            await app.vault.modify(existing, content.trim() + '\n\n' + section);
-        }
-    } else {
+    var content = existing ? await app.vault.read(existing) : '# 时间线\n';
+    var nextContent = rwInsertTimelineEventByCalendarOrder(content, evt);
+    if (existing) await app.vault.modify(existing, nextContent);
+    else {
         var folder = fullPath.substring(0, fullPath.lastIndexOf('/'));
         if (folder && !await app.vault.adapter.exists(folder)) await app.vault.adapter.mkdir(folder);
-        await app.vault.create(fullPath, '# 时间线\n\n' + section);
+        await app.vault.create(fullPath, nextContent);
     }
+    var activeView = plugin._rwActiveView;
+    if (activeView && activeView.plugin === plugin) activeView._lastTimelineMd = nextContent;
 }
 
 function renderWikiLinksInElement(container, app, onClick) {
@@ -2238,13 +2529,18 @@ function formatFirstAppearFromEvent(evt, settings) {
     settings = settings || {};
     var mode = settings.timelineMode || 'auto';
     if (mode === 'chapter' || (mode === 'auto' && evt.volume)) {
-        if (evt.volume && evt.month && evt.month !== '未标注') {
-            return evt.volume + ' · ' + evt.year + ' · ' + evt.month;
-        }
-        if (evt.volume) return evt.volume + ' · ' + evt.year;
+        var chapterTime = evt.storyYear || evt.chapterStoryTime || evt.year || '';
+        if (evt.volume && evt.month && evt.month !== '未标注') return evt.volume + ' · ' + chapterTime + ' · ' + evt.month;
+        if (evt.volume) return evt.volume + ' · ' + chapterTime;
     }
-    if (evt.month && evt.month !== '未标注') return evt.year + ' · ' + evt.month;
-    return evt.year || '';
+    var storyTime = evt.storyYear || evt.chapterStoryTime || evt.year || '';
+    // In timeline Markdown, the H2 heading is the authoritative story-year label.
+    // Do not shift it to the previous year based on the configured calendar new-year
+    // month: that setting controls month ordering, not the year explicitly authored
+    // by the user in `## ...`. This also preserves compound labels such as
+    // `公元前177年 三年` verbatim when formatting first-appearance audit messages.
+    if (evt.month && evt.month !== '未标注') return String(storyTime) + ' · ' + evt.month;
+    return storyTime;
 }
 
 function firstAppearValuesMatch(a, b) {
@@ -2261,61 +2557,86 @@ function firstAppearValuesMatch(a, b) {
 
 function getTimelineFirstAppearMap(timeline, charNames, plugin) {
     var map = {};
-    for (var i = 0; i < timeline.length; i++) {
+    for (var i = 0; i < (timeline || []).length; i++) {
         var evt = timeline[i];
-        if (!isAppearTimelineTag(evt.tag)) continue;
-        var appeared = findCharsInEvent(evt.event, charNames);
+        // 不要求「出场/登场」标签：事件标题、事件内容及关联人物字段中
+        // 只要实际提到人物姓名，就作为该人物在时间线中的出现依据。
+        var searchable = [evt.event, evt.title, evt.name, evt.description, evt.characters, evt.characterNames]
+            .map(function(v) { return Array.isArray(v) ? v.join('、') : String(v || ''); }).join(' ');
+        var appeared = findCharsInEvent(searchable, charNames || []);
         for (var j = 0; j < appeared.length; j++) {
             var name = appeared[j];
-            if (!map[name]) {
-                map[name] = {
-                    event: evt,
-                    location: formatFirstAppearFromEvent(evt, plugin.settings),
-                    timelineIndex: i
-                };
+            var location = formatFirstAppearFromEvent(evt, plugin && plugin.settings);
+            var timeRaw = evt.storyYear || evt.chapterStoryTime || evt.year || '';
+            var sortValue = getTimeSortValue(timeRaw);
+            if (!map[name] || (sortValue !== null && (map[name].sortValue === null || sortValue < map[name].sortValue))) {
+                map[name] = { event: evt, location: location, timelineIndex: i, sortValue: sortValue };
             }
         }
     }
     return map;
 }
 
+function getChapterFirstAppearMap(view) {
+    var map = Object.create(null);
+    var settings = view && view.plugin && view.plugin.settings || {};
+    var chapters = settings.chapterLibrary && Array.isArray(settings.chapterLibrary.chapters) ? settings.chapterLibrary.chapters.slice() : [];
+    // 章节库 mentions 是扫描正文得到的姓名索引；按章节编号排序，优先确定文本首次出现章节。
+    chapters.sort(function(a, b) {
+        var an = a.chapterNumber != null ? Number(a.chapterNumber) : rwExtractChapterNumber(a.name || a.path);
+        var bn = b.chapterNumber != null ? Number(b.chapterNumber) : rwExtractChapterNumber(b.name || b.path);
+        if (an != null && bn != null && an !== bn) return an - bn;
+        if (an != null && bn == null) return -1;
+        if (bn != null && an == null) return 1;
+        return String(a.path || a.name || '').localeCompare(String(b.path || b.name || ''), 'zh-CN');
+    });
+    chapters.forEach(function(ch, index) {
+        (ch.mentions || []).forEach(function(rawName) {
+            var name = String(rawName || '').trim();
+            if (!name || map[name]) return;
+            var time = String(ch.storyTime || '').trim();
+            var defaultTime = rwGetChapterDefaultStoryTime(time);
+            var chapterName = String(ch.name || ch.path || '').replace(/\.md$/i, '');
+            map[name] = {
+                chapter: ch,
+                chapterIndex: index,
+                location: (defaultTime ? defaultTime + ' · ' : '') + chapterName,
+                storyTime: defaultTime,
+                chapterTimeRange: time,
+                sortValue: getTimeSortValue(defaultTime)
+            };
+        });
+    });
+    return map;
+}
+
 function auditFirstAppearSync(view) {
     var settings = view.plugin.settings;
-    var fieldName = settings.firstAppearFieldName || '首次出场';
-    var timelineMap = getTimelineFirstAppearMap(view.timeline, view.charNames, view.plugin);
+    var fieldName = settings.firstAppearFieldName || '正文首次出现';
+    var bodyMap = getChapterFirstAppearMap(view);
     var issues = [];
-
     for (var i = 0; i < view.chars.length; i++) {
         var c = view.chars[i];
-        var charFirst = view.getFieldValue(c, fieldName);
-        var tl = timelineMap[c.name];
-
-        if (tl && !charFirst) {
+        var charFirst = view.getFieldValue(c, fieldName) || view.getFieldValue(c, '首次出场') || view.getFieldValue(c, '首次出现');
+        var bodyFirst = bodyMap[c.name];
+        if (bodyFirst && !charFirst) {
             issues.push({
-                type: 'missing_on_char',
-                charName: c.name,
-                suggested: tl.location,
-                event: tl.event,
-                severity: 'medium',
-                message: '「' + c.name + '」时间线已 [出场]（' + tl.location + '），人物档案未填首次出场'
+                type: 'missing_on_char', charName: c.name, suggested: bodyFirst.location,
+                chapter: bodyFirst.chapter, severity: 'medium',
+                message: '「' + c.name + '」在章节正文「' + bodyFirst.location + '」中首次出现，但人物档案尚未填写「' + fieldName + '」'
             });
-        } else if (!tl && charFirst) {
+        } else if (!bodyFirst && charFirst) {
             issues.push({
-                type: 'missing_on_timeline',
-                charName: c.name,
-                charValue: charFirst,
+                type: 'missing_in_chapters', charName: c.name, charValue: charFirst,
                 severity: 'low',
-                message: '「' + c.name + '」档案写首次出场「' + charFirst + '」，时间线无 [出场] 事件'
+                message: '「' + c.name + '」档案记录了正文首次出现「' + charFirst + '」，但当前章节库扫描结果中未找到该人物；请先扫描/更新章节库，或检查人物姓名与别名'
             });
-        } else if (tl && charFirst && !firstAppearValuesMatch(charFirst, tl.location)) {
+        } else if (bodyFirst && charFirst && !firstAppearValuesMatch(charFirst, bodyFirst.location) && !firstAppearValuesMatch(charFirst, bodyFirst.storyTime)) {
             issues.push({
-                type: 'mismatch',
-                charName: c.name,
-                charValue: charFirst,
-                timelineValue: tl.location,
-                event: tl.event,
-                severity: 'high',
-                message: '「' + c.name + '」不一致：档案「' + charFirst + '」≠ 时间线「' + tl.location + '」'
+                type: 'mismatch', charName: c.name, charValue: charFirst,
+                timelineValue: bodyFirst.location, suggested: bodyFirst.location,
+                chapter: bodyFirst.chapter, severity: 'high',
+                message: '「' + c.name + '」正文首次出现位置为「' + bodyFirst.location + '」，但档案记录为「' + charFirst + '」'
             });
         }
     }
@@ -2381,11 +2702,15 @@ async function setCharFieldInMd(app, plugin, charName, fieldName, fieldValue) {
         fieldUpdated = true;
     }
     if (!foundChar) return false;
-    await app.vault.modify(file, out.join('\n'));
+    var nextContent = out.join('\n');
+    await app.vault.modify(file, nextContent);
+    // 此工具函数不持有 MyView 实例；调用方在写入后统一 loadAllData 刷新视图。
     return true;
 }
 
 async function syncFirstAppearFromEvent(app, plugin, view, evt) {
+    // 首次出现改由章节正文扫描决定；时间线事件不再自动写入人物档案。
+    return { synced: [], skipped: [], mismatched: [] };
     if (plugin.settings.syncFirstAppearOnEvent === false) {
         return { synced: [], skipped: [], mismatched: [] };
     }
@@ -2396,7 +2721,7 @@ async function syncFirstAppearFromEvent(app, plugin, view, evt) {
     if (!appeared.length) {
         return { synced: [], skipped: [], mismatched: [] };
     }
-    var fieldName = plugin.settings.firstAppearFieldName || '首次出场';
+    var fieldName = plugin.settings.firstAppearFieldName || '正文首次出现';
     var location = formatFirstAppearFromEvent(evt, plugin.settings);
     var synced = [];
     var skipped = [];
@@ -3215,6 +3540,25 @@ function sanitizeNoteName(name) {
     return String(name).replace(/[\\/:*?"<>|]/g, '-').replace(/\s+/g, ' ').trim();
 }
 
+// 按阵营的上级组织链生成稳定的图谱笔记目录；无阵营人物归入独立目录。
+function getGraphNotePathForChar(plugin, view, charData) {
+    var base = getGraphNotesFolder(plugin);
+    var factionField = plugin.settings.factionFieldName || '阵营';
+    var factionName = view && typeof view.getCharField === 'function' ? view.getCharField(charData, factionField) : (charData && charData.fields && charData.fields[factionField]) || '';
+    factionName = String(factionName || '').trim();
+    var byName = Object.create(null); (view && view.factions || []).forEach(function(f) { if (f && f.name) byName[String(f.name)] = f; });
+    var chain = [], seen = Object.create(null), cursor = factionName;
+    while (cursor && !seen[cursor]) { seen[cursor] = true; chain.unshift(cursor); var rec = byName[cursor]; cursor = rec ? String(rec.parentOrganization || '').trim() : ''; }
+    if (!chain.length) chain.push('未分配阵营');
+    var dir = base + '/' + chain.map(sanitizeNoteName).join('/');
+    return dir + '/' + sanitizeNoteName(charData.name) + '.md';
+}
+
+async function rwEnsureVaultFolder(vault, folderPath) {
+    var parts = String(folderPath || '').split('/').filter(Boolean), current = '';
+    for (var i = 0; i < parts.length; i++) { current = current ? current + '/' + parts[i] : parts[i]; if (!await vault.adapter.exists(current)) await vault.createFolder(current); }
+}
+
 function getRelationsForChar(view, charName) {
     var result = [];
     for (var i = 0; i < view.relations.length; i++) {
@@ -3309,7 +3653,7 @@ function getGraphSyncSummaryText(plugin, view) {
 }
 
 function formatGraphSyncNotice(res) {
-    var msg = '✓ 已同步 ' + res.count + ' 个节点到 ' + res.folder;
+    var msg = '✓ 已同步 ' + res.count + ' 个人物节点到阵营层级目录' + (res.migrated ? '，迁移旧版笔记 ' + res.migrated + ' 个' : '') + '：' + res.folder;
     if (res.skipped > 0) msg += '；跳过 ' + res.skipped + ' 个';
     if (res.conflicts > 0) msg += '；有 ' + res.conflicts + ' 个同名笔记未覆盖（为保护原文）';
     if (res.stale > 0) msg += '；发现 ' + res.stale + ' 个已不在同步范围内的旧节点，已保留未删除';
@@ -3337,7 +3681,7 @@ async function syncGraphNotesToVault(plugin, view) {
     var folder = getGraphNotesFolder(plugin);
     var adapter = plugin.app.vault.adapter;
     if (!await adapter.exists(folder)) {
-        await adapter.mkdir(folder);
+        await rwEnsureVaultFolder(plugin.app.vault, folder);
     }
     var terms = getTermSet(plugin);
     var factionField = plugin.settings.factionFieldName || '阵营';
@@ -3352,10 +3696,12 @@ async function syncGraphNotesToVault(plugin, view) {
     }
     var synced = 0;
     var conflicts = 0;
+    var migrated = 0;
 
     for (var ci = 0; ci < charsToSync.length; ci++) {
         var c = charsToSync[ci];
-        var notePath = folder + '/' + sanitizeNoteName(c.name) + '.md';
+        var notePath = getGraphNotePathForChar(plugin, view, c);
+        await rwEnsureVaultFolder(plugin.app.vault, notePath.substring(0, notePath.lastIndexOf('/')));
         var lines = ['---', 'tags: [relation-weaver]', 'entity: ' + yamlQuoted(c.name)];
         var currentFaction = view && typeof view.getCharField === 'function'
             ? view.getCharField(c, factionField)
@@ -3404,6 +3750,18 @@ async function syncGraphNotesToVault(plugin, view) {
         } else {
             await plugin.app.vault.create(notePath, content);
         }
+        // 将旧版平铺目录中的插件自有笔记迁移到阵营层级目录；绝不删除用户自建文件。
+        var legacyPath = folder + '/' + sanitizeNoteName(c.name) + '.md';
+        if (legacyPath !== notePath) {
+            var legacyFile = plugin.app.vault.getAbstractFileByPath(legacyPath);
+            if (legacyFile) {
+                var legacyContent = await plugin.app.vault.read(legacyFile);
+                if (legacyContent.indexOf('由「人物关系谱系」插件同步') !== -1) {
+                    await plugin.app.vault.delete(legacyFile);
+                    migrated++;
+                }
+            }
+        }
         synced++;
     }
 
@@ -3413,7 +3771,7 @@ async function syncGraphNotesToVault(plugin, view) {
     for (var cj = 0; cj < view.chars.length; cj++) {
         var excluded = view.chars[cj];
         if (syncedNames[excluded.name]) continue;
-        var stalePath = folder + '/' + sanitizeNoteName(excluded.name) + '.md';
+        var stalePath = getGraphNotePathForChar(plugin, view, excluded);
         var staleFile = plugin.app.vault.getAbstractFileByPath(stalePath);
         if (staleFile) stale++;
     }
@@ -3424,6 +3782,7 @@ async function syncGraphNotesToVault(plugin, view) {
         skipped: view.chars.length - synced,
         conflicts: conflicts,
         stale: stale,
+        migrated: migrated,
         removed: 0
     };
 }
@@ -3463,7 +3822,7 @@ async function openLocalGraphForEntity(app, plugin, view, charName) {
         return;
     }
     var folder = getGraphNotesFolder(plugin);
-    var path = folder + '/' + sanitizeNoteName(charName) + '.md';
+    var path = getGraphNotePathForChar(plugin, view, charData || { name: charName, fields: {} });
     var file = app.vault.getAbstractFileByPath(path);
     if (!file) {
         new obsidian.Notice('「' + charName + '」尚未生成独立图谱笔记。若需要，请在关系图谱页手动点击「同步到 Obsidian 图谱」。');
@@ -3567,6 +3926,72 @@ function createOption(value, text) {
 // ========== 历史时间解析 ==========
 // auto: bare years default to CE; bc/ad: bare years follow the selected story era.
 var ACTIVE_TIMELINE_ERA = 'auto';
+var ACTIVE_STORY_CALENDAR = { startMonth: 1, assistMode: 'auto', monthNames: ['正月','二月','三月','四月','五月','六月','七月','八月','九月','十月','十一月','十二月'] };
+function rwCalendarMonthNames() {
+    var names = ACTIVE_STORY_CALENDAR && Array.isArray(ACTIVE_STORY_CALENDAR.monthNames) ? ACTIVE_STORY_CALENDAR.monthNames : [];
+    return names.length === 12 ? names : ['正月','二月','三月','四月','五月','六月','七月','八月','九月','十月','十一月','十二月'];
+}
+function rwGetCalendarMonthIndex(value) {
+    if (value == null || value === '') return null;
+    var raw = String(value).trim().replace(/[闰閏]/g, '').replace(/[：:]$/, '').trim();
+    var arabic = raw.match(/^(\d{1,2})月?$/);
+    if (arabic) { var n = parseInt(arabic[1], 10); return n >= 1 && n <= 12 ? n : null; }
+    var chinese = { '正月':1, '一月':1, '冬月':11, '十一月':11, '腊月':12, '臘月':12, '十二月':12, '二月':2, '三月':3, '四月':4, '五月':5, '六月':6, '七月':7, '八月':8, '九月':9, '十月':10 };
+    if (chinese[raw]) return chinese[raw];
+    var names = rwCalendarMonthNames();
+    for (var i = 0; i < names.length; i++) if (raw === names[i] || raw === names[i] + '月') return i + 1;
+    return null;
+}
+function rwCalendarStoryYearNumber(parsed, monthText, explicitYear) {
+    if (!parsed || parsed.sortValue == null) return null;
+    var year = rwHistoricalYearNumber(parsed);
+    if (year === null) return null;
+    // An authored timeline H2 is the authoritative year. Never move its events
+    // into the previous year merely because their month precedes the calendar
+    // year's configured start month. Manual mode also disables rollover.
+    // Cross-year rollover is an explicit opt-in. Authors who have already
+    // arranged timeline Markdown by hand keep every month under its authored
+    // year unless they enable this setting. Explicit H2 years always win.
+    if (explicitYear || (pluginCalendarAssistMode() === 'manual') || ACTIVE_STORY_CALENDAR.rolloverBeforeStart !== true) return year;
+    var month = rwGetCalendarMonthIndex(monthText);
+    var start = Math.max(1, Math.min(12, Number(ACTIVE_STORY_CALENDAR.startMonth) || 1));
+    if (month != null && month < start) year -= 1;
+    return year;
+}
+function pluginCalendarAssistMode() {
+    return ACTIVE_STORY_CALENDAR && ACTIVE_STORY_CALENDAR.assistMode === 'manual' ? 'manual' : 'auto';
+}
+function rwCalendarMonthOrder(monthText) {
+    var month = rwGetCalendarMonthIndex(monthText);
+    if (month == null) return null;
+    var start = Math.max(1, Math.min(12, Number(ACTIVE_STORY_CALENDAR.startMonth) || 1));
+    return (month - start + 12) % 12;
+}
+function rwGetStoryYearLabel(yearText, monthText, explicitYear) {
+    var parsed = parseHistoricalDate(yearText);
+    if (!parsed || parsed.sortValue == null) return String(yearText || '');
+    var month = monthText != null && monthText !== '' ? monthText : parsed.calendarMonth;
+    var storyYear = rwCalendarStoryYearNumber(parsed, month, explicitYear);
+    if (storyYear === null || month == null || month === '') return String(yearText || '');
+    return formatSortValue(storyYear);
+}
+function rwGetCalendarSortValue(yearText, monthText, explicitYear) {
+    var parsed = parseHistoricalDate(yearText);
+    if (!parsed || parsed.sortValue == null) return null;
+    var month = monthText != null && monthText !== '' ? monthText : parsed.calendarMonth;
+    if (month == null || month === '') return parsed.sortValue;
+    var storyYear = rwCalendarStoryYearNumber(parsed, month, explicitYear);
+    var order = rwCalendarMonthOrder(month);
+    if (storyYear === null || order === null) return parsed.sortValue;
+    // Keep modern ISO dates on their existing large-number scale so they remain
+    // comparable with other modern dates; historical year-only values use a
+    // fractional month within the configured story year.
+    if (parsed.era === 'modern') {
+        var day = parsed.day || 1;
+        return storyYear * 10000 + (order + 1) * 100 + day;
+    }
+    return storyYear + order / 12;
+}
 function parseHistoricalDate(str) {
     if (!str || !String(str).trim()) return null;
     var s = String(str).trim();
@@ -3674,6 +4099,49 @@ function parseHistoricalDate(str) {
     return { sortValue: null, display: s, era: 'unknown', raw: s };
 }
 
+// Shared calendar adapter: all date consumers (birth/death, relations, chapters,
+// timeline and dashboard) receive the same month metadata and story-calendar sort.
+var rwParseHistoricalDateBase = parseHistoricalDate;
+parseHistoricalDate = function(value) {
+    var parsed = rwParseHistoricalDateBase(value);
+    if (!parsed || !value) return parsed;
+    var raw = String(value).trim();
+    var monthText = '';
+    // Prefer explicit month names; support Chinese numerals, configured names,
+    // Arabic month notation, and modern YYYY-MM[-DD] dates.
+    var monthMatch = raw.match(/(正月|冬月|腊月|臘月|十[一二]?月|[一二三四五六七八九]月|\d{1,2}月)/);
+    if (monthMatch) monthText = monthMatch[1];
+    if (!monthText) {
+        var iso = raw.match(/^\d{4}[-\/.](\d{1,2})(?:[-\/.](\d{1,2}))?/);
+        if (iso) monthText = iso[1] + '月';
+    }
+    if (!monthText) {
+        var configured = rwCalendarMonthNames();
+        for (var i = 0; i < configured.length; i++) {
+            if (configured[i] && raw.indexOf(configured[i]) >= 0) { monthText = configured[i]; break; }
+        }
+    }
+    if (monthText) {
+        var monthIndex = rwGetCalendarMonthIndex(monthText);
+        if (monthIndex != null) {
+            parsed.calendarMonth = monthText;
+            parsed.month = parsed.month || monthIndex;
+            parsed.calendarMonthIndex = monthIndex;
+            parsed.calendarMonthOrder = rwCalendarMonthOrder(monthText);
+            parsed.storyYear = rwCalendarStoryYearNumber(parsed, monthText);
+            var monthOrder = rwCalendarMonthOrder(monthText);
+            if (parsed.storyYear !== null && monthOrder !== null) {
+                parsed.calendarSortValue = parsed.era === 'modern'
+                    ? parsed.storyYear * 10000 + (monthOrder + 1) * 100 + (parsed.day || 1)
+                    : parsed.storyYear + monthOrder / 12;
+                // Use the shared calendar chronology for every consumer of sortValue.
+                parsed.sortValue = parsed.calendarSortValue;
+            }
+        }
+    }
+    return parsed;
+};
+
 function timesAreComparable(a, b) {
     var pa = typeof a === 'object' && a && a.era ? a : parseHistoricalDate(a);
     var pb = typeof b === 'object' && b && b.era ? b : parseHistoricalDate(b);
@@ -3685,9 +4153,12 @@ function timesAreComparable(a, b) {
 
 function formatSortValue(sortValue) {
     if (sortValue === null || sortValue === undefined || isNaN(sortValue)) return '?';
-    if (sortValue < 0) return '前' + Math.abs(Math.round(sortValue)) + '年';
-    if (sortValue === 0) return '公元元年';
-    return Math.round(sortValue) + '年';
+    // Fractional parts encode month order; display the containing story year,
+    // including BCE years where floor(-220.25) correctly maps to 前221年.
+    var yearValue = Math.floor(Number(sortValue) + 1e-9);
+    if (yearValue < 0) return '前' + Math.abs(yearValue) + '年';
+    if (yearValue === 0) return '公元元年';
+    return yearValue + '年';
 }
 
 function getTimeSortValue(str) {
@@ -3727,7 +4198,7 @@ function auditUnbornAppearances(view) {
     var birthField = (view.plugin.settings && view.plugin.settings.birthFieldNames) || '出生,出生时间';
     for (var i = 0; i < view.timeline.length; i++) {
         var evt = view.timeline[i];
-        var evtSort = getTimeSortValue(evt.storyYear || evt.year);
+        var evtSort = getTimeSortValue(evt.storyYear || evt.chapterStoryTime || evt.year);
         if (evtSort === null) continue;
         var names = findCharsInEvent(evt.event, view.charNames || []);
         for (var j = 0; j < names.length; j++) {
@@ -3777,7 +4248,7 @@ function collectDeadAfterAppearIssues(view) {
         if (deathSort === null) continue;
         for (var j = 0; j < view.timeline.length; j++) {
             var evt = view.timeline[j];
-            var yearSort = getTimeSortValue(evt.storyYear || evt.year);
+            var yearSort = getTimeSortValue(evt.storyYear || evt.chapterStoryTime || evt.year);
             if (yearSort === null || yearSort <= deathSort) continue;
             var appeared = findCharsInEvent(evt.event, [c.name]);
             if (appeared.length > 0) {
@@ -4138,8 +4609,22 @@ function validateImportData(data) {
         if (!Array.isArray(data.chars)) return { ok: false, error: 'chars 必须是数组' };
         for (var ci = 0; ci < data.chars.length; ci++) if (!data.chars[ci] || !data.chars[ci].name || (data.chars[ci].fields !== undefined && (!data.chars[ci].fields || typeof data.chars[ci].fields !== 'object' || Array.isArray(data.chars[ci].fields)))) return { ok: false, error: '人物第 ' + (ci + 1) + ' 项缺少 name' };
     }
-    if (data.orgMemberships !== undefined && !Array.isArray(data.orgMemberships)) return { ok: false, error: 'orgMemberships 必须是数组' };
-    if (data.orgRelations !== undefined && !Array.isArray(data.orgRelations)) return { ok: false, error: 'orgRelations 必须是数组' };
+    if (data.orgMemberships !== undefined) {
+        if (!Array.isArray(data.orgMemberships)) return { ok: false, error: 'orgMemberships 必须是数组' };
+        for (var omi=0; omi<data.orgMemberships.length; omi++) if (!data.orgMemberships[omi] || !String(data.orgMemberships[omi].character||'').trim() || !String(data.orgMemberships[omi].organization||'').trim()) return { ok:false, error:'组织任职第 '+(omi+1)+' 项缺少 character 或 organization' };
+    }
+    if (data.orgRelations !== undefined) {
+        if (!Array.isArray(data.orgRelations)) return { ok: false, error: 'orgRelations 必须是数组' };
+        for (var ori=0; ori<data.orgRelations.length; ori++) if (!data.orgRelations[ori] || !String(data.orgRelations[ori].from||'').trim() || !String(data.orgRelations[ori].to||'').trim() || data.orgRelations[ori].from===data.orgRelations[ori].to) return { ok:false, error:'组织关系第 '+(ori+1)+' 项缺少有效的 from / to' };
+    }
+    if (data.orgPositionDefs !== undefined) {
+        if (!Array.isArray(data.orgPositionDefs)) return { ok: false, error: 'orgPositionDefs 必须是数组' };
+        for (var opi=0; opi<data.orgPositionDefs.length; opi++) if (!data.orgPositionDefs[opi] || !String(data.orgPositionDefs[opi].organization||'').trim() || !String(data.orgPositionDefs[opi].name||'').trim()) return { ok:false, error:'组织职位第 '+(opi+1)+' 项缺少 organization 或 name' };
+    }
+    if (data.orgTerritoryChanges !== undefined) {
+        if (!Array.isArray(data.orgTerritoryChanges)) return { ok: false, error: 'orgTerritoryChanges 必须是数组' };
+        for (var oti=0; oti<data.orgTerritoryChanges.length; oti++) if (!data.orgTerritoryChanges[oti] || !String(data.orgTerritoryChanges[oti].territory||'').trim()) return { ok:false, error:'领地变迁第 '+(oti+1)+' 项缺少 territory' };
+    }
     if (data.timeline !== undefined) {
         if (!Array.isArray(data.timeline)) return { ok: false, error: 'timeline 必须是数组' };
         for (var ti = 0; ti < data.timeline.length; ti++) if (!data.timeline[ti] || !data.timeline[ti].event) return { ok: false, error: '事件第 ' + (ti + 1) + ' 项缺少 event' };
@@ -4158,7 +4643,7 @@ function eventImportKey(evt) {
 function sameImportValue(a, b) { return JSON.stringify(a || {}) === JSON.stringify(b || {}); }
 function buildSmartImportPlan(view, data, overwriteConflicts) {
     data = data || {};
-    var plan = { factions: [], relations: [], chars: [], timeline: [], orgMemberships: [], conflicts: [], duplicates: [], warnings: [], counts: {} };
+    var plan = { factions: [], relations: [], chars: [], timeline: [], orgRelations: [], orgMemberships: [], orgPositionDefs: [], orgTerritoryChanges: [], conflicts: [], duplicates: [], warnings: [], counts: {} };
     function mergeList(existing, incoming, keyFn, label, overwrite) {
         var out = (existing || []).slice();
         var map = {};
@@ -4192,9 +4677,18 @@ function buildSmartImportPlan(view, data, overwriteConflicts) {
     (data.relations || []).forEach(function(r) {
         if (!knownChars[normalizeImportKey(r.charA)] || !knownChars[normalizeImportKey(r.charB)]) plan.warnings.push('关系「' + r.charA + ' ↔ ' + r.charB + '」引用了当前人物档案中不存在的人物');
     });
+    var orgRelationKeys = {};
+    (view.orgRelations || []).forEach(function(r){orgRelationKeys[String(r.id || [r.from,r.to,r.type,r.startTime].join('::'))]=true;});
+    (data.orgRelations || []).forEach(function(r){var key=String(r.id || [r.from,r.to,r.type,r.startTime].join('::'));if(orgRelationKeys[key])plan.duplicates.push('组织关系：'+(r.from||'')+' ↔ '+(r.to||''));else{plan.orgRelations.push(r);orgRelationKeys[key]=true;}});
     var membershipKeys = {};
     (view.orgMemberships || []).forEach(function(r) { membershipKeys[String(r.id || [r.character,r.organization,r.type,r.startTime].join('::'))] = true; });
     (data.orgMemberships || []).forEach(function(r) { var key=String(r.id || [r.character,r.organization,r.type,r.startTime].join('::')); if(membershipKeys[key]) plan.duplicates.push('组织任职：'+(r.character||'')+' · '+(r.organization||'')); else { plan.orgMemberships.push(r); membershipKeys[key]=true; } });
+    var positionKeys = {};
+    (view.orgPositionDefs || []).forEach(function(d){positionKeys[String(d.id || [d.organization,d.name].join('::'))]=true;});
+    (data.orgPositionDefs || []).forEach(function(d){var key=String(d.id || [d.organization,d.name].join('::'));if(positionKeys[key]) plan.duplicates.push('组织职位：'+(d.organization||'')+' · '+(d.name||''));else {plan.orgPositionDefs.push(d);positionKeys[key]=true;}});
+    var territoryKeys = {};
+    (view.orgTerritoryChanges || []).forEach(function(r){territoryKeys[String(r.id || [r.territory,r.action,r.startTime,r.owner].join('::'))]=true;});
+    (data.orgTerritoryChanges || []).forEach(function(r){var key=String(r.id || [r.territory,r.action,r.startTime,r.owner].join('::'));if(territoryKeys[key])plan.duplicates.push('领地变迁：'+(r.territory||''));else{plan.orgTerritoryChanges.push(r);territoryKeys[key]=true;}});
     var eventKeys = {};
     (view.timeline || []).forEach(function(e) { eventKeys[eventImportKey(e)] = true; });
     (data.timeline || []).forEach(function(e) {
@@ -4204,7 +4698,7 @@ function buildSmartImportPlan(view, data, overwriteConflicts) {
     });
     plan.counts = {
         factions: plan.factions.length, relations: plan.relations.length,
-        chars: plan.chars.length, timeline: plan.timeline.length, orgMemberships: plan.orgMemberships.length,
+        chars: plan.chars.length, timeline: plan.timeline.length, orgRelations: plan.orgRelations.length, orgMemberships: plan.orgMemberships.length, orgPositionDefs: plan.orgPositionDefs.length, orgTerritoryChanges: plan.orgTerritoryChanges.length,
         conflicts: plan.conflicts.length, duplicates: plan.duplicates.length, warnings: plan.warnings.length
     };
     return plan;
@@ -4229,27 +4723,77 @@ function openCharView(app) {
 
 function refreshCharView(app, options) {
     options = options || {};
-    var leaves = app.workspace.getLeavesOfType(VIEW_TYPE);
-    if (leaves.length > 0) {
-        var view = leaves[0].view;
+    var leaves = app && app.workspace ? app.workspace.getLeavesOfType(VIEW_TYPE) : [];
+    leaves.forEach(function(leaf) {
+        var view = leaf && leaf.view;
         if (view && view.loadAllData) {
-            view.loadAllData(options).then(function() { view.render(); });
+            view.loadAllData(options).then(function() { view.render(); }).catch(function(error) {
+                console.error('[Relation Weaver] refresh view failed:', error);
+            });
         }
+    });
+}
+
+function rwHistoricalYearNumber(parsed) {
+    if (!parsed || parsed.sortValue === null || parsed.era === 'chapter' || parsed.era === 'unknown') return null;
+    if (parsed.era === 'modern') return parsed.year;
+    return parsed.era === 'bc' ? -Math.abs(parsed.year) : Math.abs(parsed.year);
+}
+function rwAgeAtTime(birthValue, timeValue) {
+    var birth = typeof birthValue === 'object' && birthValue ? birthValue : parseHistoricalDate(birthValue);
+    var at = typeof timeValue === 'object' && timeValue ? timeValue : parseHistoricalDate(timeValue);
+    var by = birth && birth.storyYear != null ? birth.storyYear : rwHistoricalYearNumber(birth);
+    var ty = at && at.storyYear != null ? at.storyYear : rwHistoricalYearNumber(at);
+    if (by === null || ty === null || ty < by) return null;
+    // 历史纪年没有公元0年：从公元前跨到公元后时扣除不存在的0年。
+    var age = ty - by - (by < 0 && ty >= 0 ? 1 : 0);
+    if (birth && at && birth.calendarMonthOrder != null && at.calendarMonthOrder != null && at.calendarMonthOrder < birth.calendarMonthOrder) age--;
+    else if (birth && at && birth.era === 'modern' && at.era === 'modern' && birth.month && birth.day && at.month && at.day && birth.calendarMonthOrder == null) {
+        if (at.month < birth.month || (at.month === birth.month && at.day < birth.day)) age--;
     }
+    return age >= 0 ? age : null;
+}
+function rwAgeLabel(birthValue, timeValue) {
+    var age = rwAgeAtTime(birthValue, timeValue);
+    return age === null ? '' : '约' + age + '岁';
 }
 
 function getCharLifecycle(view, char) {
-    var settings = view.plugin.settings;
+    var settings = view.plugin.settings || {};
     var birth = view.getFieldValue(char, settings.birthFieldNames || '出生,出生时间');
     var death = view.getFieldValue(char, settings.deathFieldNames || '死亡,死亡时间');
-    var firstAppear = view.getFieldValue(char, settings.firstAppearFieldName || '首次出场');
+    // 兼容不同人物档案模板的字段命名；优先使用用户配置字段，再依次回退。
+    var firstAppearFields = [];
+    [settings.firstAppearFieldName, '首次出场', '出场时间', '首次出场章节', '出场章节'].forEach(function(field){
+        String(field || '').split(',').forEach(function(name){ name = name.trim(); if (name && firstAppearFields.indexOf(name) < 0) firstAppearFields.push(name); });
+    });
+    var firstAppear = view.getFieldValue(char, firstAppearFields);
+    var firstAppearChapter = rwResolveChapterRecord(settings, firstAppear);
+    var firstAppearStoryTime = rwResolveStoryTimeReference(settings, firstAppear);
+    var firstAppearParsed = parseHistoricalDate(firstAppearStoryTime);
+    // 如果时间线章节库尚未为该章设置故事时间，不把章节序号伪装成生命年份节点。
+    if (firstAppearParsed && firstAppearParsed.era === 'chapter') firstAppearParsed = null;
+    var firstAppearChapterLabel = '';
+    if (firstAppearChapter) {
+        var chapterNo = firstAppearChapter.chapterNumber;
+        if (chapterNo === null || chapterNo === undefined || chapterNo === '') chapterNo = rwExtractChapterNumber(firstAppearChapter.name || firstAppearChapter.path);
+        firstAppearChapterLabel = chapterNo !== null && chapterNo !== undefined && chapterNo !== '' ? '第' + chapterNo + '章' : String(firstAppearChapter.name || '').replace(/\.md$/i, '');
+    }
+    var firstAppearDisplay = firstAppearStoryTime;
+    if (firstAppearDisplay && firstAppearChapterLabel) firstAppearDisplay += ' · ' + firstAppearChapterLabel;
     return {
         birth: birth,
         death: death,
-        firstAppear: firstAppear,
+        firstAppear: firstAppearStoryTime,
+        firstAppearDisplay: firstAppearDisplay,
+        firstAppearChapter: firstAppearChapter,
+        firstAppearChapterLabel: firstAppearChapterLabel,
+        firstAppearReference: firstAppear,
         birthParsed: parseHistoricalDate(birth),
         deathParsed: parseHistoricalDate(death),
-        firstAppearParsed: parseHistoricalDate(firstAppear)
+        firstAppearParsed: firstAppearParsed,
+        ageAtFirstAppear: rwAgeAtTime(birth, firstAppearStoryTime),
+        lifespan: rwAgeAtTime(birth, death)
     };
 }
 // ========== 视图 ==========
@@ -4258,12 +4802,16 @@ var MyView = /** @class */ (function (_super) {
     function MyView(leaf, plugin) {
         var _this = Reflect.construct(_super, [leaf], MyView);
         _this.plugin = plugin;
+        // 当前活动视图供 Markdown 写入辅助函数同步维护撤销快照缓存。
+        plugin._rwActiveView = _this;
         _this.chars = [];
         _this.timeline = [];
         _this.factions = [];
         _this.relations = [];
         _this.orgRelations = [];
         _this.orgMemberships = [];
+        _this.orgPositionDefs = [];
+        _this.orgTerritoryChanges = [];
         _this._tabHistory = [];
         _this.tab = getHomeTab(plugin);
         _this.heatmapMode = '集中';        // '集中' | '单人' | '多人'
@@ -4296,13 +4844,30 @@ var MyView = /** @class */ (function (_super) {
         _this._timelineExpandedYears = {};
         _this._timelineExpandedMonths = {};
         _this._globalSearchText = '';
+        var wb = (_this.plugin && _this.plugin.settings && _this.plugin.settings.rwWorkbenchLayout) || {};
+        _this._workspaceSplit = !!wb.enabled;
+        _this._workspaceRightTab = wb.rightTab || 'timeline';
+        _this._workspaceSplitRatio = wb.ratio || 50;
+        _this._workspaceLayoutMode = wb.mode || 'fixed';
+        _this._workspaceWindowState = wb.windows || {};
         return _this;
     }
     Object.defineProperty(MyView.prototype, 'tab', {
         configurable: true,
-        get: function () { return this._tab || getHomeTab(this.plugin); },
+        get: function () {
+            if (this._rwAppFloatActiveId && !this._rwRenderingFloatWindow && this._rwAppFloatLayer) {
+                var activeWindow = rwFindAppFloatWindow(this, this._rwAppFloatActiveId);
+                if (activeWindow && activeWindow.tab) return activeWindow.tab;
+            }
+            return this._tab || getHomeTab(this.plugin);
+        },
         set: function (next) {
             next = String(next || getHomeTab(this.plugin));
+            if (this._rwAppFloatActiveId && !this._rwRenderingFloatWindow && this._rwAppFloatLayer) {
+                var activeWindow = rwFindAppFloatWindow(this, this._rwAppFloatActiveId);
+                if (activeWindow) { activeWindow.tab = next; return; }
+            }
+            if (this._workspaceSplit && this._workspaceActivePane === 'right' && !this._workspaceRenderingPane) { this._workspaceRightTab = next; return; }
             var current = this._tab || '';
             if (current && current !== next && !this._suppressTabHistory) {
                 this._tabHistory = this._tabHistory || [];
@@ -4322,6 +4887,428 @@ var MyView = /** @class */ (function (_super) {
     MyView.prototype.getDisplayText = function () { return getViewTitle(this.plugin); };
     MyView.prototype.getIcon = function () { return 'users'; };
 
+    // 应用级自由工作台：浮动层挂载到 Obsidian .app-container，而不是插件侧栏。
+    // 每个窗口复用同一个 MyView 实例与现有 renderCurrentTab 数据源，不创建第二份图谱模型。
+    var RW_FLOAT_STATE_KEYS = [
+        'searchText','expandedFactions','selectedTag','relationFilterType','relationFilterIntimacy','relationSortBy',
+        'relationViewMode','expandedRelationGroups','lifecycleSortBy','lifecycleSortOrder','lifecycleOnlyDated',
+        '_plotLineFilter','_timelineExpandedYears','_timelineExpandedMonths','_globalSearchText',
+        'heatmapMode','heatmapGranularity','heatmapYearRange','heatmapPage','heatmapPageSize','heatmapSearchText',
+        'heatmapFilterType','heatmapSelectedPeople','heatmapSelectedPerson','_activeRelationGraphTab','_orgGraphTime','_graphLayoutMode','_graphNodeScale','_graphLayoutSeed'
+    ];
+    function rwCloneFloatValue(value) {
+        try { return value === undefined ? undefined : JSON.parse(JSON.stringify(value)); }
+        catch (e) { return value; }
+    }
+    function rwGetAppFloatState(view) {
+        if (!view.plugin.settings.rwAppFloatingWorkbench || typeof view.plugin.settings.rwAppFloatingWorkbench !== 'object') {
+            view.plugin.settings.rwAppFloatingWorkbench = { windows: [], nextId: 1, mode: 'mixed' };
+        }
+        var state = view.plugin.settings.rwAppFloatingWorkbench;
+        if (!Array.isArray(state.windows)) state.windows = [];
+        if (!Number.isFinite(Number(state.nextId))) state.nextId = 1;
+        if (!state.mode) state.mode = 'mixed';
+        return state;
+    }
+    function rwFindAppFloatWindow(view, id) {
+        var state = rwGetAppFloatState(view);
+        return state.windows.find(function (w) { return w && w.id === id; }) || null;
+    }
+    function rwCaptureFloatState(view, win) {
+        if (!win) return;
+        win.moduleState = win.moduleState || {};
+        RW_FLOAT_STATE_KEYS.forEach(function (key) { try { win.moduleState[key] = rwCloneFloatValue(view[key]); } catch (e) {} });
+    }
+    function rwApplyFloatState(view, win) {
+        if (!win || !win.moduleState) return;
+        RW_FLOAT_STATE_KEYS.forEach(function (key) {
+            if (Object.prototype.hasOwnProperty.call(win.moduleState, key)) view[key] = rwCloneFloatValue(win.moduleState[key]);
+        });
+    }
+    function rwSaveAppFloatState(view) {
+        if (!view || !view.plugin || !view.plugin.settings) return;
+        var state = rwGetAppFloatState(view);
+        if (view._rwAppFloatSaveTimer) clearTimeout(view._rwAppFloatSaveTimer);
+        view._rwAppFloatSaveTimer = setTimeout(function () {
+            view._rwAppFloatSaveTimer = null;
+            if (view.plugin && typeof view.plugin.saveSettings === 'function') view.plugin.saveSettings().catch(function (e) { console.warn('应用级浮动工作台保存失败', e); });
+        }, 220);
+    }
+    function rwClampAppFloatWindow(win) {
+        var vw = Math.max(360, window.innerWidth || document.documentElement.clientWidth || 1200);
+        var vh = Math.max(300, window.innerHeight || document.documentElement.clientHeight || 800);
+        var safeTop = (vw <= 720 ? 68 : 58);
+        var w = Math.max(300, Math.min(Number(win.w) || 620, vw - 16));
+        var h = Math.max(220, Math.min(Number(win.h) || 560, vh - safeTop - 12));
+        win.w = w; win.h = h;
+        win.x = Math.max(0, Math.min(Number(win.x) || 0, Math.max(0, vw - w - 8)));
+        win.y = Math.max(safeTop, Math.min(Number(win.y) || safeTop, Math.max(safeTop, vh - h - 8)));
+    }
+    function rwSetAppFloatDocked(win, docked) {
+        if (!win) return;
+        if (docked && !win.docked) win.floatRestore = { x: win.x, y: win.y, w: win.w, h: win.h };
+        if (!docked && win.docked && win.floatRestore) {
+            win.x = win.floatRestore.x; win.y = win.floatRestore.y; win.w = win.floatRestore.w; win.h = win.floatRestore.h;
+        }
+        win.docked = !!docked;
+    }
+    function rwApplyAppFloatLayout(view) {
+        var state = rwGetAppFloatState(view);
+        var windows = state.windows.filter(function (w) { return w && !w.minimized; });
+        var docked = windows.filter(function (w) { return !!w.docked && !w.maximized; });
+        if (docked.length > 4) { docked.slice(4).forEach(function (w) { w.docked = false; }); docked = docked.slice(0, 4); }
+        var vw = Math.max(360, window.innerWidth || 1200), vh = Math.max(300, window.innerHeight || 800);
+        var mixedSingleDock = state.mode === 'mixed' && docked.length === 1;
+        var cols = mixedSingleDock ? 1 : Math.min(2, Math.max(1, docked.length)), rows = mixedSingleDock ? 1 : Math.ceil(docked.length / cols);
+        var cellW = mixedSingleDock ? (vw - 16) * .46 : (vw - 16) / cols;
+        var cellH = (vh - 70) / Math.max(1, rows);
+        docked.forEach(function (win, i) {
+            var runtime = view._rwAppFloatRuntime && view._rwAppFloatRuntime[win.id];
+            if (!runtime || !runtime.el) return;
+            win.x = 8 + (i % cols) * cellW; win.y = 58 + Math.floor(i / cols) * cellH;
+            win.w = Math.max(300, cellW - 8); win.h = Math.max(220, cellH - 8);
+            runtime.el.classList.add('is-docked');
+            runtime.el.style.left = win.x + 'px'; runtime.el.style.top = win.y + 'px';
+            runtime.el.style.width = win.w + 'px'; runtime.el.style.height = win.h + 'px';
+        });
+        windows.filter(function (w) { return !w.docked || w.maximized; }).forEach(function (win, i) {
+            var runtime = view._rwAppFloatRuntime && view._rwAppFloatRuntime[win.id];
+            if (!runtime || !runtime.el) return;
+            if (mixedSingleDock && !win.userMoved && !win.userSized) {
+                win.x = docked[0].x + docked[0].w + 8; win.y = 64 + i * 28;
+                win.w = Math.max(300, vw - win.x - 8); win.h = Math.max(220, vh - win.y - 72);
+            }
+            runtime.el.classList.remove('is-docked');
+            runtime.el.style.left = win.x + 'px'; runtime.el.style.top = win.y + 'px';
+            runtime.el.style.width = win.w + 'px'; runtime.el.style.height = win.h + 'px';
+        });
+    }
+    function rwEnsureAppFloatLayer(view) {
+        if (view._rwAppFloatLayer && view._rwAppFloatLayer.isConnected) return view._rwAppFloatLayer;
+        if (view.plugin && view.plugin._rwAppFloatLayer && view.plugin._rwAppFloatLayer.isConnected) {
+            view._rwAppFloatLayer = view.plugin._rwAppFloatLayer;
+            return view._rwAppFloatLayer;
+        }
+        var host = document.querySelector('.app-container') || document.body;
+        var layer = document.createElement('div');
+        layer.className = 'rw-app-float-layer';
+        layer.setAttribute('data-rw-plugin', view.plugin.manifest.id);
+        host.appendChild(layer);
+        view._rwAppFloatLayer = layer;
+        view.plugin._rwAppFloatLayer = layer;
+        view.plugin._rwAppFloatOwner = view;
+        var toolbar = layer.createDiv({ cls: 'rw-app-float-toolbar my-char-view-root' });
+        toolbar.setAttribute('role','toolbar');
+        toolbar.setAttribute('aria-label','Relation Weaver 自由工作台工具栏');
+        toolbar.createEl('strong', { text: 'RW', attr: { 'aria-label': 'Relation Weaver 自由工作台' } });
+        var moduleSelect = toolbar.createEl('select', { cls: 'rw-app-float-module-select', attr: { 'aria-label': '选择模块' } });
+        moduleSelect.title = '选择要打开的模块';
+        getVisibleTabs(view.plugin).forEach(function (t) { var shortLabel = String(t.label || t.id); if (shortLabel.length > 5) shortLabel = shortLabel.slice(0, 4) + '…'; var op = moduleSelect.createEl('option', { text: shortLabel, value: t.id }); op.title = String(t.label || t.id); });
+        var openBtn = toolbar.createEl('button', { text: '＋', cls: 'my-char-btn my-char-btn-sm rw-app-float-action', attr: { 'aria-label': '打开窗口' } });
+        openBtn.title = '打开所选模块窗口';
+        openBtn.addEventListener('click', function () { rwOpenAppFloatWindow(view, moduleSelect.value); });
+        var modeSelect = toolbar.createEl('select', { cls: 'rw-app-float-mode-select', attr: { 'aria-label': '布局模式' } });
+        modeSelect.title = '切换固定、浮动或混合布局';
+        [['fixed','固定'],['float','浮动'],['mixed','混合']].forEach(function (x) { modeSelect.createEl('option', { text: x[1], value: x[0] }); });
+        modeSelect.value = rwGetAppFloatState(view).mode;
+        modeSelect.addEventListener('change', function () {
+            var state = rwGetAppFloatState(view); state.mode = modeSelect.value;
+            state.windows.forEach(function (w, i) { rwSetAppFloatDocked(w, state.mode === 'fixed' ? true : (state.mode === 'mixed' ? i === 0 : false)); });
+            rwApplyAppFloatLayout(view); rwSaveAppFloatState(view);
+        });
+        var sceneSelect = toolbar.createEl('select', { cls: 'rw-app-float-scene-select', attr: { 'aria-label': '布局预设' } });
+        sceneSelect.title = '快速打开常用模块组合';
+        [['','预设'],['people','人物'],['history','编年'],['faction','势力'],['chapter','章节']].forEach(function (x) { sceneSelect.createEl('option', { text: x[1], value: x[0] }); });
+        sceneSelect.addEventListener('change', function () {
+            var scenes = { people: ['chars','graph'], history: ['timeline','lifecycle'], faction: ['factions','graph'], chapter: ['chapterStatus','continuity'] };
+            var pair = scenes[sceneSelect.value]; if (!pair) return;
+            var state = rwGetAppFloatState(view);
+            pair.forEach(function (tab, i) { rwOpenAppFloatWindow(view, tab, { x: 70 + i * 390, y: 86 + i * 46, w: 590, h: 650 }); });
+            sceneSelect.value = '';
+        });
+        var resetBtn = toolbar.createEl('button', { text: '↺', cls: 'my-char-btn-ghost my-char-btn-sm rw-app-float-action', attr: { 'aria-label': '恢复默认布局' } });
+        resetBtn.title = '恢复默认布局';
+        resetBtn.addEventListener('click', function () {
+            var state = rwGetAppFloatState(view); state.mode = 'mixed';
+            state.windows.forEach(function (w, i) { w.docked = i === 0; w.minimized = false; w.maximized = false; w.pinned = false; w.x = 80 + i * 34; w.y = 90 + i * 34; w.w = 650; w.h = 620; w.z = 31 + i; w.floatRestore = { x:w.x, y:w.y, w:w.w, h:w.h }; var rt=view._rwAppFloatRuntime&&view._rwAppFloatRuntime[w.id]; if(rt&&rt.el){rt.el.classList.remove('is-minimized');rt.el.classList.remove('is-docked');var maxBtn=rt.el.querySelector('[aria-label="最大化"]');if(maxBtn)maxBtn.textContent='□';var minBtn=rt.el.querySelector('[aria-label="最小化"]');if(minBtn)minBtn.textContent='−';var pinBtn=rt.el.querySelector('.rw-app-float-window-btn.is-active');if(pinBtn){pinBtn.classList.remove('is-active');pinBtn.textContent='置顶';}var dockBtn=rt.el.querySelector('.rw-app-float-dock');if(dockBtn)dockBtn.textContent=w.docked?'浮动':'固定';} });
+            layer.querySelectorAll('.rw-app-float-window').forEach(function (el) { el.classList.remove('is-minimized'); });
+            var mode = toolbar.querySelector('.rw-app-float-mode-select'); if (mode) mode.value = 'mixed';
+            rwApplyAppFloatLayout(view); rwSaveAppFloatState(view);
+        });
+        var hideBtn = toolbar.createEl('button', { text: '‹', cls: 'my-char-btn-ghost my-char-btn-sm rw-app-float-action', attr: { 'aria-label': '收起工具栏' } });
+        hideBtn.setAttribute('aria-expanded','true');
+        hideBtn.title = '收起/展开工具栏';
+        hideBtn.addEventListener('click', function () { toolbar.classList.toggle('is-collapsed'); var collapsed=toolbar.classList.contains('is-collapsed'); hideBtn.textContent=collapsed?'›':'‹'; hideBtn.setAttribute('aria-label',collapsed?'展开工具栏':'收起工具栏'); hideBtn.setAttribute('aria-expanded',collapsed?'false':'true'); });
+        layer._rwToolbar = toolbar;
+        // 竖向工具栏以标题作为拖动把手，整组控件可在应用工作区内移动。
+        var toolbarDrag = null;
+        var toolbarHandle = toolbar.querySelector('strong');
+        if (toolbarHandle) {
+            toolbarHandle.title = '拖动此处移动工具栏';
+            toolbarHandle.style.cursor = 'grab';
+            toolbarHandle.style.touchAction = 'none';
+            toolbarHandle.addEventListener('pointerdown', function (ev) {
+                if (ev.button !== undefined && ev.button !== 0) return;
+                var rect = toolbar.getBoundingClientRect();
+                toolbarDrag = { x: ev.clientX, y: ev.clientY, left: rect.left, top: rect.top };
+                try { toolbarHandle.setPointerCapture(ev.pointerId); } catch (e) {}
+                ev.preventDefault();
+            });
+            toolbarHandle.addEventListener('pointermove', function (ev) {
+                if (!toolbarDrag) return;
+                var left = Math.max(4, Math.min(window.innerWidth - toolbar.offsetWidth - 4, toolbarDrag.left + ev.clientX - toolbarDrag.x));
+                var top = Math.max(4, Math.min(window.innerHeight - toolbar.offsetHeight - 4, toolbarDrag.top + ev.clientY - toolbarDrag.y));
+                toolbar.style.left = left + 'px'; toolbar.style.top = top + 'px'; toolbar.style.right = 'auto'; toolbar.style.transform = 'none';
+            });
+            var stopToolbarDrag = function () { toolbarDrag = null; };
+            toolbarHandle.addEventListener('pointerup', stopToolbarDrag);
+            toolbarHandle.addEventListener('pointercancel', stopToolbarDrag);
+        }
+        layer._rwResizeHandler = function () {
+            var state = rwGetAppFloatState(view);
+            state.windows.forEach(function (win) {
+                if (win.docked && !win.maximized) return;
+                if (win.maximized) { win.x=8; win.y=58; win.w=Math.max(320,(window.innerWidth||1200)-16); win.h=Math.max(260,(window.innerHeight||800)-70); }
+                else rwClampAppFloatWindow(win);
+                var runtime = view._rwAppFloatRuntime && view._rwAppFloatRuntime[win.id];
+                if (runtime && runtime.el) { runtime.el.style.left=win.x+'px';runtime.el.style.top=win.y+'px';runtime.el.style.width=win.w+'px';runtime.el.style.height=win.h+'px'; }
+            });
+            rwApplyAppFloatLayout(view);
+        };
+        window.addEventListener('resize', layer._rwResizeHandler);
+        layer.addEventListener('pointerdown', function (ev) {
+            var winEl = ev.target.closest && ev.target.closest('.rw-app-float-window');
+            if (winEl) {
+                var id = winEl.getAttribute('data-rw-window-id');
+                rwActivateAppFloatWindow(view, id);
+            }
+        }, true);
+        return layer;
+    }
+    // 最后一个浮动窗口关闭时同步销毁应用级浮动层，避免工具栏孤立残留。
+    function rwCleanupEmptyAppFloatLayer(view) {
+        if (!view || !view._rwAppFloatLayer) return;
+        var layer = view._rwAppFloatLayer;
+        var state = rwGetAppFloatState(view);
+        if (state.windows && state.windows.length) return;
+        if (layer._rwResizeHandler) window.removeEventListener('resize', layer._rwResizeHandler);
+        layer.remove();
+        view._rwAppFloatLayer = null;
+        view._rwAppFloatActiveId = null;
+        if (view.plugin) {
+            if (view.plugin._rwAppFloatLayer === layer) view.plugin._rwAppFloatLayer = null;
+            if (view.plugin._rwAppFloatOwner === view) view.plugin._rwAppFloatOwner = null;
+        }
+    }
+    function rwActivateAppFloatWindow(view, id) {
+        var previous = rwFindAppFloatWindow(view, view._rwAppFloatActiveId);
+        if (previous && previous.id !== id) rwCaptureFloatState(view, previous);
+        var next = rwFindAppFloatWindow(view, id);
+        if (!next) return;
+        view._rwAppFloatActiveId = id;
+        rwApplyFloatState(view, next);
+        view._tab = next.tab;
+        var layer = rwEnsureAppFloatLayer(view);
+        var state = rwGetAppFloatState(view);
+        var z = Math.max(30, Number(next.z) || 30);
+        var maxZ = z;
+        state.windows.forEach(function (w) { maxZ = Math.max(maxZ, Number(w.z) || 30); });
+        // 长时间频繁切窗时压缩 z 序号，避免窗口层级无限增长。
+        if (maxZ > 800) {
+            state.windows.slice().sort(function(a,b){return (Number(a.z)||30)-(Number(b.z)||30);}).forEach(function(w,index){w.z=31+index;var runtime=view._rwAppFloatRuntime&&view._rwAppFloatRuntime[w.id];if(runtime&&runtime.el)runtime.el.style.zIndex=String(w.z);});
+            maxZ=31+state.windows.length;
+        }
+        next.z = Math.max(z, maxZ + 1);
+        var el = layer.querySelector('[data-rw-window-id="' + id + '"]');
+        if (el) el.style.zIndex = String(next.z);
+        if ((window.innerWidth || 1200) <= 720) {
+            layer.querySelectorAll('.rw-app-float-window').forEach(function (node) { node.classList.toggle('is-mobile-active', node.getAttribute('data-rw-window-id') === id); });
+        }
+        rwSaveAppFloatState(view);
+    }
+    function rwRenderAppFloatWindow(view, win) {
+        var runtime = view._rwAppFloatRuntime && win ? view._rwAppFloatRuntime[win.id] : null;
+        if (!win || !runtime || !runtime.body || !runtime.body.isConnected) return;
+        var prevTab = view._tab;
+        var prevRendering = view._rwRenderingFloatWindow;
+        view._rwRenderingFloatWindow = true;
+        view._tab = win.tab;
+        try {
+            runtime.body.empty();
+            view.renderCurrentTab(runtime.body);
+            rwCaptureFloatState(view, win);
+        } catch (e) {
+            console.error('应用级浮动窗口渲染失败：' + win.tab, e);
+            runtime.body.createEl('div', { text: '模块加载失败：' + (e && e.message ? e.message : e), cls: 'my-char-view-empty' });
+        } finally {
+            view._tab = prevTab;
+            view._rwRenderingFloatWindow = prevRendering;
+        }
+    }
+    function rwRenderAllAppFloatWindows(view) {
+        var state = rwGetAppFloatState(view);
+        var active = rwFindAppFloatWindow(view, view._rwAppFloatActiveId);
+        if (active) rwCaptureFloatState(view, active);
+        var prevTab = view._tab, prevRendering = view._rwRenderingFloatWindow;
+        state.windows.forEach(function (win) {
+            var runtime = view._rwAppFloatRuntime && win ? view._rwAppFloatRuntime[win.id] : null;
+            if (!win || win.minimized || win.tab === 'graph' || !runtime || !runtime.body || !runtime.body.isConnected) return;
+            rwApplyFloatState(view, win);
+            view._rwRenderingFloatWindow = true;
+            view._tab = win.tab;
+            try { var savedScrollTop=Number(win.scrollTop)||runtime.body.scrollTop||0, savedScrollLeft=Number(win.scrollLeft)||runtime.body.scrollLeft||0; runtime.body.empty(); view.renderCurrentTab(runtime.body); runtime.body.scrollTop=savedScrollTop; runtime.body.scrollLeft=savedScrollLeft; rwCaptureFloatState(view, win); }
+            catch (e) { console.error('浮动模块刷新失败：' + win.tab, e); }
+        });
+        if (active) { rwApplyFloatState(view, active); view._rwAppFloatActiveId = active.id; }
+        view._tab = prevTab;
+        view._rwRenderingFloatWindow = prevRendering;
+    }
+    function rwOpenAppFloatWindow(view, tab, geometry) {
+        var layer = rwEnsureAppFloatLayer(view);
+        var state = rwGetAppFloatState(view);
+        var validTabs = getVisibleTabs(view.plugin);
+        // 图谱是同一套活动数据源：只允许一个 graph 窗口，重复请求直接聚焦已有窗口。
+        if (tab === 'graph') {
+            var existingGraph = state.windows.find(function (item) { return item && item.tab === 'graph'; });
+            if (existingGraph) {
+                if (existingGraph.minimized) { existingGraph.minimized = false; var existingRuntime=view._rwAppFloatRuntime&&view._rwAppFloatRuntime[existingGraph.id]; if(existingRuntime&&existingRuntime.el){existingRuntime.el.classList.remove('is-minimized');var existingMin=existingRuntime.el.querySelector('[aria-label="最小化"]');if(existingMin)existingMin.textContent='−';} }
+                rwActivateAppFloatWindow(view, existingGraph.id);
+                rwApplyAppFloatLayout(view);
+                return existingGraph;
+            }
+        }
+        if (!validTabs.some(function (t) { return t.id === tab; })) tab = validTabs[0] ? validTabs[0].id : 'desk';
+        if (state.windows.length >= 10) { new obsidian.Notice('自由工作台最多同时打开 10 个窗口'); return null; }
+        var suppliedId = geometry && geometry.id;
+        var n = suppliedId ? state.nextId : state.nextId++;
+        var win = Object.assign({ id: 'rwf-' + n, tab: tab, x: 80 + (state.windows.length % 5) * 34, y: 90 + (state.windows.length % 5) * 34, w: 650, h: 620, z: 31 + n, minimized: false, maximized: false, pinned: false, moduleState: {} }, geometry || {});
+        win.id = suppliedId || ('rwf-' + n); win.tab = tab;
+        if (!(geometry && Object.prototype.hasOwnProperty.call(geometry, 'docked'))) {
+            rwSetAppFloatDocked(win, state.mode === 'fixed' || (state.mode === 'mixed' && state.windows.length === 0));
+        }
+        rwClampAppFloatWindow(win);
+        state.windows.push(win);
+        var el = layer.createDiv({ cls: 'rw-app-float-window my-char-view-root' });
+        el.setAttribute('data-rw-window-id', win.id);
+        el.style.left = win.x + 'px'; el.style.top = win.y + 'px'; el.style.width = win.w + 'px'; el.style.height = win.h + 'px'; el.style.zIndex = String(win.z);
+        var head = el.createDiv({ cls: 'rw-app-float-window-head' });
+        var title = head.createEl('strong', { text: (validTabs.find(function (t) { return t.id === tab; }) || {}).label || tab, cls: 'rw-app-float-window-title' });
+        var select = head.createEl('select', { cls: 'rw-app-float-window-select' });
+        validTabs.forEach(function (t) { select.createEl('option', { text: t.label, value: t.id }); }); select.value = tab;
+        select.addEventListener('change', function () {
+            var requestedTab=select.value;
+            if(requestedTab==='graph'){
+                var otherGraph=state.windows.find(function(item){return item&&item.id!==win.id&&item.tab==='graph';});
+                if(otherGraph){select.value=win.tab;if(otherGraph.minimized){otherGraph.minimized=false;var graphRuntime=view._rwAppFloatRuntime&&view._rwAppFloatRuntime[otherGraph.id];if(graphRuntime&&graphRuntime.el){graphRuntime.el.classList.remove('is-minimized');var graphMin=graphRuntime.el.querySelector('[aria-label="最小化"]');if(graphMin)graphMin.textContent='−';}}rwActivateAppFloatWindow(view,otherGraph.id);rwApplyAppFloatLayout(view);new obsidian.Notice('图谱已在另一个窗口打开，已切换到现有图谱窗口');return;}
+            }
+            rwActivateAppFloatWindow(view, win.id); win.tab = requestedTab; title.textContent = (validTabs.find(function (t) { return t.id === win.tab; }) || {}).label || win.tab; rwRenderAppFloatWindow(view, win); rwRenderAllAppFloatWindows(view); rwSaveAppFloatState(view);
+        });
+        var refreshWindow = head.createEl('button', { text: '刷新', cls: 'my-char-btn-ghost my-char-btn-xs rw-app-float-window-btn' });
+        refreshWindow.title = '重新读取当前模块显示；图谱窗口刷新会重新计算画布';
+        refreshWindow.addEventListener('click', function (ev) { ev.stopPropagation(); rwActivateAppFloatWindow(view, win.id); rwRenderAppFloatWindow(view, win); rwSaveAppFloatState(view); });
+        var dock = head.createEl('button', { text: win.docked ? '浮动' : '固定', cls: 'my-char-btn-ghost my-char-btn-xs rw-app-float-window-btn rw-app-float-dock' });
+        dock.addEventListener('click', function (ev) { ev.stopPropagation(); rwSetAppFloatDocked(win, !win.docked); state.mode = 'mixed'; if (layer._rwToolbar) { var ms=layer._rwToolbar.querySelector('.rw-app-float-mode-select'); if(ms)ms.value='mixed'; } dock.textContent = win.docked ? '浮动' : '固定'; rwApplyAppFloatLayout(view); rwSaveAppFloatState(view); });
+        var pin = head.createEl('button', { text: '置顶', cls: 'my-char-btn-ghost my-char-btn-xs rw-app-float-window-btn' });
+        pin.addEventListener('click', function (ev) { ev.stopPropagation(); win.pinned = !win.pinned; pin.classList.toggle('is-active', win.pinned); pin.textContent = win.pinned ? '取消置顶' : '置顶'; if (win.pinned) { win.z = 900; el.style.zIndex = '900'; } else { win.z = Math.max.apply(null, state.windows.map(function (w) { return Number(w.z) || 30; })) + 1; el.style.zIndex = String(win.z); } rwSaveAppFloatState(view); });
+        var min = head.createEl('button', { text: '−', cls: 'my-char-btn-ghost my-char-btn-xs rw-app-float-window-btn', attr: { 'aria-label': '最小化' } });
+        min.addEventListener('click', function (ev) { ev.stopPropagation(); if (!win.minimized) rwCaptureFloatState(view, win); win.minimized = !win.minimized; el.classList.toggle('is-minimized', win.minimized); min.textContent = win.minimized ? '□' : '−'; rwApplyAppFloatLayout(view); if (!win.minimized) { rwActivateAppFloatWindow(view, win.id); if (win.tab !== 'graph') rwRenderAppFloatWindow(view, win); rwRenderAllAppFloatWindows(view); } rwSaveAppFloatState(view); });
+        var max = head.createEl('button', { text: '□', cls: 'my-char-btn-ghost my-char-btn-xs rw-app-float-window-btn', attr: { 'aria-label': '最大化' } });
+        max.addEventListener('click', function (ev) { ev.stopPropagation(); if (!win.maximized) { win.restore = { x: win.x, y: win.y, w: win.w, h: win.h, docked: win.docked }; win.docked = false; el.classList.remove('is-docked'); win.x = 8; win.y = 58; win.w = Math.max(320, window.innerWidth - 16); win.h = Math.max(260, window.innerHeight - 70); win.maximized = true; } else { Object.assign(win, win.restore || {}); win.maximized = false; } rwClampAppFloatWindow(win); el.style.left = win.x + 'px'; el.style.top = win.y + 'px'; el.style.width = win.w + 'px'; el.style.height = win.h + 'px'; el.classList.toggle('is-docked', !!win.docked); max.textContent = win.maximized ? '❐' : '□'; if (!win.maximized) rwApplyAppFloatLayout(view); rwSaveAppFloatState(view); });
+        var close = head.createEl('button', { text: '×', cls: 'my-char-btn-ghost my-char-btn-xs rw-app-float-window-btn rw-app-float-close', attr: { 'aria-label': '关闭窗口' } });
+        close.addEventListener('click', function (ev) { ev.stopPropagation(); if (view._rwGraphFocusRestore && view._rwGraphFocusWindowId === win.id) view._rwGraphFocusRestore(); var idx = state.windows.findIndex(function (w) { return w.id === win.id; }); if (idx >= 0) state.windows.splice(idx, 1); if (view._rwAppFloatRuntime && view._rwAppFloatRuntime[win.id]) { var rt=view._rwAppFloatRuntime[win.id]; if (rt.resizeObserver) rt.resizeObserver.disconnect(); delete view._rwAppFloatRuntime[win.id]; } el.remove(); rwApplyAppFloatLayout(view); if (view._rwAppFloatActiveId === win.id) { view._rwAppFloatActiveId = state.windows.length ? state.windows[state.windows.length - 1].id : null; var active = rwFindAppFloatWindow(view, view._rwAppFloatActiveId); if (active) rwApplyFloatState(view, active); } rwSaveAppFloatState(view); rwCleanupEmptyAppFloatLayer(view); });
+        var body = el.createDiv({ cls: 'rw-app-float-window-body' });
+        ['n','s','e','w','ne','nw','se','sw'].forEach(function (direction) {
+            var handle = el.createDiv({ cls: 'rw-app-float-resize-handle rw-resize-' + direction });
+            handle.addEventListener('pointerdown', function (ev) {
+                if (win.maximized || win.docked || (window.innerWidth || 1200) <= 720 || ev.button !== 0) return;
+                ev.preventDefault(); ev.stopPropagation();
+                var sx=ev.clientX, sy=ev.clientY, ox=win.x, oy=win.y, ow=win.w, oh=win.h;
+                handle.setPointerCapture(ev.pointerId);
+                function move(e) {
+                    var dx=e.clientX-sx, dy=e.clientY-sy, minW=300, minH=220;
+                    if (direction.indexOf('e')>=0) win.w=Math.max(minW,ow+dx);
+                    if (direction.indexOf('s')>=0) win.h=Math.max(minH,oh+dy);
+                    if (direction.indexOf('w')>=0) { win.w=Math.max(minW,ow-dx); win.x=ox+(ow-win.w); }
+                    if (direction.indexOf('n')>=0) { win.h=Math.max(minH,oh-dy); win.y=oy+(oh-win.h); }
+                    rwClampAppFloatWindow(win);
+                    el.style.left=win.x+'px';el.style.top=win.y+'px';el.style.width=win.w+'px';el.style.height=win.h+'px';
+                }
+                function end() { win.userSized=true; handle.removeEventListener('pointermove',move);handle.removeEventListener('pointerup',end);handle.removeEventListener('pointercancel',end);rwSaveAppFloatState(view); }
+                handle.addEventListener('pointermove',move);handle.addEventListener('pointerup',end);handle.addEventListener('pointercancel',end);
+            });
+        });
+        body.addEventListener('input', function () { if (view._rwAppFloatActiveId === win.id) { rwCaptureFloatState(view, win); rwSaveAppFloatState(view); } }, true);
+        body.addEventListener('change', function () { if (view._rwAppFloatActiveId === win.id) { rwCaptureFloatState(view, win); rwSaveAppFloatState(view); } }, true);
+        body.addEventListener('scroll', function () { if (view._rwAppFloatActiveId === win.id) { win.scrollTop = body.scrollTop; win.scrollLeft = body.scrollLeft; rwSaveAppFloatState(view); } }, { passive: true });
+        view._rwAppFloatRuntime = view._rwAppFloatRuntime || {};
+        view._rwAppFloatRuntime[win.id] = { el: el, body: body, resizeObserver: null };
+        body.scrollTop = Number(win.scrollTop) || 0; body.scrollLeft = Number(win.scrollLeft) || 0;
+        if (win.minimized) { el.classList.add('is-minimized'); min.textContent = '□'; }
+        dock.textContent = win.docked ? '浮动' : '固定';
+        if (win.docked) el.classList.add('is-docked');
+        if (win.pinned) { pin.classList.add('is-active'); pin.textContent = '取消置顶'; }
+        if (win.maximized) max.textContent = '❐';
+        var dragging = false, startX = 0, startY = 0, baseX = 0, baseY = 0;
+        head.addEventListener('pointerdown', function (ev) {
+            if (ev.target.closest('button,select')) return;
+            rwActivateAppFloatWindow(view, win.id);
+            if (win.pinned || win.maximized || win.docked || ev.button !== 0) return;
+            dragging = true; startX = ev.clientX; startY = ev.clientY; baseX = win.x; baseY = win.y;
+            head.setPointerCapture(ev.pointerId); ev.preventDefault();
+        });
+        head.addEventListener('pointermove', function (ev) {
+            if (!dragging) return;
+            win.x = baseX + ev.clientX - startX; win.y = baseY + ev.clientY - startY;
+            rwClampAppFloatWindow(win); el.style.left = win.x + 'px'; el.style.top = win.y + 'px';
+        });
+        function stopDrag() {
+            if (!dragging) return; dragging = false;
+            var vw = window.innerWidth || 1200, vh = window.innerHeight || 800;
+            if (win.x < 22) win.x = 8;
+            if (win.x + win.w > vw - 22) win.x = Math.max(0, vw - win.w - 8);
+            if (win.y < 58) win.y = 58;
+            if (win.y + win.h > vh - 22) win.y = Math.max(58, vh - win.h - 8);
+            el.style.left = win.x + 'px'; el.style.top = win.y + 'px'; win.userMoved=true; rwSaveAppFloatState(view);
+        }
+        head.addEventListener('pointerup', stopDrag); head.addEventListener('pointercancel', stopDrag);
+        if (typeof ResizeObserver !== 'undefined') {
+            var ro = new ResizeObserver(function () { if (win.maximized || win.minimized) return; win.w = el.offsetWidth; win.h = el.offsetHeight; rwSaveAppFloatState(view); });
+            ro.observe(el); view._rwAppFloatRuntime[win.id].resizeObserver = ro;
+        }
+        rwApplyAppFloatLayout(view);
+        rwActivateAppFloatWindow(view, win.id);
+        rwRenderAppFloatWindow(view, win);
+        rwRenderAllAppFloatWindows(view);
+        rwSaveAppFloatState(view);
+        return win;
+    }
+    MyView.prototype.openAppFloatingWorkbench = function () {
+        var existingOwner = this.plugin && this.plugin._rwAppFloatOwner;
+        if (existingOwner && existingOwner !== this && existingOwner._rwAppFloatLayer && existingOwner._rwAppFloatLayer.isConnected) {
+            return existingOwner.openAppFloatingWorkbench();
+        }
+        var layer = rwEnsureAppFloatLayer(this);
+        layer._rwToolbar.classList.remove('is-collapsed');
+        var state = rwGetAppFloatState(this);
+        var savedWindows = state.windows.slice();
+        var hasDomWindows = !!layer.querySelector('.rw-app-float-window');
+        if (!hasDomWindows && savedWindows.length) {
+            state.windows = [];
+            var restoredGraph = false;
+            savedWindows.forEach(function (saved) {
+                if (saved && saved.tab === 'graph') { if (restoredGraph) return; restoredGraph = true; }
+                var restored = Object.assign({}, saved);
+                rwOpenAppFloatWindow(this, restored.tab, restored);
+            }, this);
+        } else if (!state.windows.length) {
+            rwOpenAppFloatWindow(this, this.tab || 'desk');
+        } else {
+            var first = layer.querySelector('.rw-app-float-window');
+            if (first) rwActivateAppFloatWindow(this, first.getAttribute('data-rw-window-id'));
+        }
+        return layer;
+    };
+
     MyView.prototype.onOpen = function () {
         var self = this;
         this._activeChapterFile = this.app.workspace.getActiveFile ? this.app.workspace.getActiveFile() : null;
@@ -4335,7 +5322,14 @@ var MyView = /** @class */ (function (_super) {
         }));
         this.contentEl.empty();
         this.contentEl.addClass('my-char-view-root');
+        this.contentEl.addEventListener('pointerdown', function () { self._rwAppFloatActiveId = null; }, true);
         this.loadAllData().then(function() {
+            var floatOwner = self.plugin && self.plugin._rwAppFloatOwner;
+            if (floatOwner && floatOwner !== self && floatOwner._rwAppFloatLayer && floatOwner._rwAppFloatLayer.isConnected) {
+                ['chars','timeline','factions','relations','orgRelations','orgMemberships','orgPositionDefs','orgTerritoryChanges'].forEach(function (key) { floatOwner[key] = self[key]; });
+                floatOwner._activeChapterFile = self._activeChapterFile;
+                rwRenderAllAppFloatWindows(floatOwner);
+            }
             self.render();
         });
     };
@@ -4350,7 +5344,7 @@ var MyView = /** @class */ (function (_super) {
         var progress = this.plugin.settings.currentTimePoint || '';
         var current = records.filter(function(r) {
             // 已解散组织的履历保留作历史依据，但不再作为人物当前阵营。
-            return r.type !== '组织解散' && classifyOrgMembershipAtProgress(r, progress) === 'current';
+            return r.type !== '组织解散' && classifyOrgMembershipAtProgress(r, progress, records) === 'current';
         });
         if (!current.length) return '暂无当前阵营';
         var names = [];
@@ -4372,8 +5366,9 @@ var MyView = /** @class */ (function (_super) {
         });
         var characterName = String(charData.name || '').trim();
         var progress = this.plugin && this.plugin.settings ? (this.plugin.settings.currentTimePoint || '') : '';
-        var memberships = normalizeOrgMemberships(this.orgMemberships).filter(function (record) {
-            return String(record.character || '').trim() === characterName && record.type !== '组织解散' && classifyOrgMembershipAtProgress(record, progress) === 'current';
+        var allMemberships = normalizeOrgMemberships(this.orgMemberships);
+        var memberships = allMemberships.filter(function (record) {
+            return String(record.character || '').trim() === characterName && classifyOrgMembershipAtProgress(record, progress, allMemberships) === 'current';
         });
         if (memberships.length) {
             memberships.sort(function (a, b) {
@@ -4451,11 +5446,60 @@ var MyView = /** @class */ (function (_super) {
         });
     };
 
+    function rwSaveWorkbenchLayout(view) {
+        if (!view || !view.plugin || !view.plugin.settings) return;
+        var state = view.plugin.settings.rwWorkbenchLayout || {};
+        state.enabled = !!view._workspaceSplit; state.rightTab = view._workspaceRightTab || 'timeline';
+        state.ratio = Math.max(30, Math.min(70, Number(view._workspaceSplitRatio) || 50));
+        state.mode = view._workspaceLayoutMode || 'fixed'; state.windows = view._workspaceWindowState || {};
+        view.plugin.settings.rwWorkbenchLayout = state;
+        if (view._rwWorkbenchSaveTimer) clearTimeout(view._rwWorkbenchSaveTimer);
+        view._rwWorkbenchSaveTimer = setTimeout(function () {
+            view._rwWorkbenchSaveTimer = null;
+            if (view.plugin && typeof view.plugin.saveSettings === 'function') view.plugin.saveSettings().catch(function (e) { console.warn('工作台布局保存失败', e); });
+        }, 250);
+    }
+
+    function rwApplyWorkbenchPaneMode(view, pane, paneEl, paneHead) {
+        var mode = view._workspaceLayoutMode || 'fixed';
+        var savedState = view._workspaceWindowState[pane] || {};
+        var floating = mode === 'float' ? !savedState.pinned : (mode === 'mixed' ? (pane === 'right' ? !savedState.pinned : !!savedState.floating) : false);
+        paneEl.classList.toggle('rw-workspace-pane-floating', floating);
+        paneEl.style.position = floating ? 'absolute' : 'relative';
+        paneEl.style.resize = floating ? 'both' : 'none';
+        paneEl.style.overflow = floating ? 'auto' : 'hidden';
+        paneEl.style.zIndex = floating ? String((view._workspaceWindowState[pane] || {}).z || (pane === 'right' ? 3 : 2)) : '';
+        var saved = savedState;
+        if (floating) {
+            var parentW=paneEl.parentElement.clientWidth||900,parentH=paneEl.parentElement.clientHeight||720;
+            var paneW=Math.max(300,Math.min(Number.isFinite(saved.w)?saved.w:(pane==='right'?460:520),parentW-12));
+            var paneH=Math.max(260,Math.min(Number.isFinite(saved.h)?saved.h:560,parentH-12));
+            var defaultX=(mode==='mixed'&&pane==='right')?Math.round(parentW*.42):(pane==='right'?52:12);
+            var paneX=Math.max(0,Math.min(Number.isFinite(saved.x)?saved.x:defaultX,Math.max(0,parentW-paneW)));
+            var paneY=Math.max(0,Math.min(Number.isFinite(saved.y)?saved.y:(pane==='right'?72:12),Math.max(0,parentH-48)));
+            paneEl.style.left = paneX + 'px'; paneEl.style.top = paneY + 'px';
+            paneEl.style.width = paneW + 'px'; paneEl.style.height = paneH + 'px';
+            paneEl.style.maxWidth = 'calc(100% - 12px)'; paneEl.style.maxHeight = 'calc(100% - 12px)';
+        } else { paneEl.style.left = ''; paneEl.style.top = ''; paneEl.style.width = ''; paneEl.style.height = ''; paneEl.style.maxWidth = ''; paneEl.style.maxHeight = ''; }
+        var minimized = !!saved.minimized;
+        paneEl.style.display = minimized ? 'none' : '';
+        var minBtn = paneHead.querySelector('.rw-pane-minimize');
+        if (minBtn) minBtn.textContent = minimized ? '恢复' : '最小化';
+        var maxBtn = paneHead.querySelector('.rw-pane-maximize');
+        if (maxBtn) maxBtn.textContent = saved.maximized ? '还原' : '最大化';
+    }
+
     MyView.prototype.render = function () {
+        if (this._rwAppFloatActiveId && this._rwAppFloatLayer && !this._rwRenderingFloatWindow) {
+            rwRenderAllAppFloatWindows(this);
+            return;
+        }
         if (this._rendering) return;
+        if (this._rwWorkbenchObservers) { this._rwWorkbenchObservers.forEach(function(ro){ try{ro.disconnect();}catch(e){} }); this._rwWorkbenchObservers=[]; }
         this._rendering = true;
 
         var container = this.contentEl;
+        if (this._workspaceSplit) { var oldBodies=container.querySelectorAll('.rw-workspace-pane-body[data-rw-pane]'); for(var oi=0;oi<oldBodies.length;oi++){var ob=oldBodies[oi],op=ob.getAttribute('data-rw-pane'),ow=this._workspaceWindowState[op]||(this._workspaceWindowState[op]={});ow.scrollTop=ob.scrollTop;ow.scrollLeft=ob.scrollLeft;} }
         container.empty();
         container.addClass('my-char-view-root');
         var self = this;
@@ -4476,6 +5520,26 @@ var MyView = /** @class */ (function (_super) {
             self.render();
         });
         compactHeader.createEl('div', { text: self.tab === getHomeTab(self.plugin) ? '创作工作台' : ((currentTabMeta && currentTabMeta.label) || '工作区'), cls: 'rw-current-module' });
+        var appFloatBtn = compactHeader.createEl('button', { text: '浮', cls: 'rw-refresh-button rw-app-float-launch' });
+        appFloatBtn.title = '打开整个 Obsidian 应用范围内的自由工作台';
+        appFloatBtn.setAttribute('aria-label','浮动工作台');
+        appFloatBtn.addEventListener('click', function () { self.openAppFloatingWorkbench(); });
+        var splitBtn = compactHeader.createEl('button', { text: '双', cls: 'rw-refresh-button rw-workspace-toggle' });
+        splitBtn.title = this._workspaceSplit ? '当前为双页工作区，点击切换为单页' : '当前为单页工作区，点击切换为双页';
+        splitBtn.setAttribute('aria-label',this._workspaceSplit?'切换单页':'切换双页');
+        splitBtn.addEventListener('click', function() { self._workspaceSplit = !self._workspaceSplit; if (self._workspaceSplit && !self._workspaceRightTab) self._workspaceRightTab = 'timeline'; rwSaveWorkbenchLayout(self); self.render(); });
+        if (this._workspaceSplit) {
+            var modeSelect = compactHeader.createEl('select', { cls: 'my-char-select rw-workspace-mode-select' });
+            [['fixed','固定'],['float','浮动'],['mixed','混合']].forEach(function(x){var op=modeSelect.createEl('option',{text:x[1],value:x[0]});});
+            modeSelect.value = this._workspaceLayoutMode || 'fixed';
+            modeSelect.addEventListener('change',function(){self._workspaceLayoutMode=modeSelect.value;rwSaveWorkbenchLayout(self);self.render();});
+            var sceneSelect = compactHeader.createEl('select', { cls: 'my-char-select rw-workspace-scene-select' });
+            [['','布局预设'],['people','人物创作'],['history','历史编年'],['faction','势力创作'],['chapter','章节写作']].forEach(function(x){sceneSelect.createEl('option',{text:x[1],value:x[0]});});
+            sceneSelect.addEventListener('change',function(){var scenes={people:['chars','graph'],history:['timeline','lifecycle'],faction:['factions','graph'],chapter:['chapterStatus','continuity']};var pair=scenes[sceneSelect.value];if(!pair)return;self._suppressTabHistory=true;self._tab=pair[0];self._suppressTabHistory=false;self._workspaceRightTab=pair[1];self._workspaceSplit=true;rwSaveWorkbenchLayout(self);self.render();});
+            var ratio = compactHeader.createEl('input',{attr:{type:'range',min:'30',max:'70',value:String(this._workspaceSplitRatio||50),'aria-label':'调整左右工作区宽度'},cls:'rw-workspace-width-range'});
+            ratio.title='调整固定工作区宽度';ratio.addEventListener('input',function(){self._workspaceSplitRatio=parseInt(ratio.value,10)||50;var el=self.contentEl.querySelector('.rw-workspace-split');if(el)el.style.gridTemplateColumns='minmax(0,'+self._workspaceSplitRatio+'fr) minmax(0,'+(100-self._workspaceSplitRatio)+'fr)';rwSaveWorkbenchLayout(self);});
+            var resetLayoutBtn=compactHeader.createEl('button',{text:'恢复默认',cls:'my-char-btn-ghost my-char-btn-xs'});resetLayoutBtn.title='恢复双工作区默认布局与窗口位置';resetLayoutBtn.addEventListener('click',function(){self._workspaceLayoutMode='fixed';self._workspaceSplitRatio=50;self._workspaceWindowState={};rwSaveWorkbenchLayout(self);self.render();});
+        }
         var undoBtn = compactHeader.createEl('button', { text: '↶', cls: 'rw-refresh-button rw-history-button' });
         undoBtn.title = '撤销上一步数据操作'; undoBtn.setAttribute('aria-label', '撤销');
         undoBtn.disabled = !(self.plugin._undoStack && self.plugin._undoStack.length) || !!self._historyBusy;
@@ -4493,16 +5557,58 @@ var MyView = /** @class */ (function (_super) {
             self.loadAllData({ silent: true }).then(function () { self.render(); }).catch(function (e) { showUserError('刷新数据失败', e); }).finally(function () { refreshBtn.disabled = false; });
         });
 
-        var content = container.createEl('div', { cls: 'my-char-view-content' });
-        if (needsEmptyStateGuide(this)) {
+        var content = container.createEl('div', { cls: this._workspaceSplit ? 'my-char-view-content rw-workspace-split' : 'my-char-view-content' });
+        if (this._workspaceSplit && !needsEmptyStateGuide(this)) {
+            content.classList.add('rw-workspace-layout-' + (this._workspaceLayoutMode || 'fixed'));
+            content.style.position = 'relative'; content.style.minHeight = this._workspaceLayoutMode === 'fixed' ? '' : '720px';
+            content.style.gridTemplateColumns = 'minmax(0,' + (this._workspaceSplitRatio || 50) + 'fr) minmax(0,' + (100 - (this._workspaceSplitRatio || 50)) + 'fr)';
+            var paneRefs = {};
+            function renderPane(pane, tabId, label) {
+                var paneEl = content.createEl('section', { cls: 'rw-workspace-pane' }); paneRefs[pane] = paneEl;
+                paneEl.addEventListener('pointerdown', function() { self._workspaceActivePane = pane; if (self._workspaceLayoutMode !== 'fixed') { var w=self._workspaceWindowState[pane]||(self._workspaceWindowState[pane]={}); w.z=Math.max(Number((self._workspaceWindowState.left||{}).z)||2,Number((self._workspaceWindowState.right||{}).z)||2)+1; paneEl.style.zIndex=String(w.z); rwSaveWorkbenchLayout(self); } }, true);
+                var paneHead = paneEl.createEl('div', { cls: 'rw-workspace-pane-head' });
+                var dragLabel = paneHead.createEl('span', { text: label, cls: 'rw-workspace-pane-label rw-pane-drag-handle' });
+                var select = paneHead.createEl('select', { cls: 'my-char-select rw-workspace-pane-select' });
+                getVisibleTabs(self.plugin).forEach(function(t) { select.add(createOption(t.id, t.label)); }); select.value = tabId;
+                select.addEventListener('focus', function() { self._workspaceActivePane = pane; });
+                select.addEventListener('change', function() { self._workspaceActivePane = pane; if (pane === 'right') self._workspaceRightTab = select.value; else { self._suppressTabHistory = true; self._tab = select.value; self._suppressTabHistory = false; } rwSaveWorkbenchLayout(self); self.render(); });
+                if (self._workspaceLayoutMode !== 'fixed') {
+                    var pinState=self._workspaceWindowState[pane]||{};var paneFloating=self._workspaceLayoutMode==='float'?!pinState.pinned:(self._workspaceLayoutMode==='mixed'?(pane==='right'?!pinState.pinned:!!pinState.floating):false);var pinBtn=paneHead.createEl('button',{text:paneFloating?'固定':'浮动',cls:'my-char-btn-ghost my-char-btn-xs rw-pane-pin'});pinBtn.title='切换此工作区为固定或浮动窗口';
+                    pinBtn.addEventListener('click',function(ev){ev.stopPropagation();var w=self._workspaceWindowState[pane]||(self._workspaceWindowState[pane]={});if(self._workspaceLayoutMode==='float'){w.pinned=!w.pinned;}else{w.floating=!w.floating;w.pinned=false;}rwSaveWorkbenchLayout(self);self.render();});
+                    var minBtn=paneHead.createEl('button',{text:'最小化',cls:'my-char-btn-ghost my-char-btn-xs rw-pane-minimize'});
+                    minBtn.addEventListener('click',function(ev){ev.stopPropagation();var w=self._workspaceWindowState[pane]||(self._workspaceWindowState[pane]={});w.minimized=!w.minimized;rwSaveWorkbenchLayout(self);self.render();});
+                    var maxBtn=paneHead.createEl('button',{text:'最大化',cls:'my-char-btn-ghost my-char-btn-xs rw-pane-maximize'});
+                    maxBtn.addEventListener('click',function(ev){ev.stopPropagation();var w=self._workspaceWindowState[pane]||(self._workspaceWindowState[pane]={});if(!w.maximized){w.restore={x:w.x,y:w.y,w:w.w,h:w.h};w.x=8;w.y=8;w.w=Math.max(320,content.clientWidth-24);w.h=Math.max(420,content.clientHeight-24);w.maximized=true;}else{Object.assign(w,w.restore||{});w.maximized=false;}rwSaveWorkbenchLayout(self);self.render();});
+                    var closeBtn=paneHead.createEl('button',{text:'×',cls:'my-char-btn-ghost my-char-btn-xs rw-pane-close'});closeBtn.title='关闭此工作区（可从顶部恢复）';
+                    closeBtn.addEventListener('click',function(ev){ev.stopPropagation();var w=self._workspaceWindowState[pane]||(self._workspaceWindowState[pane]={});w.minimized=true;w.closed=true;rwSaveWorkbenchLayout(self);self.render();});
+                    // 标题栏拖动；选择器和按钮不触发拖动。
+                    var drag=null;dragLabel.addEventListener('pointerdown',function(ev){if(ev.button!==undefined&&ev.button!==0)return;var w=self._workspaceWindowState[pane]||(self._workspaceWindowState[pane]={});drag={x:ev.clientX,y:ev.clientY,left:paneEl.offsetLeft,top:paneEl.offsetTop};try{dragLabel.setPointerCapture(ev.pointerId);}catch(e){}});
+                    dragLabel.addEventListener('pointermove',function(ev){if(!drag)return;var maxX=Math.max(0,content.clientWidth-paneEl.offsetWidth),maxY=Math.max(0,content.clientHeight-48);paneEl.style.left=Math.max(0,Math.min(maxX,drag.left+ev.clientX-drag.x))+'px';paneEl.style.top=Math.max(0,Math.min(maxY,drag.top+ev.clientY-drag.y))+'px';});
+                    function endDrag(){if(!drag)return;drag=null;var w=self._workspaceWindowState[pane]||(self._workspaceWindowState[pane]={});var x=paneEl.offsetLeft,y=paneEl.offsetTop;var edge=14;if(x<edge)x=0;else if(content.clientWidth-(x+paneEl.offsetWidth)<edge)x=Math.max(0,content.clientWidth-paneEl.offsetWidth);if(y<edge)y=0;else if(content.clientHeight-(y+paneEl.offsetHeight)<edge)y=Math.max(0,content.clientHeight-paneEl.offsetHeight);paneEl.style.left=x+'px';paneEl.style.top=y+'px';w.x=x;w.y=y;w.w=paneEl.offsetWidth;w.h=paneEl.offsetHeight;w.closed=false;rwSaveWorkbenchLayout(self);}
+                    dragLabel.addEventListener('pointerup',endDrag);dragLabel.addEventListener('pointercancel',endDrag);
+                    if (typeof ResizeObserver !== 'undefined') { var ro=new ResizeObserver(function(){var w=self._workspaceWindowState[pane]||(self._workspaceWindowState[pane]={});w.w=paneEl.offsetWidth;w.h=paneEl.offsetHeight;rwSaveWorkbenchLayout(self);});ro.observe(paneEl);self._rwWorkbenchObservers=self._rwWorkbenchObservers||[];self._rwWorkbenchObservers.push(ro); }
+                }
+                var paneBody = paneEl.createEl('div', { cls: 'rw-workspace-pane-body my-char-view-content' }); paneBody.setAttribute('data-rw-pane',pane);
+                var previousTab = self._tab; self._workspaceRenderingPane = pane; self._tab = tabId;
+                try { self.renderCurrentTab(paneBody); } catch (paneError) { console.error('工作区渲染失败：' + pane, paneError); paneBody.createEl('p', { text: '页面加载失败：' + (paneError.message || paneError), cls: 'my-char-view-empty' }); }
+                self._tab = previousTab; self._workspaceRenderingPane = null;
+                var savedScroll=self._workspaceWindowState[pane]||{};paneBody.scrollTop=Number(savedScroll.scrollTop)||0;paneBody.scrollLeft=Number(savedScroll.scrollLeft)||0;
+                paneBody.addEventListener('scroll',function(){var sw=self._workspaceWindowState[pane]||(self._workspaceWindowState[pane]={});sw.scrollTop=paneBody.scrollTop;sw.scrollLeft=paneBody.scrollLeft;rwSaveWorkbenchLayout(self);},{passive:true});
+                rwApplyWorkbenchPaneMode(self,pane,paneEl,paneHead);
+            }
+            var validTabs=getVisibleTabs(this.plugin);
+            if(!validTabs.some(function(t){return t.id===self._workspaceRightTab;}))self._workspaceRightTab=validTabs.some(function(t){return t.id==='timeline';})?'timeline':(validTabs[0]?validTabs[0].id:this.tab);
+            renderPane('left',this.tab,'工作区 A'); renderPane('right',this._workspaceRightTab,'工作区 B');
+            if(this._workspaceLayoutMode==='fixed') content.style.gridTemplateColumns='minmax(0,'+(this._workspaceSplitRatio||50)+'fr) minmax(0,'+(100-(this._workspaceSplitRatio||50))+'fr)';
+            if(this._workspaceLayoutMode!=='fixed'){
+                var restoreBar=container.createEl('div',{cls:'rw-workspace-restore-bar'});restoreBar.createEl('span',{text:'已收起的窗口：',cls:'my-char-view-muted'});
+                ['left','right'].forEach(function(pane){var w=self._workspaceWindowState[pane]||{};if(w.minimized||w.closed){var btn=restoreBar.createEl('button',{text:(pane==='left'?'工作区 A：':'工作区 B：')+(pane==='left'?self.tab:self._workspaceRightTab),cls:'my-char-btn-ghost my-char-btn-xs'});btn.addEventListener('click',function(){w.minimized=false;w.closed=false;rwSaveWorkbenchLayout(self);self.render();});}});
+            }
+        } else if (needsEmptyStateGuide(this)) {
             this.renderEmptyStateGuide(content);
         } else {
-            try {
-                this.renderCurrentTab(content);
-            } catch (err) {
-                console.error('渲染错误:', err);
-                content.createEl('p', { text: '渲染出错，请查看控制台', cls: 'my-char-view-empty' });
-            }
+            try { this.renderCurrentTab(content); }
+            catch (err) { console.error('渲染错误:', err); content.createEl('p', { text: '渲染出错，请查看控制台', cls: 'my-char-view-empty' }); }
         }
                 this.updateCharFloatPanel();
         this._rendering = false;
@@ -4640,14 +5746,25 @@ var MyView = /** @class */ (function (_super) {
             if (!value) return false;
             var resolved = self.app.metadataCache && self.app.metadataCache.getFirstLinkpathDest ? self.app.metadataCache.getFirstLinkpathDest(value, path) : null;
             if (resolved && resolved.path === path) return true;
-            return value === basename || value === path || value.toLowerCase() === basename.toLowerCase();
+            var currentChapter = chapterRecord || { name: basename, path: path, chapterNumber: rwExtractChapterNumber(basename) };
+            return rwChapterReferenceMatches(value, currentChapter);
+        }
+        var chapterLibrary = this.plugin.settings.chapterLibrary || (this.plugin.settings.chapterLibrary = { folder: '', chapters: [] });
+        if (!Array.isArray(chapterLibrary.chapters)) chapterLibrary.chapters = [];
+        var chapterRecord = chapterLibrary.chapters.filter(function (ch) { return ch.path === path; })[0] || null;
+        if (!chapterRecord && chapterLibrary.folder && path.indexOf(chapterLibrary.folder.replace(/^\/+|\/+$/g, '') + '/') === 0) {
+            chapterRecord = { path: path, name: basename, storyTime: '', chapterNumber: (parseChapterHeading(basename) || {}).num || null, mentions: [] };
+            chapterLibrary.chapters.push(chapterRecord);
         }
         var events = (this.timeline || []).filter(function (evt) {
-            var refs = normalizeChapterNotes(evt.chapterNotes && evt.chapterNotes.length ? evt.chapterNotes : evt.chapterNote);
+            var linkedChapters = rwGetEventLinkedChapters(self.plugin.settings, evt);
+            var refs = rwGetEventChapterReferences(evt);
             var designEntries = rwGetStoryDesignEntries(evt);
-            return refs.some(refMatches) || designEntries.some(function (d) { return d.chapter && refMatches(d.chapter); });
+            var resolvedChapter = rwResolveChapterForEvent(self, evt);
+            return linkedChapters.some(function(ch) { return ch.path === path; }) || refs.some(refMatches) || (resolvedChapter && resolvedChapter.path === path) || designEntries.some(function (d) { return d.chapter && refMatches(d.chapter); });
         }).sort(function (a, b) { return Number(a._lineIndex || 0) - Number(b._lineIndex || 0); });
         var chars = [];
+        (chapterRecord && chapterRecord.mentions || []).forEach(function (name) { if (name && chars.indexOf(name) < 0) chars.push(name); });
         var plotGroups = {};
         events.forEach(function (evt) {
             findCharsInEvent(evt.event || '', self.charNames || []).forEach(function (name) { if (chars.indexOf(name) < 0) chars.push(name); });
@@ -4658,31 +5775,73 @@ var MyView = /** @class */ (function (_super) {
                 if (evt.plotStatus && plotGroups[key].statuses.indexOf(evt.plotStatus) < 0) plotGroups[key].statuses.push(evt.plotStatus);
             }
         });
+        // 阵营以组织名称为唯一展示分组：同一阵营下汇总人物，避免一人一行造成重复。
         var factionRows = [];
+        var factionMap = Object.create(null);
         var factionField = this.plugin.settings.factionFieldName || '阵营';
+        function addFactionMember(org, name, historical) {
+            org = String(org || '').trim();
+            name = String(name || '').trim();
+            if (!org || !name) return;
+            if (!factionMap[org]) factionMap[org] = { organization: org, currentMembers: [], historicalMembers: [] };
+            var list = historical ? factionMap[org].historicalMembers : factionMap[org].currentMembers;
+            var other = historical ? factionMap[org].currentMembers : factionMap[org].historicalMembers;
+            // 同一人物同一阵营若同时存在多条履历，以仍然有效的当前成员身份优先。
+            if (historical && other.indexOf(name) >= 0) return;
+            if (!historical && other.indexOf(name) >= 0) other.splice(other.indexOf(name), 1);
+            if (list.indexOf(name) < 0) list.push(name);
+        }
+        var allMemberships = normalizeOrgMemberships(self.orgMemberships || []);
         chars.forEach(function (name) {
-            var records = normalizeOrgMemberships(self.orgMemberships || []).filter(function (r) { return r.character === name; });
+            var records = allMemberships.filter(function (r) { return r.character === name; });
             if (!records.length) {
                 var ch = (self.chars || []).find(function (x) { return x.name === name; });
                 var raw = ch && ch.fields ? ch.fields[factionField] : '';
-                String(raw || '').split(/[、,，;；]/).map(function (x) { return x.trim(); }).filter(Boolean).forEach(function (org) {
-                    if (!factionRows.some(function (x) { return x.character === name && x.organization === org; })) factionRows.push({ character: name, organization: org, historical: false });
-                });
+                String(raw || '').split(/[、,，;；]/).map(function (x) { return x.trim(); }).filter(Boolean).forEach(function (org) { addFactionMember(org, name, false); });
             } else {
-                var relevantTimes = events.filter(function (evt) { return (self.charNames || []).indexOf(name) >= 0 && (evt.event || '').indexOf(name) >= 0; }).map(function (evt) { return evt.storyYear || evt.year || ''; });
+                var relevantTimes = events.filter(function (evt) { return String([evt.event, evt.title, evt.content, evt.description, evt.people, evt.characters, evt.character].join(' ')).indexOf(name) >= 0; }).map(function (evt) { return evt.storyYear || evt.chapterStoryTime || evt.year || ''; });
                 var progress = relevantTimes.length ? relevantTimes[0] : (self.plugin.settings.currentTimePoint || '');
                 records.forEach(function (r) {
                     if (r.type === '组织解散') return;
-                    var state = classifyOrgMembershipAtProgress(r, progress);
-                    if (state === 'current' || state === 'history') {
-                        if (!factionRows.some(function (x) { return x.character === name && x.organization === r.organization; })) factionRows.push({ character: name, organization: r.organization, historical: state === 'history' });
-                    }
+                    var state = classifyOrgMembershipAtProgress(r, progress, records);
+                    if (state === 'current' || state === 'history') addFactionMember(r.organization, name, state === 'history');
                 });
             }
         });
+        factionRows = Object.keys(factionMap).sort(function (a, b) { return a.localeCompare(b, 'zh-CN'); }).map(function (org) { return factionMap[org]; });
         var titleBar = container.createEl('div', { cls: 'rw-chapter-status-titlebar' });
         titleBar.createEl('h3', { text: basename, cls: 'my-char-section-title' });
         titleBar.createEl('span', { text: path, cls: 'my-char-muted' });
+        var chapterTime = String(chapterRecord && chapterRecord.storyTime || '').trim();
+        var chapterDefaultTime = rwGetChapterDefaultStoryTime(chapterTime);
+        var chapterLabelSource = String(chapterRecord && chapterRecord.name || basename);
+        var chapterLabelMatch = chapterLabelSource.match(/第\s*[零〇一二两三四五六七八九十百千万\d]+\s*章/i);
+        var chapterNumber = (chapterRecord && chapterRecord.chapterNumber !== null && chapterRecord.chapterNumber !== undefined && chapterRecord.chapterNumber !== '') ? Number(chapterRecord.chapterNumber) : rwExtractChapterNumber(chapterLabelSource);
+        var chapterLabel = chapterLabelMatch ? chapterLabelMatch[0].replace(/\s+/g, '') : (chapterNumber !== null && chapterNumber !== undefined && isFinite(chapterNumber) ? '第' + chapterNumber + '章' : '');
+        var chapterTimeDisplay = chapterTime ? chapterTime + (chapterLabel ? ' · ' + chapterLabel : '') : '';
+        var timeSection = container.createEl('section', { cls: 'rw-chapter-status-section rw-chapter-current-time' });
+        timeSection.createEl('h4', { text: '⏳ 本章时间' });
+        timeSection.createEl('div', { text: chapterTimeDisplay || '尚未设置本章故事时间，可在「时间线 → 章节库与故事时间」中设置。', cls: chapterTime ? 'rw-chapter-current-time-value' : 'my-char-muted' });
+        if (chapterTime) {
+            var parsedChapterTime = parseHistoricalDate(chapterDefaultTime);
+            var sameYearEvents = (self.timeline || []).filter(function (evt) {
+                var raw = evt.storyYear || evt.chapterStoryTime || evt.year || '';
+                var parsedEvent = parseHistoricalDate(raw);
+                return parsedChapterTime && parsedEvent && parsedChapterTime.sortValue != null && parsedEvent.sortValue != null && Math.floor(Math.abs(parsedChapterTime.sortValue)) === Math.floor(Math.abs(parsedEvent.sortValue)) && ((parsedChapterTime.sortValue < 0) === (parsedEvent.sortValue < 0));
+            }).sort(function(a,b){ return Number(a._lineIndex || 0) - Number(b._lineIndex || 0); });
+            var yearPreview = timeSection.createEl('details', { cls: 'rw-chapter-year-events-preview' });
+            yearPreview.createEl('summary', { text: '预览本年份时间线事件（' + sameYearEvents.length + '）' });
+            var yearBody = yearPreview.createEl('div', { cls: 'rw-chapter-year-events-list' });
+            if (!sameYearEvents.length) yearBody.createEl('p', { text: '该故事年份暂无时间线事件。', cls: 'my-char-muted' });
+            sameYearEvents.forEach(function(evt){
+                var item = yearBody.createEl('div', { cls: 'rw-chapter-year-event-item' });
+                item.createEl('strong', { text: evt.event || evt.title || '未命名事件' });
+                var meta = [evt.storyYear || evt.chapterStoryTime || evt.year, evt.month, evt.tag].filter(Boolean).join(' · ');
+                if (meta) item.createEl('div', { text: meta, cls: 'my-char-muted' });
+                var detail = evt.content || evt.description || evt.note || '';
+                if (detail) item.createEl('p', { text: String(detail).slice(0, 500), cls: 'rw-chapter-year-event-detail' });
+            });
+        }
         // Show the matching outline section in chapter details. The outline Markdown
         // remains the source of truth; this is a live read, not a copied snapshot.
         var outlineSection = container.createEl('section', { cls: 'rw-chapter-status-section rw-chapter-outline-detail' });
@@ -4700,7 +5859,8 @@ var MyView = /** @class */ (function (_super) {
                 outlineMatches.forEach(function (x, i) {
                     var bodyEnd = i + 1 < outlineMatches.length ? outlineMatches[i + 1].start : outlineMd.length;
                     var a = normalizeTitle(x.title), b = normalizeTitle(basename);
-                    if (x.title === basename || a === b || (b && (a.indexOf(b) >= 0 || b.indexOf(a) >= 0))) targetOutline = { title: x.title, body: outlineMd.slice(x.end, bodyEnd).replace(/\n?<!--\s*rw-timeline-events:[^>]*-->\s*/ig, '').trim() };
+                    var outlineNo = rwExtractChapterNumber(x.title), fileNo = rwExtractChapterNumber(basename);
+                    if (x.title === basename || a === b || (outlineNo != null && fileNo != null && Number(outlineNo) === Number(fileNo)) || (b && (a.indexOf(b) >= 0 || b.indexOf(a) >= 0))) targetOutline = { title: x.title, body: outlineMd.slice(x.end, bodyEnd).replace(/\n?<!--\s*rw-timeline-events:[^>]*-->\s*/ig, '').trim() };
                 });
                 outlineSection.empty(); outlineSection.createEl('h4', { text: '📖 本章大纲' });
                 if (targetOutline && targetOutline.body) {
@@ -4716,7 +5876,7 @@ var MyView = /** @class */ (function (_super) {
             }
         })();
         var stats = container.createEl('div', { cls: 'rw-outline-stats' });
-        [[events.length, '关联事件'], [chars.length, '涉及人物'], [factionRows.length, '阵营记录'], [Object.keys(plotGroups).length, '相关伏笔']].forEach(function (x) { var item = stats.createEl('div'); item.createEl('strong', { text: String(x[0]) }); item.createEl('span', { text: x[1] }); });
+        [[events.length, '关联事件'], [chars.length, '涉及人物'], [factionRows.length, '涉及阵营'], [Object.keys(plotGroups).length, '相关伏笔']].forEach(function (x) { var item = stats.createEl('div'); item.createEl('strong', { text: String(x[0]) }); item.createEl('span', { text: x[1] }); });
         var eventSection = container.createEl('section', { cls: 'rw-chapter-status-section rw-chapter-events-section' });
         eventSection.createEl('h4', { text: '📅 本章事件时间线' });
         if (!events.length) eventSection.createEl('p', { text: '还没有关联事件。可在时间线事件编辑窗口的「关联章节」中添加本章，或在「故事设计」中填写本章名称。', cls: 'my-char-view-empty' });
@@ -4739,7 +5899,7 @@ var MyView = /** @class */ (function (_super) {
             var edit = actions.createEl('button', { text: '打开事件', cls: 'my-char-btn-ghost my-char-btn-sm' });
             edit.addEventListener('click', function () { self.tab = 'timeline'; self._pendingFocusEvent = evt; self._pendingHighlightLineIndex = evt._lineIndex != null ? evt._lineIndex : null; self.render(); });
             var addDesign = actions.createEl('button', { text: '＋ 故事线设计', cls: 'my-char-btn-ghost my-char-btn-sm' });
-            addDesign.addEventListener('click', function () { new StoryDesignModal(self.app, self.plugin, self, evt).open(); });
+            addDesign.addEventListener('click', function () { new StoryDesignModal(self.app, self.plugin, self, evt, null, rwChapterPickerValue(chapterRecord)).open(); });
             if (designs.length) actions.createEl('span', { text: designs.length + ' 份设计', cls: 'my-char-muted' });
         });
         var peopleSection = container.createEl('section', { cls: 'rw-chapter-status-section' });
@@ -4751,10 +5911,43 @@ var MyView = /** @class */ (function (_super) {
             var btn = row.createEl('button', { text: '查看人物档案', cls: 'my-char-btn-ghost my-char-btn-sm' });
             btn.addEventListener('click', function () { var target = (self.chars || []).find(function (c) { return c.name === name; }); if (target) self.showCharDetail(target); });
         });
+        // Opened chapter content is the source for actual appearances. Refresh its
+        // mention index here as well as in the chapter-library scan, then persist it
+        // so the lifecycle overview and chapter dashboard share the same index.
+        if (chapterRecord && !self._chapterMentionSyncPending) {
+            self._chapterMentionSyncPending = path;
+            (async function () {
+                try {
+                    var body = await self.app.vault.cachedRead(file);
+                    var scanned = (self.chars || []).filter(function (c) {
+                        var n = String(c.name || '').trim();
+                        return n.length >= 2 && body.indexOf(n) >= 0;
+                    }).map(function (c) { return c.name; });
+                    scanned.sort();
+                    var previous = (chapterRecord.mentions || []).slice().sort();
+                    if (JSON.stringify(scanned) !== JSON.stringify(previous)) {
+                        chapterRecord.mentions = scanned;
+                        await self.plugin.saveSettings();
+                        self.render();
+                    }
+                } catch (scanErr) { console.warn('[章节情况] 正文人物出场索引更新失败：' + path, scanErr); }
+                finally { if (self._chapterMentionSyncPending === path) self._chapterMentionSyncPending = ''; }
+            })();
+        }
         var factionSection = container.createEl('section', { cls: 'rw-chapter-status-section' });
         factionSection.createEl('h4', { text: '🏳️ 涉及阵营' });
         if (!factionRows.length) factionSection.createEl('p', { text: '暂无可识别的阵营记录。若人物有任职履历，将优先按事件故事时间判断；旧人物则兼容其阵营字段。', cls: 'my-char-muted' });
-        factionRows.forEach(function (r) { var row=factionSection.createEl('div', { cls: 'rw-chapter-entity-row rw-chapter-faction-row' }); row.createEl('span', { text: r.character + ' · ' + r.organization + (r.historical ? '（历史所属）' : '') }); var btn=row.createEl('button',{text:'查看阵营',cls:'my-char-btn-ghost my-char-btn-sm'}); btn.addEventListener('click',function(){self._focusFactionName=r.organization;self.expandedFactions[r.organization]=true;self.tab='factions';self.render();}); });
+        factionRows.forEach(function (r) {
+            var row = factionSection.createEl('div', { cls: 'rw-chapter-entity-row rw-chapter-faction-row' });
+            var info = row.createEl('div', { cls: 'rw-chapter-faction-info' });
+            info.createEl('strong', { text: r.organization });
+            var memberParts = [];
+            if (r.currentMembers.length) memberParts.push('当前：' + r.currentMembers.join('、'));
+            if (r.historicalMembers.length) memberParts.push('历史：' + r.historicalMembers.join('、'));
+            if (memberParts.length) info.createEl('div', { text: memberParts.join('；'), cls: 'my-char-muted' });
+            var btn = row.createEl('button', { text: '查看阵营', cls: 'my-char-btn-ghost my-char-btn-sm' });
+            btn.addEventListener('click', function () { self._focusFactionName = r.organization; self.expandedFactions[r.organization] = true; self.tab = 'factions'; self.render(); });
+        });
         var plotSection = container.createEl('section', { cls: 'rw-chapter-status-section' });
         plotSection.createEl('h4', { text: '🧵 相关伏笔／情节线' });
         var plotNames = Object.keys(plotGroups);
@@ -4766,7 +5959,7 @@ var MyView = /** @class */ (function (_super) {
             var btn = row.createEl('button', { text: '查看伏笔', cls: 'my-char-btn-ghost my-char-btn-sm' });
             btn.addEventListener('click', function () { self.tab = 'plots'; self.render(); });
         });
-        var foot = container.createEl('p', { text: '提示：人物来自事件文本匹配；阵营优先使用组织任职履历。若同一事件跨多个故事时间点，阵营汇总以该人物在本章首次关联事件的时间作为当前章节的参考时间。', cls: 'my-char-muted' });
+        var foot = container.createEl('p', { text: '提示：人物来自事件文本匹配；阵营按组织名称合并展示，并在同一阵营下汇总当前成员与历史成员。若同一事件跨多个故事时间点，阵营汇总以该人物在本章首次关联事件的时间作为当前章节的参考时间。', cls: 'my-char-muted' });
     };
 
 
@@ -4836,6 +6029,7 @@ var MyView = /** @class */ (function (_super) {
                 var timelineContent = await this.app.vault.read(timelineFile);
                 this._lastTimelineMd = timelineContent;
                 this.timeline = this.parseTimeline(timelineContent);
+                rwApplyChapterStoryTimes(this);
                 await rwReconcileTimelineEventRegistry(this, fullTimelinePath);
                 await rwStripLegacyEventIdentityMetadata(this, timelineFile, timelineContent);
             } else if (!silent) {
@@ -4862,9 +6056,22 @@ var MyView = /** @class */ (function (_super) {
         this.relations = savedData.relations || [];
         this.orgRelations = normalizeOrgRelations(savedData.orgRelations || []);
         this.orgMemberships = normalizeOrgMemberships(savedData.orgMemberships || []);
+        this.orgPositionDefs = normalizeOrgPositionDefs(savedData.orgPositionDefs || []);
+        this.orgTerritoryChanges = normalizeOrgTerritoryChanges(savedData.orgTerritoryChanges || []);
         var mdData = await novelExt.loadRelationsFromMd(this.plugin);
         if (mdData && (mdData.factions.length > 0 || mdData.relations.length > 0)) {
-            if (mdData.factions.length > 0) this.factions = mdData.factions;
+            if (mdData.factions.length > 0) {
+                // 旧版关系与阵营.md 未记录上级组织时，优先从 JSON 备份恢复，避免升级首次加载丢失层级。
+                var savedFactionByName = Object.create(null);
+                (savedData.factions || []).forEach(function(f) { if (f && f.name) savedFactionByName[String(f.name).trim()] = f; });
+                this.factions = mdData.factions.map(function(f) {
+                    var saved = savedFactionByName[String(f.name || '').trim()];
+                    if (f.parentOrganization === undefined && saved && saved.parentOrganization) {
+                        f.parentOrganization = saved.parentOrganization;
+                    }
+                    return f;
+                });
+            }
             if (mdData.relations.length > 0) this.relations = mdData.relations;
         }
 
@@ -4998,14 +6205,16 @@ var MyView = /** @class */ (function (_super) {
             if (!trimmedLine) continue;
             if (trimmedLine.startsWith('# ') && !trimmedLine.startsWith('## ')) continue;
             
-            if (trimmedLine.startsWith('## ') && !trimmedLine.startsWith('### ')) {
-                currentYear = trimmedLine.substring(3).trim();
+            var yearHeading = trimmedLine.match(/^##(?!#)\s*(.+)$/);
+            if (yearHeading) {
+                currentYear = yearHeading[1].trim();
                 currentMonth = '';
                 continue;
             }
             
-            if (trimmedLine.startsWith('### ')) {
-                currentMonth = trimmedLine.substring(4).replace(/[：:]/g, '').trim();
+            var monthHeading = trimmedLine.match(/^###\s*(.+)$/);
+            if (monthHeading) {
+                currentMonth = monthHeading[1].replace(/[：:]/g, '').trim();
                 continue;
             }
             
@@ -5039,7 +6248,9 @@ var MyView = /** @class */ (function (_super) {
             factions: this.factions,
             relations: this.relations,
             orgRelations: normalizeOrgRelations(this.orgRelations || []),
-            orgMemberships: normalizeOrgMemberships(this.orgMemberships || [])
+            orgMemberships: normalizeOrgMemberships(this.orgMemberships || []),
+            orgPositionDefs: normalizeOrgPositionDefs(this.orgPositionDefs || []),
+            orgTerritoryChanges: normalizeOrgTerritoryChanges(this.orgTerritoryChanges || [])
         });
         await novelExt.saveRelationsToMd(this.plugin, this.factions, this.relations);
         await syncRelationsIntoCharMd(this.app, this.plugin, this.relations, this.plugin._intimacyHistory || []);
@@ -5135,7 +6346,7 @@ var MyView = /** @class */ (function (_super) {
     var settings = this.plugin.settings;
     var factionField = settings.factionFieldName || '阵营';
     var deathFieldNames = settings.deathFieldNames || '死亡,死亡时间';
-    var firstAppearField = settings.firstAppearFieldName || '首次出场';
+    var firstAppearField = settings.firstAppearFieldName || '正文首次出现';
     var intimateField = settings.intimateFieldName || '亲密人物';
     var currentTimeStr = settings.currentTimePoint || '';
 
@@ -5515,7 +6726,9 @@ var MyView = /** @class */ (function (_super) {
             self.showFactionDialog(null);
         });
 
-        this.renderOrgRelationsPanel(container);
+        // 组织关系的新增、编辑、删除统一在「阵营管理」维护；关系图谱仅负责可视化。
+        this.renderOrgRelationsManager(container);
+        this.renderOrgTerritoryPanel(container);
 
         if (this.factions.length === 0) {
             container.createEl('p', {
@@ -5525,8 +6738,14 @@ var MyView = /** @class */ (function (_super) {
             return;
         }
 
-        for (var i = 0; i < this.factions.length; i++) {
-            (function (faction, index) {
+        var factionOrder = [], factionMap = Object.create(null), factionChildren = Object.create(null), factionRoots = [];
+        this.factions.forEach(function(f){if(f&&f.name)factionMap[f.name]=f;});
+        this.factions.forEach(function(f){var parent=String(f.parentOrganization||'');if(parent&&factionMap[parent]){(factionChildren[parent]||(factionChildren[parent]=[])).push(f);}else factionRoots.push(f);});
+        function appendFactionTree(f,depth,seen){if(seen[f.name])return;seen[f.name]=true;factionOrder.push({faction:f,depth:depth});(factionChildren[f.name]||[]).forEach(function(c){appendFactionTree(c,depth+1,seen);});delete seen[f.name];}
+        factionRoots.forEach(function(f){appendFactionTree(f,0,Object.create(null));});
+        this.factions.forEach(function(f){if(!factionOrder.some(function(x){return x.faction.name===f.name;}))factionOrder.push({faction:f,depth:0});});
+        for (var i = 0; i < factionOrder.length; i++) {
+            (function (faction, index, hierarchyDepth) {
                 var isExpanded = self.expandedFactions[faction.name] || self._focusFactionName === faction.name;
 
                 var members = [];
@@ -5543,6 +6762,8 @@ var MyView = /** @class */ (function (_super) {
                 }
 
                 var card = container.createEl('div', { cls: 'my-char-faction-card' });
+                card.style.marginLeft = Math.min(hierarchyDepth, 8) * 18 + 'px';
+                if (hierarchyDepth) card.style.borderLeft = '3px solid var(--interactive-accent)';
                 if (self._focusFactionName === faction.name) { card.classList.add('is-focused'); card.setAttribute('data-focused-faction','true'); setTimeout(function(){card.scrollIntoView({behavior:'smooth',block:'center'});self._focusFactionName='';},80); }
                 if (faction.color) {
                     card.style.borderLeft = '4px solid ' + faction.color;
@@ -5574,6 +6795,9 @@ var MyView = /** @class */ (function (_super) {
                     self.showFactionDialog(faction);
                 });
 
+                var positionsBtn = rightSide.createEl('button', { text: '共享职位模板', cls: 'my-char-btn-ghost my-char-btn-xs' });
+                positionsBtn.addEventListener('click', function(e) { e.stopPropagation(); new OrgPositionManagerModal(self.app, self, '__shared__', function(){ self.renderCurrentTab(container.parentElement); }).open(); });
+
                 var delBtn = rightSide.createEl('button', { text: '删除', cls: 'my-char-btn-danger my-char-btn-xs' });
                 delBtn.addEventListener('click', function (e) {
                     e.stopPropagation();
@@ -5592,6 +6816,7 @@ var MyView = /** @class */ (function (_super) {
                         };
                         pushUndoSnapshot(self, '删除阵营：' + faction.name);
                         self.factions.splice(index, 1);
+                        self.factions.forEach(function (f) { if (f && f.parentOrganization === faction.name) f.parentOrganization = ''; });
                         var progressText = String((self.plugin.settings && self.plugin.settings.currentTimePoint) || '').trim();
                         self.orgMemberships = normalizeOrgMemberships(self.orgMemberships || []).map(function(r) {
                             if (r.organization !== faction.name) return r;
@@ -5626,6 +6851,17 @@ var MyView = /** @class */ (function (_super) {
 
                     if (faction.desc) {
                         body.createEl('div', { text: faction.desc, cls: 'my-char-faction-desc' });
+                    }
+                    // 领地归属以当前写作时间点为准，在组织卡片中反向展示，避免领地台账与组织档案割裂。
+                    var territoryNames = [];
+                    normalizeOrgTerritoryChanges(self.orgTerritoryChanges || []).forEach(function(tr) {
+                        if (territoryNames.indexOf(tr.territory) < 0 && getTerritoryOwnerAtProgress(self, tr.territory, self.plugin.settings.currentTimePoint || '') === faction.name) territoryNames.push(tr.territory);
+                    });
+                    var territoryBox = body.createEl('div', { cls: 'rw-faction-territory-links' });
+                    territoryBox.createEl('strong', { text: '当前控制领地：' });
+                    territoryBox.createEl('span', { text: territoryNames.length ? territoryNames.join('、') : '暂无可确认领地', cls: 'my-char-muted' });
+                    if (territoryNames.length) {
+                        var territoryHint = territoryBox.createEl('small', { text: ' · 依据当前写作时间点计算', cls: 'my-char-muted' });
                     }
                     var linkedWorld=(self._rwWorldRecords||settings.worldRecords||[]).filter(function(r){return (r.links||[]).indexOf(faction.name)>=0;});
                     var worldDetails=body.createEl('details',{cls:'rw-linked-world-section'});
@@ -5662,22 +6898,39 @@ var MyView = /** @class */ (function (_super) {
                         }
                     }
                 }
-            })(this.factions[i], i);
+            })(factionOrder[i].faction, this.factions.indexOf(factionOrder[i].faction), factionOrder[i].depth);
         }
     };
 
     MyView.prototype.showFactionDialog = function (faction) {
         var self = this;
-        var modal = new FactionModal(this.app, faction, function (result) {
+        var modal = new FactionModal(this.app, faction, async function (result) {
+            var before = { factions: deepCloneJson(self.factions || []), orgRelations: deepCloneJson(self.orgRelations || []), orgMemberships: deepCloneJson(self.orgMemberships || []) };
+            var oldName = faction ? String(faction.name || '') : '';
+            pushUndoSnapshot(self, faction ? '编辑阵营：' + faction.name : '新增阵营：' + result.name);
             if (faction) {
                 var idx = self.factions.indexOf(faction);
                 if (idx !== -1) self.factions[idx] = result;
+                // 阵营改名时同步迁移上下级、组织关系端点与任职记录，避免图谱继续指向旧名称。
+                if (oldName && oldName !== result.name) {
+                    self.factions.forEach(function (f) { if (f && f.parentOrganization === oldName) f.parentOrganization = result.name; });
+                    self.orgRelations = normalizeOrgRelations(self.orgRelations || []).map(function (r) { return Object.assign({}, r, { from: r.from === oldName ? result.name : r.from, to: r.to === oldName ? result.name : r.to }); });
+                    self.orgMemberships = normalizeOrgMemberships(self.orgMemberships || []).map(function (r) { return r.organization === oldName ? Object.assign({}, r, { organization: result.name }) : r; });
+                }
             } else {
                 self.factions.push(result);
             }
-            self.saveFactionsAndRelations();
-            self.render();
-        });
+            try {
+                await self.saveFactionsAndRelations();
+                self.render();
+                new obsidian.Notice('阵营信息已保存，组织关系图谱已同步');
+            } catch (e) {
+                self.factions = before.factions; self.orgRelations = before.orgRelations; self.orgMemberships = before.orgMemberships;
+                try { await self.saveFactionsAndRelations(); } catch (rollbackError) { console.error('[阵营保存] 回滚失败：', rollbackError); }
+                new obsidian.Notice('阵营保存失败，已恢复原数据：' + (e && e.message ? e.message : e), 8000);
+                self.render();
+            }
+        }, this.factions);
         modal.open();
     };
 
@@ -5962,6 +7215,7 @@ var MyView = /** @class */ (function (_super) {
                     if (confirmDestructiveAction('删除关系：' + rel.charA + ' × ' + rel.charB, '将同时清除双方人物 MD 中的关系与变化记录。')) {
                         var realIdx = findRelationIndex(self.relations, rel);
                         if (realIdx !== -1) {
+                            pushUndoSnapshot(self, '删除人物关系：' + rel.charA + ' × ' + rel.charB);
                             removeIntimacyHistoryForPair(self.plugin, rel.charA, rel.charB);
                             self.relations.splice(realIdx, 1);
                             self.saveFactionsAndRelations();
@@ -6085,6 +7339,7 @@ var MyView = /** @class */ (function (_super) {
                         if (confirmDestructiveAction('删除关系：' + rel.charA + ' × ' + rel.charB, '将同时清除双方人物 MD 中的关系与变化记录。')) {
                             var realIdx = findRelationIndex(self.relations, rel);
                             if (realIdx !== -1) {
+                                pushUndoSnapshot(self, '删除人物关系：' + rel.charA + ' × ' + rel.charB);
                                 removeIntimacyHistoryForPair(self.plugin, rel.charA, rel.charB);
                                 self.relations.splice(realIdx, 1);
                                 self.saveFactionsAndRelations();
@@ -6102,11 +7357,92 @@ var MyView = /** @class */ (function (_super) {
         }
     };
 
+    // 将现有图谱 DOM 临时移动到应用级专注层；不重建 SVG、节点、筛选器或图谱数据源。
+    // 进入时可适配大视口，退出时恢复原来的缩放/平移/聚焦状态及 DOM 位置。
+    function rwOpenGraphFocusOverlay(view, target, title, graphApi) {
+        if (!view || !target || !target.parentElement) return;
+        if (view._rwGraphFocusRestore) view._rwGraphFocusRestore();
+        if (typeof graphApi === 'function') graphApi = { fit: graphApi };
+        graphApi = graphApi || null;
+        var root = rwEnsureAppFloatLayer(view);
+        var parent = target.parentElement;
+        var next = target.nextSibling;
+        var oldStyle = target.getAttribute('style');
+        var oldClass = target.getAttribute('class');
+        var savedGraphState = graphApi && typeof graphApi.getState === 'function' ? graphApi.getState() : null;
+        var previousFocus = document.activeElement;
+        var ownerWindow = target.closest ? target.closest('.rw-app-float-window') : null;
+        view._rwGraphFocusWindowId = ownerWindow ? ownerWindow.getAttribute('data-rw-window-id') : null;
+        var marker = document.createComment('rw-graph-focus-placeholder');
+        parent.insertBefore(marker, target);
+        var overlay = root.createEl('div', { cls: 'rw-graph-focus-overlay my-char-view-root' });
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
+        overlay.setAttribute('aria-label', title + '专注模式');
+        var head = overlay.createEl('div', { cls: 'rw-graph-focus-head' });
+        head.createEl('strong', { text: title });
+        head.createEl('span', { text: '专注模式 · 保留当前筛选、搜索和节点布局', cls: 'my-char-view-muted' });
+        var controls = head.createEl('div', { cls: 'rw-graph-focus-controls' });
+        if (graphApi && typeof graphApi.zoomOut === 'function') {
+            var zoomOut = controls.createEl('button', { text: '−', cls: 'my-char-view-btn my-char-btn-sm', attr: { 'aria-label': '缩小图谱', title: '缩小图谱' } });
+            zoomOut.addEventListener('click', function () { graphApi.zoomOut(); });
+        }
+        if (graphApi && typeof graphApi.zoomIn === 'function') {
+            var zoomIn = controls.createEl('button', { text: '+', cls: 'my-char-view-btn my-char-btn-sm', attr: { 'aria-label': '放大图谱', title: '放大图谱' } });
+            zoomIn.addEventListener('click', function () { graphApi.zoomIn(); });
+        }
+        if (graphApi && typeof graphApi.fit === 'function') {
+            var fit = controls.createEl('button', { text: '适应', cls: 'my-char-view-btn my-char-btn-sm', attr: { title: '将当前筛选范围适应到专注窗口' } });
+            fit.addEventListener('click', function () { try { graphApi.fit(); } catch (e) { console.warn('图谱适应屏幕失败', e); } });
+        }
+        var close = head.createEl('button', { text: '✕ 退出专注', cls: 'my-char-view-btn my-char-btn-sm rw-graph-focus-close' });
+        close.setAttribute('aria-label', '退出图谱专注模式');
+        var body = overlay.createEl('div', { cls: 'rw-graph-focus-body' });
+        body.appendChild(target);
+        target.classList.add('rw-graph-focus-target');
+        target.style.display = 'flex';
+        target.style.flexDirection = 'column';
+        target.style.width = '100%';
+        target.style.height = '100%';
+        target.style.maxWidth = 'none';
+        target.style.minWidth = '0';
+        target.style.minHeight = '0';
+        target.style.boxSizing = 'border-box';
+        var closed = false;
+        function restore() {
+            if (closed) return;
+            closed = true;
+            if (marker.parentNode) marker.parentNode.insertBefore(target, marker);
+            else parent.insertBefore(target, next && next.parentNode === parent ? next : null);
+            marker.remove();
+            if (oldStyle === null) target.removeAttribute('style'); else target.setAttribute('style', oldStyle);
+            if (oldClass === null) target.removeAttribute('class'); else target.setAttribute('class', oldClass);
+            overlay.remove();
+            root.removeEventListener('keydown', onKey, true);
+            if (graphApi && savedGraphState && typeof graphApi.setState === 'function') {
+                try { graphApi.setState(savedGraphState); } catch (e) { console.warn('恢复图谱状态失败', e); }
+            }
+            if (view._rwGraphFocusRestore === restore) view._rwGraphFocusRestore = null;
+            view._rwGraphFocusWindowId = null;
+            if (previousFocus && previousFocus.isConnected && typeof previousFocus.focus === 'function') previousFocus.focus();
+        }
+        function onKey(ev) { if (ev.key === 'Escape') { ev.preventDefault(); restore(); } }
+        close.addEventListener('click', restore);
+        root.addEventListener('keydown', onKey, true);
+        view._rwGraphFocusRestore = restore;
+        if (graphApi && typeof graphApi.fit === 'function') {
+            requestAnimationFrame(function () { if (!closed) { try { graphApi.fit(); } catch (e) { console.warn('图谱专注视口适配失败', e); } } });
+        }
+        close.focus();
+    }
+
     MyView.prototype.renderGraph = function(container) {
         var self = this;
         var terms = getTermSet(this.plugin);
         container.empty();
         container.addClass('my-char-graph-root');
+        this._rwCharGraphApi = null;
+        this._rwOrgGraphApi = null;
 
         var toolbar = container.createEl('div', { cls: 'my-char-graph-toolbar' });
         toolbar.createEl('span', { text: '🕸️ ' + terms.relation + '网络', cls: 'my-char-graph-title' });
@@ -6133,12 +7469,43 @@ var MyView = /** @class */ (function (_super) {
         hint.className = 'my-char-view-muted';
         hint.style.fontSize = '11px';
 
+        // 人物/组织图谱使用顶部切换标签，避免长页面上下堆叠。
+        var graphTabBar = container.createEl('div', { cls: 'rw-graph-tab-switcher' });
+        var personTabBtn = graphTabBar.createEl('button', { text: '👤 人物关系图谱', cls: 'rw-graph-tab-button' });
+        var orgTabBtn = graphTabBar.createEl('button', { text: '🏛️ 组织关系图谱', cls: 'rw-graph-tab-button' });
+        var focusGraphBtn = graphTabBar.createEl('button', { text: '🔍', cls: 'my-char-view-btn rw-graph-focus-trigger' });
+        focusGraphBtn.title = '一览图谱：放大到整个可用窗口，无需页面滚动';
+        focusGraphBtn.setAttribute('aria-label', '一览图谱');
+        var orgGraphSection = container.createEl('section', { cls: 'rw-org-graph-tab-section' });
+        var charGraphSection = container.createEl('section', { cls: 'rw-char-graph-tab-section' });
+        orgGraphSection.style.display = 'none';
+        charGraphSection.style.display = 'block';
+        orgGraphSection.style.minWidth = '0';
+        charGraphSection.style.minWidth = '0';
+        orgGraphSection.createEl('h3', { text: '🏛️ 组织关系图谱' });
+        this.renderOrgRelationsPanel(orgGraphSection);
+        function activateGraphTab(which) {
+            self._activeRelationGraphTab = which;
+            var showOrg = which === 'organization';
+            orgGraphSection.style.display = showOrg ? 'block' : 'none';
+            charGraphSection.style.display = showOrg ? 'none' : 'block';
+            personTabBtn.classList.toggle('is-active', !showOrg);
+            orgTabBtn.classList.toggle('is-active', showOrg);
+            personTabBtn.setAttribute('aria-pressed', showOrg ? 'false' : 'true');
+            orgTabBtn.setAttribute('aria-pressed', showOrg ? 'true' : 'false');
+            if(showOrg && typeof self._fitOrgGraphToView==='function') self._fitOrgGraphToView();
+        }
+        personTabBtn.addEventListener('click', function() { activateGraphTab('character'); });
+        orgTabBtn.addEventListener('click', function() { activateGraphTab('organization'); });
+        activateGraphTab(this._activeRelationGraphTab || 'character');
+        focusGraphBtn.addEventListener('click',function(){var isOrg=self._activeRelationGraphTab==='organization';var target=isOrg?orgGraphSection.querySelector('.rw-org-network-viewport'):charGraphSection.querySelector('.my-char-graph-canvas-wrap');rwOpenGraphFocusOverlay(self,target,isOrg?'组织关系图谱':'人物关系图谱',isOrg?self._rwOrgGraphApi:self._rwCharGraphApi);});
+
         if (this.chars.length === 0) {
-            container.createEl('p', { text: '暂无' + terms.entity + '数据', cls: 'my-char-view-empty' });
+            charGraphSection.createEl('p', { text: '暂无' + terms.entity + '数据', cls: 'my-char-view-empty' });
             return;
         }
 
-        var syncScopeBar = container.createEl('div', { cls: 'my-char-graph-sync-scope' });
+        var syncScopeBar = charGraphSection.createEl('div', { cls: 'my-char-graph-sync-scope' });
         syncScopeBar.createEl('span', { text: '📌 图谱同步类型：', cls: 'my-char-filter-label' });
 
         var modeSelect = syncScopeBar.createEl('select', { cls: 'my-char-select' });
@@ -6158,7 +7525,7 @@ var MyView = /** @class */ (function (_super) {
 
         var typeOptions = collectCharTypesForGraph(this);
         var selectedTypes = this.plugin.settings.graphSyncTypes || [];
-        var typeCheckboxWrap = container.createEl('div', { cls: 'my-char-graph-type-checks' });
+        var typeCheckboxWrap = charGraphSection.createEl('div', { cls: 'my-char-graph-type-checks' });
         if (typeOptions.length === 0) {
             typeCheckboxWrap.createEl('span', { text: '（暂无类型数据，请在人物文件中添加「类型」字段）', cls: 'my-char-view-muted' });
         } else {
@@ -6185,14 +7552,14 @@ var MyView = /** @class */ (function (_super) {
 
         var graphChars = getCharsForGraphSync(this.plugin, this);
         var graphFolder = getGraphNotesFolder(this.plugin);
-        var folderHint = container.createEl('div', { cls: 'my-char-graph-legend' });
+        var folderHint = charGraphSection.createEl('div', { cls: 'my-char-graph-legend' });
         folderHint.textContent = getGraphSyncSummaryText(this.plugin, this) + ' · 图谱节点目录：' + graphFolder + ' · ' + graphChars.length + ' 个节点，' + this.relations.length + ' 条' + terms.relation;
 
-        container.createEl('div', { cls: 'my-char-view-muted', text: '▼ 关系网络预览（核心人物按关系度居中；节点大小表示关系数量；点击或键盘聚焦节点可打开本地图谱）' }).style.margin = '8px 0 4px';
+        charGraphSection.createEl('div', { cls: 'my-char-view-muted', text: '▼ 关系网络预览（核心人物按关系度居中；节点大小表示关系数量；单击/键盘聚焦直接关系，双击打开 Obsidian 局部图谱）' }).style.margin = '8px 0 4px';
 
         var n = graphChars.length;
         if (n === 0) {
-            container.createEl('p', { text: '当前同步范围内没有' + terms.entity + '，请调整类型筛选后重试', cls: 'my-char-view-empty' });
+            charGraphSection.createEl('p', { text: '当前同步范围内没有' + terms.entity + '，请调整类型筛选后重试', cls: 'my-char-view-empty' });
             return;
         }
         // 先确定画布尺寸再计算节点坐标；此前 width/height 尚未赋值，导致布局坐标异常。
@@ -6227,15 +7594,31 @@ var MyView = /** @class */ (function (_super) {
         for (var gi = 0; gi < graphChars.length; gi++) graphCharNames[graphChars[gi].name] = true;
 
         // 图谱交互工具：搜索定位、关系类型筛选、人物聚焦、缩放
-        var tools = container.createEl('div', { cls: 'rw-graph-tools' });
+        var tools = charGraphSection.createEl('div', { cls: 'rw-graph-tools' });
         var searchInput = tools.createEl('input', { type: 'search', placeholder: '搜索人物姓名并定位…', cls: 'my-char-form-input' });
         searchInput.style.maxWidth = '240px';
+        var categoryFilter = tools.createEl('select', { cls: 'my-char-select' });
+        categoryFilter.createEl('option', { text: '全部上属分类', attr: { value: '__all__' } });
+        var graphCategories = Array.from(new Set(this.relations.map(function(r){ return String(r.category || inferRelationCategory(r.type || r.relation)).trim(); }).filter(Boolean)));
+        graphCategories.sort().forEach(function(c) { categoryFilter.createEl('option', { text: c, attr: { value: c } }); });
         var relationFilter = tools.createEl('select', { cls: 'my-char-select' });
-        relationFilter.createEl('option', { text: '全部关系类型', attr: { value: '__all__' } });
+        relationFilter.createEl('option', { text: '全部具体关系', attr: { value: '__all__' } });
         var relationTypes = Array.from(new Set(this.relations.map(function(r){ return String(r.type || r.relation || '关系').trim(); }).filter(Boolean)));
         relationTypes.forEach(function(t){ relationFilter.createEl('option', { text: t, attr: { value: t } }); });
+        function refreshSpecificRelationOptions() {
+            var previous = relationFilter.value || '__all__';
+            var selectedCategory = categoryFilter.value || '__all__';
+            var allowed = self.relations.filter(function(r) {
+                return selectedCategory === '__all__' || String(r.category || inferRelationCategory(r.type || r.relation)) === selectedCategory;
+            }).map(function(r) { return String(r.type || r.relation || '关系').trim(); }).filter(Boolean);
+            allowed = Array.from(new Set(allowed)).sort();
+            relationFilter.empty();
+            relationFilter.createEl('option', { text: selectedCategory === '__all__' ? '全部具体关系' : '该分类下全部具体关系', attr: { value: '__all__' } });
+            allowed.forEach(function(t) { relationFilter.createEl('option', { text: t, attr: { value: t } }); });
+            relationFilter.value = allowed.indexOf(previous) >= 0 ? previous : '__all__';
+        }
         var focusHint = tools.createEl('span', { text: '点击人物聚焦，再次点击取消；双击打开人物资料', cls: 'my-char-view-muted' });
-        var layoutBar = container.createEl('div', { cls: 'rw-graph-layout-controls' });
+        var layoutBar = charGraphSection.createEl('div', { cls: 'rw-graph-layout-controls' });
         layoutBar.createEl('span', { text: '布局', cls: 'my-char-view-muted' });
         function addLayoutButton(label, title, active, handler) {
             var btn = layoutBar.createEl('button', { text: label, cls: 'my-char-view-btn rw-graph-layout-btn' });
@@ -6259,7 +7642,7 @@ var MyView = /** @class */ (function (_super) {
         addLayoutButton('自动整理', '重新计算人物位置，尝试减少连线交叉', false, function() {
             self._graphLayoutSeed = graphLayoutSeed + 1; self.renderGraph(container);
         });
-        var wrap = container.createEl('div', { cls: 'my-char-graph-canvas-wrap' });
+        var wrap = charGraphSection.createEl('div', { cls: 'my-char-graph-canvas-wrap' });
         // 使用固定尺寸舞台承载 SVG 与 HTML 姓名层；两者共享完全相同的坐标与缩放矩阵。
         wrap.style.overflow='auto'; wrap.style.minHeight=height+'px'; wrap.style.position='relative';
         var graphStage = wrap.createEl('div', { cls: 'rw-graph-stage' });
@@ -6273,7 +7656,7 @@ var MyView = /** @class */ (function (_super) {
         var graphScale=1, graphTx=0, graphTy=0, focusedName=null, searchName=null;
         var edgeGroup=document.createElementNS('http://www.w3.org/2000/svg','g');
         var nodeGroup=document.createElementNS('http://www.w3.org/2000/svg','g');
-        var edgeEls=[], nodeEls={}, graphNodeLabels=[];
+        var edgeEls=[], nodeEls={}, graphNodeLabels=[], nodeDragState=null, nodeWasDragged=false;
         function relType(rel){ return String(rel.type || rel.relation || '关系').trim(); }
         for (var ri=0; ri<layout.edges.length; ri++) {
             var rel=layout.edges[ri]; if(!graphCharNames[rel.charA] || !graphCharNames[rel.charB]) continue;
@@ -6281,7 +7664,7 @@ var MyView = /** @class */ (function (_super) {
             var eg=document.createElementNS('http://www.w3.org/2000/svg','g'); eg.setAttribute('class','my-char-graph-edge-group');
             var line=document.createElementNS('http://www.w3.org/2000/svg','line');
             line.setAttribute('x1',String(pa.x)); line.setAttribute('y1',String(pa.y)); line.setAttribute('x2',String(pb.x)); line.setAttribute('y2',String(pb.y));
-            line.setAttribute('stroke',getIntimacyColor(rel.intimacy||0)); line.setAttribute('stroke-width','1.6'); line.setAttribute('stroke-opacity','0.58'); line.setAttribute('class','my-char-graph-edge'); eg.appendChild(line);
+            line.setAttribute('stroke',getRelationCategoryColor(self.plugin, String(rel.category || inferRelationCategory(rel.type || rel.relation)))); line.setAttribute('stroke-width','1.6'); line.setAttribute('stroke-opacity','0.58'); line.setAttribute('class','my-char-graph-edge'); eg.appendChild(line);
             var label=document.createElementNS('http://www.w3.org/2000/svg','text');
             var edgeDx=pb.x-pa.x, edgeDy=pb.y-pa.y, edgeLen=Math.sqrt(edgeDx*edgeDx+edgeDy*edgeDy)||1;
             // 标签沿连线偏向中段但不压在节点边缘；同一人物对的多条关系使用不同偏移。
@@ -6292,8 +7675,8 @@ var MyView = /** @class */ (function (_super) {
             var labelT=samePairIndex>0?0.56:0.5;
             label.setAttribute('x',String(pa.x+(pb.x-pa.x)*labelT-(edgeDy/edgeLen)*edgeOffset));
             label.setAttribute('y',String(pa.y+(pb.y-pa.y)*labelT+(edgeDx/edgeLen)*edgeOffset-5));
-            label.setAttribute('text-anchor','middle'); label.setAttribute('font-size','10'); label.setAttribute('class','my-char-graph-edge-label'); label.setAttribute('paint-order','stroke'); label.setAttribute('stroke','#f8fafc'); label.setAttribute('stroke-width','5'); label.setAttribute('stroke-linejoin','round'); label.textContent=relType(rel); eg.appendChild(label);
-            eg.dataset.type=relType(rel); eg.dataset.a=rel.charA; eg.dataset.b=rel.charB; if(layout.edges.length >= 10) eg.classList.add('rw-edge-label-hidden'); edgeGroup.appendChild(eg); edgeEls.push(eg);
+            label.setAttribute('data-edge-t',String(labelT)); label.setAttribute('data-edge-offset',String(edgeOffset)); label.setAttribute('text-anchor','middle'); label.setAttribute('font-size','10'); label.setAttribute('class','my-char-graph-edge-label'); label.setAttribute('paint-order','stroke'); label.setAttribute('stroke','#f8fafc'); label.setAttribute('stroke-width','5'); label.setAttribute('stroke-linejoin','round'); label.textContent=relType(rel); eg.appendChild(label);
+            eg.dataset.type=relType(rel); eg.dataset.category=String(rel.category || inferRelationCategory(relType(rel))); eg.dataset.a=rel.charA; eg.dataset.b=rel.charB; if(layout.edges.length >= 10) eg.classList.add('rw-edge-label-hidden'); edgeGroup.appendChild(eg); edgeEls.push(eg);
         }
         var names=Object.keys(nodePositions);
         for(var ni=0; ni<names.length; ni++) (function(name){
@@ -6307,12 +7690,20 @@ var MyView = /** @class */ (function (_super) {
             var nodeRadius = Math.max(17, Math.min(34, (pos.radius || 24) * graphNodeScale));
             var circle=document.createElementNS('http://www.w3.org/2000/svg','circle'); circle.setAttribute('cx',String(pos.x)); circle.setAttribute('cy',String(pos.y)); circle.setAttribute('r',String(nodeRadius)); circle.setAttribute('fill',nodeColor); circle.setAttribute('stroke','var(--background-primary, #fff)'); circle.setAttribute('stroke-width','2.5'); g.appendChild(circle);
             // 姓名数据先收集，稍后统一绘制到所有圆点之上的独立 SVG 图层，防止被后续节点覆盖。
-            if (validDisplayName) graphNodeLabels.push({name:displayName, x:pos.x, y:pos.y, radius:nodeRadius});
-            if (displayName && !/^(undefined|null|\[object Object\])$/i.test(displayName)) { var title=document.createElementNS('http://www.w3.org/2000/svg','title'); title.textContent=displayName+(faction?' · '+faction:''); g.appendChild(title); }
-            var nodeClickTimer=null;
-            g.addEventListener('click',function(ev){ focusedName=focusedName===name?null:name; updateGraphEmphasis(); if(nodeClickTimer) clearTimeout(nodeClickTimer); nodeClickTimer=setTimeout(function(){ if(self.showCharDetail && pos.char) self.showCharDetail(pos.char); },240); });
-            g.addEventListener('dblclick',function(ev){ev.preventDefault();ev.stopPropagation();if(nodeClickTimer)clearTimeout(nodeClickTimer);openLocalGraphForEntity(self.app,self.plugin,self,name);});
-            g.addEventListener('keydown',function(ev){if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();focusedName=focusedName===name?null:name;updateGraphEmphasis();if(self.showCharDetail&&pos.char)self.showCharDetail(pos.char);}});
+            if (validDisplayName) graphNodeLabels.push({name:displayName, position:getCurrentOrgPositionText(self,displayName), x:pos.x, y:pos.y, radius:nodeRadius});
+            if (displayName && !/^(undefined|null|\[object Object\])$/i.test(displayName)) { var title=document.createElementNS('http://www.w3.org/2000/svg','title'); title.textContent=displayName+(faction?' · '+faction:'')+(getCurrentOrgPositionText(self,displayName)?' · '+getCurrentOrgPositionText(self,displayName):''); g.appendChild(title); }
+            g.addEventListener('pointerdown',function(ev){
+                if(ev.button!==undefined&&ev.button!==0)return;
+                ev.preventDefault();ev.stopPropagation();
+                nodeDragState={name:name,startX:ev.clientX,startY:ev.clientY,baseX:pos.x,baseY:pos.y};
+                nodeWasDragged=false;
+                try{g.setPointerCapture(ev.pointerId);}catch(e){}
+            });
+            // 单击只聚焦该人物及其当前筛选范围内的直接关系，不打开人物资料。
+            g.addEventListener('click',function(ev){ if(nodeWasDragged){nodeWasDragged=false;return;} focusedName=focusedName===name?null:name; updateGraphEmphasis(); });
+            // 双击保留 Obsidian 原生局部图谱入口；人物资料仍由人物档案模块打开。
+            g.addEventListener('dblclick',function(ev){ev.preventDefault();ev.stopPropagation();openLocalGraphForEntity(self.app,self.plugin,self,name);});
+            g.addEventListener('keydown',function(ev){if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();focusedName=focusedName===name?null:name;updateGraphEmphasis();}});
             nodeGroup.appendChild(g); nodeEls[name]=g;
         })(names[ni]);
         // HTML 姓名层：不再使用 SVG <text>。它位于 SVG 之上，避免 Obsidian/主题对 SVG 文本的样式覆盖。
@@ -6327,7 +7718,10 @@ var MyView = /** @class */ (function (_super) {
             var maxCharsPerLine = chars.length <= 4 ? 4 : (labelInfo.radius >= 46 ? 4 : 3);
             for (var cli=0; cli<chars.length; cli+=maxCharsPerLine) lines.push(chars.slice(cli,cli+maxCharsPerLine).join(''));
             var fontSize = (chars.length <= 2 ? 13 : (chars.length <= 4 ? 11 : 10)) * graphNodeScale;
-            var htmlLabel=nodeLabelGroup.createEl('div', { cls: 'rw-graph-node-name-label', text: lines.join('\n') });
+            var htmlLabel=nodeLabelGroup.createEl('div', { cls: 'rw-graph-node-name-label' });
+            htmlLabel.style.flexDirection='column'; htmlLabel.style.gap='1px';
+            var nameLine=htmlLabel.createEl('span',{text:lines.join('\n')}); nameLine.style.display='block'; nameLine.style.lineHeight='1.05';
+            if(labelInfo.position){var positionLine=htmlLabel.createEl('span',{text:labelInfo.position});positionLine.style.display='block';positionLine.style.maxWidth='100%';positionLine.style.fontSize=Math.max(7,fontSize*.66)+'px';positionLine.style.lineHeight='1.05';positionLine.style.fontWeight='550';positionLine.style.opacity='.88';positionLine.style.whiteSpace='nowrap';positionLine.style.overflow='hidden';positionLine.style.textOverflow='ellipsis';}
             htmlLabel.setAttribute('data-node-name',labelInfo.name);
             htmlLabel.style.position='absolute'; htmlLabel.style.left=labelInfo.x+'px'; htmlLabel.style.top=labelInfo.y+'px';
             htmlLabel.style.transform='translate(-50%, -50%)'; htmlLabel.style.width=Math.max(48,labelInfo.radius*1.72)+'px';
@@ -6343,6 +7737,8 @@ var MyView = /** @class */ (function (_super) {
         graphStage.appendChild(svg);
 
         var zoomBar=wrap.createEl('div',{cls:'my-char-graph-zoom-bar'});
+        var graphOverviewBtn=zoomBar.createEl('button',{text:'🔍',attr:{'aria-label':'全图浏览','title':'全图浏览：将关系网络铺满可用视口'}}); graphOverviewBtn.addClass('rw-graph-overview-button');
+        graphOverviewBtn.addEventListener('click',function(ev){ev.preventDefault();ev.stopPropagation();rwOpenGraphFocusOverlay(self,wrap,'人物关系网络 · 全图浏览',self._rwCharGraphApi);});
         var zoomOut=zoomBar.createEl('button',{text:'−',attr:{'aria-label':'缩小图谱'}}), zoomLabel=zoomBar.createEl('span',{text:'100%',cls:'my-char-graph-zoom-label'}), zoomIn=zoomBar.createEl('button',{text:'+',attr:{'aria-label':'放大图谱'}}), zoomReset=zoomBar.createEl('button',{text:'适应'});
         [zoomOut,zoomIn,zoomReset].forEach(function(btn){btn.addClass('my-char-view-btn');btn.addEventListener('pointerdown',function(ev){ev.stopPropagation();});});
         function applyGraphZoom(){
@@ -6353,28 +7749,68 @@ var MyView = /** @class */ (function (_super) {
         }
         function updateGraphEmphasis(){
             var selectedType=relationFilter.value||'__all__';
-            var connected={}; if(focusedName){connected[focusedName]=true;edgeEls.forEach(function(e){if(e.dataset.a===focusedName)connected[e.dataset.b]=true;if(e.dataset.b===focusedName)connected[e.dataset.a]=true;});}
+            var selectedCategory=categoryFilter.value||'__all__';
+            var connected={}; if(focusedName){connected[focusedName]=true;edgeEls.forEach(function(e){var categoryOk=selectedCategory==='__all__'||e.dataset.category===selectedCategory;var typeOk=selectedType==='__all__'||e.dataset.type===selectedType;if(!categoryOk||!typeOk)return;if(e.dataset.a===focusedName)connected[e.dataset.b]=true;if(e.dataset.b===focusedName)connected[e.dataset.a]=true;});}
             Object.keys(nodeEls).forEach(function(name){var g=nodeEls[name],dim=(focusedName&&!connected[name])||(searchName&&!name.toLowerCase().includes(searchName.toLowerCase()));g.style.opacity=dim?'0.16':'1';g.classList.toggle('is-focused',name===focusedName);g.classList.toggle('is-search-hit',!!searchName&&name.toLowerCase().includes(searchName.toLowerCase()));});
             nodeLabelGroup.querySelectorAll('[data-node-name]').forEach(function(label){var labelName=label.getAttribute('data-node-name')||'',dim=(focusedName&&!connected[labelName])||(searchName&&!labelName.toLowerCase().includes(searchName.toLowerCase()));label.style.opacity=dim?'0.16':'1';});
-            edgeEls.forEach(function(e){var typeOk=selectedType==='__all__'||e.dataset.type===selectedType;var focusOk=!focusedName||(e.dataset.a===focusedName||e.dataset.b===focusedName);e.style.display=typeOk?'':'none';e.style.opacity=focusOk?'1':'.08';var label=e.querySelector('text');var hideDenseLabel=edgeEls.length>=10&&!focusedName&&graphScale<1.2;e.classList.toggle('rw-edge-label-hidden',hideDenseLabel||(focusedName&&!focusOk));if(label&&(!typeOk||(focusedName&&!focusOk)))e.classList.add('rw-edge-label-hidden');else if(label&&!hideDenseLabel)e.classList.remove('rw-edge-label-hidden');});
+            edgeEls.forEach(function(e){var categoryOk=selectedCategory==='__all__'||e.dataset.category===selectedCategory;var typeOk=selectedType==='__all__'||e.dataset.type===selectedType;var focusOk=!focusedName||(e.dataset.a===focusedName||e.dataset.b===focusedName);e.style.display=(categoryOk&&typeOk)?'':'none';e.style.opacity=focusOk?'1':'.08';var label=e.querySelector('text');var hideDenseLabel=edgeEls.length>=10&&!focusedName&&graphScale<1.2;e.classList.toggle('rw-edge-label-hidden',hideDenseLabel||(focusedName&&!focusOk));if(label&&(!(categoryOk&&typeOk)||(focusedName&&!focusOk)))e.classList.add('rw-edge-label-hidden');else if(label&&!hideDenseLabel)e.classList.remove('rw-edge-label-hidden');});
         }
         function fitGraphToView() {
             var minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
             names.forEach(function(name){var p=nodePositions[name],pad=(p.radius||26)+24;minX=Math.min(minX,p.x-pad);maxX=Math.max(maxX,p.x+pad);minY=Math.min(minY,p.y-pad);maxY=Math.max(maxY,p.y+pad);});
             if (!isFinite(minX)) { graphScale=1;graphTx=0;graphTy=0;applyGraphZoom();return; }
             var boundsW=Math.max(1,maxX-minX),boundsH=Math.max(1,maxY-minY),viewW=wrap.clientWidth||width,viewH=wrap.clientHeight||height,pad=24;
-            graphScale=Math.max(.4,Math.min(1.8,(viewW-pad*2)/boundsW,(viewH-pad*2)/boundsH));
+            graphScale=Math.max(.12,Math.min(2.4,(viewW-pad*2)/boundsW,(viewH-pad*2)/boundsH));
             var centerX=(minX+maxX)/2,centerY=(minY+maxY)/2;
             graphTx=viewW/2-(width/2+(centerX-width/2)*graphScale);
             graphTy=viewH/2-(height/2+(centerY-height/2)*graphScale);
-            searchName=null;searchInput.value='';focusedName=null;applyGraphZoom();
+            applyGraphZoom();
         }
-        zoomIn.addEventListener('click',function(){graphScale=Math.min(3.2,graphScale*1.2);applyGraphZoom();}); zoomOut.addEventListener('click',function(){graphScale=Math.max(.4,graphScale/1.2);applyGraphZoom();}); zoomReset.addEventListener('click',fitGraphToView);
+        self._fitCharGraphToView = fitGraphToView;
+        function zoomCharacterGraphIn(){graphScale=Math.min(3.2,graphScale*1.2);applyGraphZoom();}
+        function zoomCharacterGraphOut(){graphScale=Math.max(.4,graphScale/1.2);applyGraphZoom();}
+        self._rwCharGraphApi = {
+            fit: fitGraphToView,
+            zoomIn: zoomCharacterGraphIn,
+            zoomOut: zoomCharacterGraphOut,
+            getState: function(){return {scale:graphScale,tx:graphTx,ty:graphTy,focusedName:focusedName,searchName:searchName};},
+            setState: function(state){if(!state)return;graphScale=Number(state.scale)||1;graphTx=Number(state.tx)||0;graphTy=Number(state.ty)||0;focusedName=state.focusedName||null;searchName=state.searchName||null;applyGraphZoom();}
+        };
+        zoomIn.addEventListener('click',zoomCharacterGraphIn); zoomOut.addEventListener('click',zoomCharacterGraphOut); zoomReset.addEventListener('click',fitGraphToView);
         searchInput.addEventListener('input',function(){searchName=searchInput.value.trim();var found=names.find(function(n){return searchName&&n.toLowerCase().includes(searchName.toLowerCase());});if(found){var p=nodePositions[found];graphTx=graphScale*(width/2-p.x);graphTy=graphScale*(height/2-p.y);}applyGraphZoom();});
         relationFilter.addEventListener('change',updateGraphEmphasis);
-        var drag=null; svg.addEventListener('pointerdown',function(ev){if(ev.target.closest&&ev.target.closest('.my-char-graph-node'))return;if(ev.button!==undefined&&ev.button!==0)return;drag={x:ev.clientX,y:ev.clientY,tx:graphTx,ty:graphTy};if(svg.setPointerCapture)svg.setPointerCapture(ev.pointerId);});
-        svg.addEventListener('pointermove',function(ev){if(!drag)return;graphTx=drag.tx+(ev.clientX-drag.x);graphTy=drag.ty+(ev.clientY-drag.y);applyGraphZoom();});
-        function endDrag(){drag=null;} svg.addEventListener('pointerup',endDrag);svg.addEventListener('pointercancel',endDrag);svg.addEventListener('lostpointercapture',endDrag);
+        categoryFilter.addEventListener('change',function(){refreshSpecificRelationOptions();updateGraphEmphasis();});
+        var drag=null;
+        svg.addEventListener('pointerdown',function(ev){if(ev.target.closest&&ev.target.closest('.my-char-graph-node'))return;if(ev.button!==undefined&&ev.button!==0)return;drag={x:ev.clientX,y:ev.clientY,tx:graphTx,ty:graphTy};if(svg.setPointerCapture)svg.setPointerCapture(ev.pointerId);});
+        function updateDraggedNodeGeometry(name){
+            var p=nodePositions[name],g=nodeEls[name];if(!p||!g)return;
+            var circle=g.querySelector('circle');if(circle){circle.setAttribute('cx',String(p.x));circle.setAttribute('cy',String(p.y));}
+            nodeLabelGroup.querySelectorAll('[data-node-name]').forEach(function(labelEl){if(labelEl.getAttribute('data-node-name')===name){labelEl.style.left=p.x+'px';labelEl.style.top=p.y+'px';}});
+            edgeEls.forEach(function(edge){
+                var a=nodePositions[edge.dataset.a],b=nodePositions[edge.dataset.b];if(!a||!b)return;
+                var line=edge.querySelector('line'),label=edge.querySelector('text');
+                if(line){line.setAttribute('x1',String(a.x));line.setAttribute('y1',String(a.y));line.setAttribute('x2',String(b.x));line.setAttribute('y2',String(b.y));}
+                if(label){
+                    var t=Number(label.getAttribute('data-edge-t'))||.5,off=Number(label.getAttribute('data-edge-offset'))||0;
+                    var dx=b.x-a.x,dy=b.y-a.y,len=Math.sqrt(dx*dx+dy*dy)||1;
+                    label.setAttribute('x',String(a.x+(b.x-a.x)*t-(dy/len)*off));
+                    label.setAttribute('y',String(a.y+(b.y-a.y)*t+(dx/len)*off-5));
+                }
+            });
+        }
+        svg.addEventListener('pointermove',function(ev){
+            if(nodeDragState){
+                var dx=(ev.clientX-nodeDragState.startX)/graphScale,dy=(ev.clientY-nodeDragState.startY)/graphScale;
+                if(Math.abs(ev.clientX-nodeDragState.startX)+Math.abs(ev.clientY-nodeDragState.startY)>3)nodeWasDragged=true;
+                nodePositions[nodeDragState.name].x=nodeDragState.baseX+dx;
+                nodePositions[nodeDragState.name].y=nodeDragState.baseY+dy;
+                updateDraggedNodeGeometry(nodeDragState.name);
+                updateGraphEmphasis();
+                return;
+            }
+            if(!drag)return;graphTx=drag.tx+(ev.clientX-drag.x);graphTy=drag.ty+(ev.clientY-drag.y);applyGraphZoom();
+        });
+        function endDrag(){drag=null;nodeDragState=null;} svg.addEventListener('pointerup',endDrag);svg.addEventListener('pointercancel',endDrag);svg.addEventListener('lostpointercapture',endDrag);
         svg.addEventListener('wheel',function(ev){ev.preventDefault();graphScale=Math.max(.4,Math.min(3.2,graphScale*(ev.deltaY<0?1.08:.92)));applyGraphZoom();},{passive:false});
         fitGraphToView();
     };
@@ -6474,6 +7910,7 @@ var MyView = /** @class */ (function (_super) {
     MyView.prototype.showBatchRelationDialog = function() {
         var self = this;
         var modal = new BatchRelationModal(this.app, this.relations, this.chars, function(result) {
+            if (['batch_delete_by_type','batch_update_intimacy','clear_all'].indexOf(result.action) >= 0) pushUndoSnapshot(self, '批量修改人物关系');
             if (result.action === 'batch_delete_by_type') {
                 var toDelete = [];
                 for (var i = 0; i < self.relations.length; i++) {
@@ -7026,6 +8463,7 @@ var MyView = /** @class */ (function (_super) {
         var isEdit = !!(prefill && prefill.charA !== undefined && findRelationIndex(this.relations, prefill) !== -1);
         
         var modal = new RelationModal(this.app, this.chars, prefill, relTypes, function (result) {
+            pushUndoSnapshot(self, isEdit ? '编辑人物关系' : '新增人物关系');
             var oldIntimacy = (prefill && prefill.intimacy !== undefined) ? prefill.intimacy : null;
             var newIntimacy = result.intimacy !== undefined ? result.intimacy : 1;
             var timePoint = self.plugin.settings.currentTimePoint || result.startTime || '未标注时间';
@@ -7103,7 +8541,7 @@ var MyView = /** @class */ (function (_super) {
                     ? '✅ 关系已更新：' + result.charA + ' ↔ ' + result.charB + '（' + result.type + '）'
                     : '✅ 关系已添加：' + result.charA + ' ↔ ' + result.charB + '（' + result.type + '）');
             });
-        });
+        }, this.plugin);
         modal.open();
     };
 
@@ -7171,6 +8609,160 @@ function collapseAllTimelineGroups(view, yearGroups) {
 }
 
     // ========== 时间线视图 ==========
+function rwResolveChapterForEvent(view, event) {
+    var settings = view && view.plugin && view.plugin.settings || {};
+    var chapters = settings.chapterLibrary && Array.isArray(settings.chapterLibrary.chapters) ? settings.chapterLibrary.chapters : [];
+    if (!event || !chapters.length) return null;
+    var refs = rwGetEventChapterReferences(event);
+    var linkedChapters = rwGetEventLinkedChapters(settings, event);
+    if (linkedChapters.length) return linkedChapters[0]; // 单章节时间字段的兼容入口；列表展示请使用 rwGetEventLinkedChapters。
+    var candidates = refs.slice();
+    for (var i = 0; i < chapters.length; i++) {
+        var ch = chapters[i];
+        if (candidates.some(function(ref) { return rwChapterReferenceMatches(ref, ch); })) return ch;
+    }
+    var n = event.chapterIndex || event.chapterNumber;
+    if (!n && event.year) { var py = parseChapterHeading(event.year); if (py) n = py.num; }
+    if (!n && event.volume) { var pv = parseChapterHeading(event.volume); if (pv) n = pv.num; }
+    if (n != null) {
+        for (var j = 0; j < chapters.length; j++) {
+            var number = chapters[j].chapterNumber || (parseChapterHeading(chapters[j].name) || {}).num;
+            if (number != null && Number(number) === Number(n)) return chapters[j];
+        }
+    }
+    return null;
+}
+
+function rwApplyChapterStoryTimes(view) {
+    if (!view || !Array.isArray(view.timeline)) return;
+    view.timeline.forEach(function(evt) {
+        evt.chapterStoryTime = '';
+        // 显式填写的故事时间优先；否则从章节库按章节序号解析。
+        if (String(evt.storyYear || '').trim()) return;
+        var linked = rwGetEventLinkedChapters(view.plugin.settings, evt);
+        if (!linked.length) {
+            var refs = rwGetEventChapterReferences(evt).concat([evt.year, evt.volume].filter(Boolean));
+            var legacyChapter = rwResolveChapterRecord(view.plugin.settings, refs);
+            if (legacyChapter) linked = [legacyChapter];
+        }
+        // 多章节事件只有在所有关联章节具有相同故事时间时，才能安全折算为单一事件时间。
+        // 时间不同则保留为空，避免错误地把跨章节事件归到其中某一章。
+        var times = linked.map(function(ch) { return rwGetChapterDefaultStoryTime(ch.storyTime || ''); });
+        if (times.length && times.every(function(t) { return !!t && t === times[0]; })) evt.chapterStoryTime = times[0];
+    });
+}
+
+function renderChapterLibraryManager(view, container) {
+    var self = view;
+    var settings = self.plugin.settings;
+    if (!settings.chapterLibrary) settings.chapterLibrary = { folder: '', chapters: [] };
+    var library = settings.chapterLibrary;
+    if (!Array.isArray(library.chapters)) library.chapters = [];
+    var top = container.createEl('div', { cls: 'rw-chapter-manager' });
+    top.createEl('h3', { text: '章节库与故事时间', cls: 'my-char-section-title' });
+    top.createEl('p', { text: '扫描小说正文目录建立只读索引，为每章设置故事发生时间或时间范围（例如：公元前177年3月-9月）。范围结束月份会作为章节人物出场时间的默认值。章节时间会参与人物完整历史履历排序；不会改写正文，也不会覆盖时间线事件中明确填写的独立时间。', cls: 'my-char-muted' });
+    var chapterModeBar = top.createEl('div', { cls: 'my-char-lifecycle-toolbar rw-chapter-modebar' });
+    var chapterSettingsPanel = top.createEl('section', { cls: 'rw-chapter-settings-panel' });
+    var chapterPreviewPanel = top.createEl('section', { cls: 'rw-chapter-preview-panel' });
+    var chapterMode = self._chapterManagerMode || 'settings';
+    function setChapterMode(mode) { self._chapterManagerMode = mode; chapterSettingsPanel.style.display = mode === 'settings' ? '' : 'none'; chapterPreviewPanel.style.display = mode === 'preview' ? '' : 'none'; Array.from(chapterModeBar.querySelectorAll('button')).forEach(function(b){b.classList.toggle('is-active', b.dataset.mode === mode);}); }
+    [['settings','✍️ 设置章节时间'],['preview','📈 章节时间轴预览']].forEach(function(pair){var b=chapterModeBar.createEl('button',{text:pair[1],cls:'my-char-btn-ghost my-char-btn-sm'});b.dataset.mode=pair[0];b.addEventListener('click',function(){setChapterMode(pair[0]);});});
+    var folderRow = chapterSettingsPanel.createEl('div', { cls: 'rw-chapter-folder-row' });
+    folderRow.createEl('label', { text: '正文文件夹' });
+    var folderInput = folderRow.createEl('input', { type: 'text', placeholder: '例如：小说/正文', value: library.folder || '' });
+    folderInput.style.flex = '1';
+    var scanBtn = folderRow.createEl('button', { text: '扫描 / 更新章节', cls: 'my-char-btn my-char-btn-sm' });
+    var stats = chapterSettingsPanel.createEl('div', { cls: 'rw-chapter-manager-stats' });
+    var actions = chapterSettingsPanel.createEl('div', { cls: 'rw-history-toolbar' });
+    var search = actions.createEl('input', { type: 'text', placeholder: '搜索章节名称或路径…', cls: 'my-char-view-search' });
+    var statusFilter = actions.createEl('select');
+    [['全部章节','all'],['已设置时间','set'],['待设置时间','unset']].forEach(function(x){ statusFilter.add(new Option(x[0], x[1])); });
+    var batchTime = actions.createEl('input', { type: 'text', placeholder: '批量设置故事时间', cls: 'my-char-view-search' });
+    batchTime.style.maxWidth = '190px';
+    var applyBatch = actions.createEl('button', { text: '填入所有待设置章节', cls: 'my-char-btn-ghost my-char-btn-xs' });
+    var list = chapterSettingsPanel.createEl('div', { cls: 'rw-chapter-library-list' });
+    var preview = chapterPreviewPanel.createEl('div', { cls: 'rw-chapter-time-preview' });
+    preview.createEl('h4', { text: '章节时间轴预览' });
+    preview.createEl('p', { text: '按故事时间排序查看已设置时间的章节；点击章节名称可直接打开正文。', cls: 'my-char-muted' });
+    var previewBody = preview.createEl('div');
+    function chapterSort(a,b) {
+        var pa=parseChapterHeading(a.name), pb=parseChapterHeading(b.name);
+        if(pa&&pb&&pa.num!==pb.num)return pa.num-pb.num;
+        if(pa&&!pb)return -1; if(pb&&!pa)return 1;
+        return String(a.name).localeCompare(String(b.name),'zh-CN');
+    }
+    function openChapter(ch) {
+        var f=self.app.vault.getAbstractFileByPath(ch.path);
+        if(f) self.app.workspace.getLeaf(false).openFile(f);
+        else new obsidian.Notice('章节文件不存在：'+ch.path);
+    }
+    function render() {
+        list.empty(); previewBody.empty();
+        var chapters=library.chapters.slice().sort(chapterSort);
+        var q=String(search.value||'').trim().toLowerCase();
+        var mode=statusFilter.value;
+        var visible=chapters.filter(function(ch){
+            var has=!!String(ch.storyTime||'').trim();
+            return (mode==='all'||(mode==='set'&&has)||(mode==='unset'&&!has)) && (!q||(String(ch.name+' '+ch.path).toLowerCase().indexOf(q)>=0));
+        });
+        var setCount=chapters.filter(function(ch){return !!String(ch.storyTime||'').trim();}).length;
+        stats.textContent='共 '+chapters.length+' 章 · 已设置时间 '+setCount+' 章 · 待设置 '+(chapters.length-setCount)+' 章';
+        if(!visible.length) list.createEl('p',{text:chapters.length?'没有符合筛选条件的章节。':'尚未建立章节索引，请先填写正文文件夹并扫描。',cls:'my-char-view-empty'});
+        visible.forEach(function(ch,index){
+            var row=list.createEl('div',{cls:'rw-chapter-row'});
+            var open=row.createEl('button',{text:ch.name,cls:'rw-text-link'});
+            open.title=ch.path; open.addEventListener('click',function(){openChapter(ch);});
+            var time=row.createEl('input',{type:'text',value:ch.storyTime||'',placeholder:'如：公元前177年3月-9月 / 景和元年三月'});
+            time.setAttribute('aria-label',ch.name+' 的故事时间');
+            time.addEventListener('change',async function(){ch.storyTime=time.value.trim();rwApplyChapterStoryTimes(self);await self.plugin.saveSettings();await self.loadAllData({silent:true});self.render();});
+            var state=row.createEl('span',{text:ch.storyTime?'已设置':'待设置',cls:ch.storyTime?'rw-chapter-time-set':'rw-chapter-time-unset'});
+            var path=row.createEl('span',{text:ch.path,cls:'my-char-muted'});
+            path.style.flex='1';
+            var openBtn=row.createEl('button',{text:'打开正文',cls:'my-char-btn-ghost my-char-btn-xs'});
+            openBtn.addEventListener('click',function(){openChapter(ch);});
+        });
+        var timed=chapters.filter(function(ch){return !!String(ch.storyTime||'').trim();}).sort(function(a,b){
+            var pa=parseHistoricalDate(rwGetChapterDefaultStoryTime(a.storyTime)),pb=parseHistoricalDate(rwGetChapterDefaultStoryTime(b.storyTime));
+            if(pa&&pb&&pa.sortValue!=null&&pb.sortValue!=null&&pa.sortValue!==pb.sortValue)return pa.sortValue-pb.sortValue;
+            if(pa&&pa.sortValue!=null&&(!pb||pb.sortValue==null))return -1;
+            if(pb&&pb.sortValue!=null&&(!pa||pa.sortValue==null))return 1;
+            return chapterSort(a,b);
+        });
+        if(!timed.length) previewBody.createEl('p',{text:'设置章节时间后，这里会按故事时间展示章节顺序。',cls:'my-char-muted'});
+        timed.forEach(function(ch){var item=previewBody.createEl('div',{cls:'rw-chapter-time-preview-item'});item.createEl('time',{text:ch.storyTime});var btn=item.createEl('button',{text:ch.name,cls:'rw-text-link'});btn.addEventListener('click',function(){openChapter(ch);});});
+    }
+    scanBtn.addEventListener('click',async function(){
+        library.folder=folderInput.value.trim().replace(/^\/+|\/+$/g,'');
+        if(!library.folder){new obsidian.Notice('请先填写正文文件夹路径，避免扫描整个 Vault。');return;}
+        var files=self.app.vault.getMarkdownFiles().filter(function(f){return f.path.indexOf(library.folder+'/')===0;});
+        var old={};library.chapters.forEach(function(c){old[c.path]=c;});
+        var next=[];
+        for(var i=0;i<files.length;i++){
+            var f=files[i],prior=old[f.path]||{},body='';
+            try{body=await self.app.vault.cachedRead(f);}catch(err){console.warn('[章节库] 读取失败：'+f.path,err);}
+            var mentions=(self.chars||[]).filter(function(c){var n=String(c.name||'').trim();return n.length>=2&&body.indexOf(n)>=0;}).map(function(c){return c.name;});
+            var chapterNo = rwExtractChapterNumber(f.basename);
+            if (chapterNo == null) { var headingMatch = body.match(/^\s*(?:#\s*)?第\s*[零〇一二两三四五六七八九十百千万\d]+\s*章[^\n]*/m); if (headingMatch) chapterNo = rwExtractChapterNumber(headingMatch[0]); }
+            next.push({path:f.path,name:f.basename,storyTime:prior.storyTime||'',chapterNumber:chapterNo,mentions:mentions});
+        }
+        library.chapters=next.sort(chapterSort);
+        rwApplyChapterStoryTimes(self);
+        await self.plugin.saveSettings(); render();
+        rwApplyChapterStoryTimes(self);
+        new obsidian.Notice('已索引 '+library.chapters.length+' 个章节文件；正文未被修改，原有章节时间已保留。');
+    });
+    applyBatch.addEventListener('click',async function(){
+        var value=batchTime.value.trim();
+        if(!value){new obsidian.Notice('请先填写要批量设置的故事时间。');return;}
+        var count=0;library.chapters.forEach(function(ch){if(!String(ch.storyTime||'').trim()){ch.storyTime=value;count++;}});
+        if(!count){new obsidian.Notice('没有待设置时间的章节。');return;}
+        rwApplyChapterStoryTimes(self);await self.plugin.saveSettings();render();new obsidian.Notice('已为 '+count+' 章设置故事时间。');
+    });
+    [search,statusFilter].forEach(function(el){el.addEventListener(el===search?'input':'change',render);});
+    setChapterMode(chapterMode);
+    render();
+}
+
 function renderTimelineOverview(container, events, onSelectYear) {
     var data = timelineModel.buildTimelineOverview(events, parseHistoricalDate);
     if (!data.rows.length) return;
@@ -7193,6 +8785,14 @@ MyView.prototype.renderTimeline = function (container) {
     var self = this;
     container.empty();
     container.classList.add('my-char-scroll-section');
+
+    var timelineModes = container.createEl('div', { cls: 'my-char-lifecycle-toolbar rw-timeline-modebar' });
+    [['events','事件时间线'],['chapters','章节库与故事时间']].forEach(function(pair) {
+        var modeBtn = timelineModes.createEl('button', { text: pair[1], cls: 'my-char-btn-ghost my-char-btn-sm' });
+        if ((self._timelineSubMode || 'events') === pair[0]) modeBtn.addClass('is-active');
+        modeBtn.addEventListener('click', function() { self._timelineSubMode = pair[0]; self.renderTimeline(container); });
+    });
+    if ((self._timelineSubMode || 'events') === 'chapters') { renderChapterLibraryManager(self, container); return; }
 
     // ===== 年份搜索框 =====
     var searchToolbar = container.createEl('div');
@@ -7351,7 +8951,7 @@ MyView.prototype.renderTimeline = function (container) {
                 return true;
             }
             // 尝试解析年份进行数值匹配
-            var parsed = parseHistoricalDate(evt.storyYear || evt.year);
+            var parsed = parseHistoricalDate(evt.storyYear || evt.chapterStoryTime || evt.year);
             if (parsed && parsed.sortValue !== null) {
                 var searchNum = parseFloat(searchText);
                 if (!isNaN(searchNum) && parsed.sortValue === searchNum) {
@@ -7635,6 +9235,175 @@ MyView.prototype.renderTimeline = function (container) {
         }, 50);
     }
 };
+
+function getCharacterOrganizationsAtProgress(view, characterName, progressText) {
+    var all = normalizeOrgMemberships(view && view.orgMemberships || []);
+    var records = all.filter(function(r) { return r.character === characterName; });
+    var current = records.filter(function(r) {
+        return r.type !== '组织解散' && classifyOrgMembershipAtProgress(r, progressText, all) === 'current';
+    });
+    var names = [];
+    current.forEach(function(r) { if (names.indexOf(r.organization) < 0) names.push(r.organization); });
+    if (!records.length) {
+        var charData = (view.chars || []).filter(function(c) { return c.name === characterName; })[0];
+        var legacy = charData && (charData.faction || charData.阵营 || (charData.fields && (charData.fields['当前阵营'] || charData.fields['阵营'])));
+        if (legacy) names = String(legacy).split(/[、,，;；]/).map(function(x) { return x.trim(); }).filter(Boolean);
+    }
+    return { names: names, records: records, currentRecords: current };
+}
+
+function renderCharacterHistoryOverview(view, container) {
+    var self = view;
+    var settings = self.plugin.settings;
+    var progress = String(settings.currentTimePoint || '').trim();
+    if (!settings.chapterLibrary) settings.chapterLibrary = { folder: '', chapters: [] };
+    var library = settings.chapterLibrary;
+    if (!Array.isArray(library.chapters)) library.chapters = [];
+
+    // 履历工具栏：此前 build() 已引用这些控件，但遗漏了控件本身的创建，
+    // 导致进入「完整历史履历」时触发 search is not defined。
+    var toolbar = container.createEl('div', { cls: 'rw-character-history-toolbar' });
+    var search = toolbar.createEl('input', { cls: 'rw-history-search', attr: { type: 'search', placeholder: '搜索人物、事件、章节……' } });
+    search.value = self._historySearch || '';
+    search.addEventListener('input', function(){ self._historySearch = search.value; });
+
+    var typeFilter = toolbar.createEl('select', { cls: 'rw-history-type-filter' });
+    ['全部类型','生命节点','阵营 / 组织变动','人物关系建立','关系变化','章节出场','重要事件'].forEach(function(label){
+        typeFilter.createEl('option', { text: label, attr: { value: label } });
+    });
+    typeFilter.value = self._historyTypeFilter || '全部类型';
+    typeFilter.addEventListener('change', function(){ self._historyTypeFilter = typeFilter.value; });
+
+    var timeFilter = toolbar.createEl('input', { cls: 'rw-history-time-filter', attr: { type: 'search', placeholder: '按年份 / 时间筛选……' } });
+    timeFilter.value = self._historyTimeFilter || '';
+    timeFilter.addEventListener('input', function(){ self._historyTimeFilter = timeFilter.value; });
+
+    var expandAll = toolbar.createEl('button', { text: '展开全部', cls: 'my-char-btn-ghost my-char-btn-xs' });
+    var collapseAll = toolbar.createEl('button', { text: '收起全部', cls: 'my-char-btn-ghost my-char-btn-xs' });
+
+    var list = container.createEl('div', { cls: 'rw-character-history-list' });
+    var collapsedYears = self._historyCollapsedYears || (self._historyCollapsedYears = {});
+    var collapsedPeople = self._historyCollapsedPeople || (self._historyCollapsedPeople = {});
+    function resolveChapterForEvent(e){ return rwResolveChapterForEvent(self, e); }
+    function build(){
+        list.empty();
+        var query=String(search.value||'').trim().toLowerCase();
+        var type=typeFilter.value;
+        var timeQuery=String(timeFilter.value||'').trim().toLowerCase();
+        var chars=(self.chars||[]).slice();
+        chars.forEach(function(char){
+            var name=String(char.name||'未命名人物');
+            var entries=[];
+            var life=getCharLifecycle(self,char);
+            if(life.birth)entries.push({time:life.birth,type:'生命节点',title:'出生',detail:'',chapter:null});
+            if(life.firstAppear)entries.push({time:life.firstAppear,type:'生命节点',title:'首次出场',detail:life.firstAppearChapterLabel ? '来源章节：' + life.firstAppearChapterLabel : '',chapter:life.firstAppearChapter});
+            if(life.death)entries.push({time:life.death,type:'生命节点',title:'死亡',detail:'',chapter:null});
+            getCharacterOrganizationsAtProgress(self,name,progress).records.forEach(function(m){var state=classifyOrgMembershipAtProgress(m,progress,self.orgMemberships);var label={current:'当前有效',history:'历史',future:'待生效',unknown:'待确认'}[state]||state;entries.push({time:m.startTime,type:'阵营 / 组织变动',title:m.organization+(m.position?' · '+m.position:''),detail:m.type+' · '+label+(m.endTime?' · 至 '+m.endTime:'')+(m.reason?' · '+m.reason:''),event:m.linkedEvent});});
+            (self.relations||[]).filter(function(r){return r.charA===name||r.charB===name;}).forEach(function(r){var other=r.charA===name?r.charB:r.charA;entries.push({time:r.startTime,type:'人物关系建立',title:(r.type||'关系')+' · '+other,detail:(r.desc||'')+(r.endTime?' · 结束：'+r.endTime:''),event:''});});
+            (self.plugin._intimacyHistory||[]).filter(function(h){return h.charA===name||h.charB===name;}).forEach(function(h){var other=h.charA===name?h.charB:h.charA;var pair=h.recordKind==='relation_type'||h.recordKind==='relation_pair';entries.push({time:h.eventYear||h.recordDate||h.timestamp,type:pair?'关系变化':'关系变化',title:other+' · '+(h.changeReason||h.recordKind||'关系记录'),detail:(h.oldValue!==undefined||h.newValue!==undefined?String(h.oldValue==null?'—':h.oldValue)+' → '+String(h.newValue==null?'—':h.newValue):'')+(h.note?' · '+h.note:''),event:h.eventId||''});});
+            library.chapters.forEach(function(ch){if((ch.mentions||[]).indexOf(name)>=0)entries.push({time:ch.storyTime||'',type:'章节出场',title:'正文出场 · '+ch.name,detail:'按人物姓名文本匹配的正文提及索引',chapter:ch});});
+            (self.timeline||[]).forEach(function(e){var raw=[e.event,e.title,e.content,e.description,e.people,e.characters,e.character].join(' ');if(raw.indexOf(name)<0)return;var linked=rwGetEventLinkedChapters(self.plugin.settings,e);var ch=linked[0]||resolveChapterForEvent(e);var rawYear=String(e.year||'');var linkedTimes=linked.map(function(c){return String(c.storyTime||'').trim();});var commonTime=linkedTimes.length&&linkedTimes.every(function(t){return !!t&&t===linkedTimes[0];})?linkedTimes[0]:'';var storyTime=(e.storyYear||'')||commonTime||(!linked.length?((parseChapterHeading(rawYear)&&ch&&ch.storyTime)?ch.storyTime:rawYear)||(ch&&ch.storyTime)||'': '')||e.date||e.time||'';var chapterNames=linked.map(function(c){return c.name;});entries.push({time:storyTime,type:'重要事件',title:e.event||e.title||e.name||'时间线事件',detail:[e.tag,e.plotLine,e.plotBeat].filter(Boolean).join(' · ')+(chapterNames.length?' · 关联章节：'+chapterNames.join('、'):''),event:e.eventId||'',chapter:ch,chapters:linked});});
+            // 事件多章节关联全部保留；只有单一或同时间章节才回填统一故事时间。
+            entries.forEach(function(en){if(!en.chapter){var match=(self.timeline||[]).filter(function(e){return en.event&&(e.eventId===en.event);})[0];if(match){en.chapters=rwGetEventLinkedChapters(self.plugin.settings,match);en.chapter=en.chapters[0]||resolveChapterForEvent(match);}}if(en.chapter&&!en.time&&(!en.chapters||en.chapters.length<=1))en.time=en.chapter.storyTime||'';en.age=rwAgeAtTime(life.birth,en.time);});
+            entries.sort(function(a,b){var av=parseHistoricalDate(a.time),bv=parseHistoricalDate(b.time);if(av&&bv&&av.sortValue!=null&&bv.sortValue!=null&&av.sortValue!==bv.sortValue)return av.sortValue-bv.sortValue;if(av&&av.sortValue!=null&&(!bv||bv.sortValue==null))return -1;if(bv&&bv.sortValue!=null&&(!av||av.sortValue==null))return 1;return String(a.time||'').localeCompare(String(b.time||''),'zh-CN');});
+            entries=entries.filter(function(e){return (type==='全部类型'||e.type===type)&&(!timeQuery||String(e.time||'').toLowerCase().indexOf(timeQuery)>=0)&&(!query||(name.toLowerCase().indexOf(query)>=0||String(e.title+' '+e.detail+' '+(e.chapter&&e.chapter.name||'')).toLowerCase().indexOf(query)>=0));});
+            if(!entries.length && (type!=='全部类型'||timeQuery||query))return;
+            var org=getCharacterOrganizationsAtProgress(self,name,progress);
+            var card=list.createEl('section',{cls:'rw-character-history-card'});
+            var head=card.createEl('div',{cls:'rw-character-history-head'});
+            var toggle=head.createEl('button',{text:(collapsedPeople[name]?'▸ ':'▾ ')+name+' · '+entries.length+' 条记录',cls:'rw-text-link'});
+            toggle.addEventListener('click',function(){collapsedPeople[name]=!collapsedPeople[name];build();});
+            head.createEl('span',{text:[life.birth&&('生 '+life.birth),life.firstAppear&&('出 '+(life.firstAppearDisplay||life.firstAppear)),life.death&&('卒 '+life.death),life.lifespan!==null&&life.lifespan!==undefined&&('享年约 '+life.lifespan+' 岁')].filter(Boolean).join(' · ')||'生命时间未填写',cls:'my-char-muted'});
+            var meta=card.createEl('div',{cls:'rw-character-history-meta'});meta.createEl('strong',{text:'当前阵营 / 组织：'});meta.createEl('span',{text:org.names.length?org.names.join('、'):'暂无可确认的当前归属'});
+            var detail=card.createEl('div');detail.style.display=collapsedPeople[name]?'none':'';
+            if(!entries.length){detail.createEl('p',{text:'暂无匹配的历史记录',cls:'my-char-muted'});return;}
+            var groups={};entries.forEach(function(en){var parsed=parseHistoricalDate(en.time);var year=parsed&&parsed.sortValue!=null?(parsed.display.match(/(公元前\s*\d+年|前\s*\d+年|\d+年|[\u4e00-\u9fa5]+元年|[\u4e00-\u9fa5]+\d+年)/)||[null,parsed.display])[1]:(en.time?'时间待确认':'时间未标注');var monthMatch=String(en.time||'').match(/(正月|冬月|腊月|\d{1,2}月|[一二三四五六七八九十冬腊]+月)/);var month=monthMatch?monthMatch[1]:'月份未标注';if(!groups[year])groups[year]={};if(!groups[year][month])groups[year][month]=[];groups[year][month].push(en);});
+            var keys=Object.keys(groups).sort(function(a,b){var pa=parseHistoricalDate(a),pb=parseHistoricalDate(b);if(pa&&pb&&pa.sortValue!=null&&pb.sortValue!=null)return pa.sortValue-pb.sortValue;return a.localeCompare(b,'zh-CN');});
+            // 每个年份只建立一条连续竖向时间轴，避免按月份拆成多段后节点线条断裂。
+            // 年份仍可折叠；月份信息保留在每个节点的时间标签中。
+            keys.forEach(function(year){
+                var yearMonths=groups[year];
+                var yearEntries=[];
+                Object.keys(yearMonths).forEach(function(month){yearEntries=yearEntries.concat(yearMonths[month]);});
+                yearEntries.sort(function(a,b){var av=parseHistoricalDate(a.time),bv=parseHistoricalDate(b.time);if(av&&bv&&av.sortValue!=null&&bv.sortValue!=null)return av.sortValue-bv.sortValue;return String(a.time||'').localeCompare(String(b.time||''),'zh-CN');});
+                var det=detail.createEl('details',{cls:'rw-history-year'});
+                det.open=!collapsedYears[name+'|'+year];
+                det.addEventListener('toggle',function(){collapsedYears[name+'|'+year]=!det.open;});
+                det.createEl('summary',{text:year+' · '+yearEntries.length+' 条记录'});
+                var timeline=det.createEl('div',{cls:'rw-character-history-timeline rw-character-history-timeline--continuous'});
+                yearEntries.forEach(function(entry){
+                    var row=timeline.createEl('div',{cls:'rw-character-history-entry'});
+                    row.createEl('time',{text:(entry.time||'时间待补')+(entry.age!==null&&entry.age!==undefined?' · '+entry.age+'岁':'')});
+                    var body=row.createEl('div',{cls:'rw-character-history-entry-card'});
+                    body.createEl('strong',{text:entry.type+' · '+entry.title});
+                    if(entry.detail)body.createEl('p',{text:entry.detail,cls:'my-char-muted'});
+                    (entry.chapters&&entry.chapters.length?entry.chapters:(entry.chapter?[entry.chapter]:[])).forEach(function(chapter){var chBtn=body.createEl('button',{text:'打开章节：'+chapter.name+' ↗',cls:'my-char-btn-ghost my-char-btn-xs'});chBtn.addEventListener('click',function(){var f=self.app.vault.getAbstractFileByPath(chapter.path);if(f)self.app.workspace.getLeaf(false).openFile(f);});});
+                    if(entry.event){var linked=(self.timeline||[]).filter(function(e){return e.eventId===entry.event;})[0];if(linked){var locate=body.createEl('button',{text:'定位时间线事件 ↗',cls:'my-char-btn-ghost my-char-btn-xs'});locate.addEventListener('click',function(){self._pendingHighlightLineIndex=linked._lineIndex;self._pendingFocusEvent=linked;self.tab='timeline';self.render();});}}
+                });
+            });
+        });
+        if(!chars.length)list.createEl('p',{text:'没有匹配的人物。',cls:'my-char-view-empty'});
+    }
+    [search,typeFilter,timeFilter].forEach(function(el){el.addEventListener(el===search?'input':'change',build);});
+    expandAll.addEventListener('click',function(){collapsedPeople={};self._historyCollapsedPeople=collapsedPeople;collapsedYears={};self._historyCollapsedYears=collapsedYears;build();});
+    collapseAll.addEventListener('click',function(){(self.chars||[]).forEach(function(c){collapsedPeople[c.name]=true;});self._historyCollapsedPeople=collapsedPeople;build();});
+    build();
+}
+
+function renderCharacterLifeCinema(view, container) {
+    var self = view;
+    container.addClass('rw-life-cinema');
+    var chars = (self.chars || []).slice();
+    var filter = container.createEl('input', { cls: 'rw-life-cinema-filter', attr: { type: 'search', placeholder: '搜索人物……' } });
+    var stage = container.createEl('div', { cls: 'rw-life-cinema-stage' });
+    function render() {
+        stage.empty();
+        var q = String(filter.value || '').trim().toLowerCase();
+        var shown = chars.filter(function(c) { return !q || String(c.name || '').toLowerCase().indexOf(q) >= 0; });
+        shown.forEach(function(char) {
+            var life = getCharLifecycle(self, char);
+            var name = String(char.name || '未命名人物');
+            var events = [];
+            if (life.birth) events.push({ time: life.birth, title: '出生' });
+            if (life.firstAppear) events.push({ time: life.firstAppear, title: '首次出场' + (life.firstAppearChapterLabel ? ' · ' + life.firstAppearChapterLabel : '') });
+            (self.timeline || []).forEach(function(e) {
+                var raw = [e.event,e.title,e.content,e.description,e.people,e.characters,e.character].join(' ');
+                if (raw.indexOf(name) < 0) return;
+                var linked = rwGetEventLinkedChapters(self.plugin.settings, e);
+                var chapter = linked[0] || rwResolveChapterForEvent(self, e);
+                var linkedTimes = linked.map(function(c) { return String(c.storyTime || '').trim(); });
+                var sameTime = linkedTimes.length && linkedTimes.every(function(t) { return !!t && t === linkedTimes[0]; }) ? linkedTimes[0] : '';
+                var time = e.storyYear || sameTime || (!linked.length ? e.year || (chapter && chapter.storyTime) || '' : '') || e.date || e.time || '';
+                if (!time && linked.length === 1) time = linked[0].storyTime || '';
+                if (time) events.push({ time: time, title: e.event || e.title || e.name || '重要事件' });
+            });
+            if (life.death) events.push({ time: life.death, title: '死亡' });
+            events.sort(function(a,b) { var pa=parseHistoricalDate(a.time), pb=parseHistoricalDate(b.time); if(pa&&pb&&pa.sortValue!=null&&pb.sortValue!=null)return pa.sortValue-pb.sortValue; return String(a.time).localeCompare(String(b.time),'zh-CN'); });
+            // 合并完全相同年份与标题的重复节点，保留不同事件。
+            var card = stage.createEl('section', { cls: 'rw-life-cinema-person' });
+            var head = card.createEl('header', { cls: 'rw-life-cinema-person-head' });
+            head.createEl('h3', { text: name });
+            var span = life.birth && life.death && life.lifespan !== null && life.lifespan !== undefined ? life.birth + ' — ' + life.death + ' · 享年约 ' + life.lifespan + ' 岁' : (life.birth ? '生于 ' + life.birth : '');
+            if (span) head.createEl('span', { text: span });
+            var timeline = card.createEl('div', { cls: 'rw-life-cinema-events' });
+            var seen = {};
+            events.forEach(function(ev) {
+                var key = String(ev.time) + '|' + ev.title;
+                if (seen[key]) return; seen[key] = true;
+                var row = timeline.createEl('div', { cls: 'rw-life-cinema-event' });
+                var age = rwAgeLabel(life.birth, ev.time);
+                row.createEl('time', { text: ev.time });
+                row.createEl('strong', { text: ev.title });
+                if (age) row.createEl('span', { text: age, cls: 'rw-life-cinema-age' });
+            });
+            if (!events.length) timeline.createEl('div', { text: '暂无可展示的年份', cls: 'my-char-muted' });
+        });
+        if (!shown.length) stage.createEl('p', { text: '没有匹配的人物。', cls: 'my-char-view-empty' });
+    }
+    filter.addEventListener('input', render);
+    render();
+}
+
     // ========== 生命周期视图 ==========
     MyView.prototype.renderLifecycle = function (container) {
         var self = this;
@@ -7646,6 +9415,16 @@ MyView.prototype.renderTimeline = function (container) {
             text: '支持公元前/公元时间排序。出生、首次出场、死亡字段可在设置中配置。时间格式示例：公元前280年、前100年、280年、公元100年',
             cls: 'my-char-muted'
         }).style.margin = '0 0 12px';
+
+        var modeBar = container.createEl('div', { cls: 'my-char-lifecycle-toolbar' });
+        var lifeMode = this._lifecycleMode || 'life';
+        [['life','生命时间轴'],['history','完整历史履历'],['pure','纯享观看']].forEach(function(pair) {
+            var modeBtn = modeBar.createEl('button', { text: pair[1], cls: 'my-char-btn-ghost my-char-btn-sm' });
+            if (lifeMode === pair[0]) modeBtn.addClass('is-active');
+            modeBtn.addEventListener('click', function(){ self._lifecycleMode = pair[0]; self.renderLifecycle(container); });
+        });
+        if (lifeMode === 'history') { renderCharacterHistoryOverview(this, container); return; }
+        if (lifeMode === 'pure') { renderCharacterLifeCinema(this, container); return; }
 
         var toolbar = container.createEl('div', { cls: 'my-char-lifecycle-toolbar' });
         toolbar.createEl('span', { text: '排序依据：' }).style.fontSize = '12px';
@@ -7781,7 +9560,7 @@ MyView.prototype.renderTimeline = function (container) {
                         m.setAttr('title', tip + ': ' + parsed.display);
                     }
                     placeMarker(lc.birthParsed, 'my-char-lifecycle-marker-birth', '出生');
-                    placeMarker(lc.firstAppearParsed, 'my-char-lifecycle-marker-appear', '首次出场');
+                    placeMarker(lc.firstAppearParsed, 'my-char-lifecycle-marker-appear', '首次出场' + (lc.firstAppearChapterLabel ? ' · ' + lc.firstAppearChapterLabel : ''));
                     placeMarker(lc.deathParsed, 'my-char-lifecycle-marker-death', '死亡');
                 } else {
                     track.createEl('span', { text: '无时间数据', cls: 'my-char-muted' });
@@ -7789,7 +9568,7 @@ MyView.prototype.renderTimeline = function (container) {
 
                 var labels = row.createEl('div', { cls: 'my-char-lifecycle-labels' });
                 if (lc.birth) labels.createEl('div', { text: '🟢 ' + lc.birth });
-                if (lc.firstAppear) labels.createEl('div', { text: '🔵 ' + lc.firstAppear });
+                if (lc.firstAppear) labels.createEl('div', { text: '🔵 ' + (lc.firstAppearDisplay || lc.firstAppear) });
                 if (lc.death) labels.createEl('div', { text: '🔴 ' + lc.death });
                 if (!lc.birth && !lc.firstAppear && !lc.death) labels.createEl('div', { text: '—' });
             })(items[ii]);
@@ -8010,6 +9789,48 @@ MyView.prototype.renderTimeline = function (container) {
         });
     };
 
+    // ========== 可视化成果导出中心 ==========
+    MyView.prototype.renderExportCenter = function(container) {
+        var self=this, box=container.createEl('section',{cls:'my-char-panel rw-export-center'});
+        box.createEl('h4',{text:'🖨️ 可视化成果导出中心',cls:'my-char-subsection-title'});
+        box.createEl('p',{text:'选择插件中的一项功能或具体人物/章节，生成适合保存、打印和分享的 PNG 图片或 PDF。',cls:'my-char-muted'});
+        var row=box.createEl('div',{cls:'rw-export-controls'});
+        var kind=row.createEl('select',{cls:'my-char-form-input'});
+        [['relation','人物关系图'],['profile','人物档案'],['lifecycle','人物生命周期·纯享观看'],['outline','章节大纲']].forEach(function(x){var o=kind.createEl('option',{text:x[1]});o.value=x[0];});
+        var target=row.createEl('select',{cls:'my-char-form-input'});
+        var format=row.createEl('select',{cls:'my-char-form-input'});
+        [['png','PNG 图片'],['pdf','PDF 文档']].forEach(function(x){var o=format.createEl('option',{text:x[1]});o.value=x[0];});
+        var exportBtn=row.createEl('button',{text:'生成并导出',cls:'my-char-view-btn'});
+        var hint=box.createEl('div',{cls:'my-char-muted'});
+        async function fillTargets(){target.empty();if(kind.value==='outline'){target.createEl('option',{text:'全部章节大纲'}).value='*';try{var outlineFile=await rwResolveConfiguredFile(self.plugin,'outlineFilePath',RW_OUTLINE_FILE);if(outlineFile){var outlineText=await self.app.vault.read(outlineFile),re=/^##\s+(.+)\s*$/gm,m;while((m=re.exec(outlineText))){var op=target.createEl('option',{text:m[1].trim()});op.value=m[1].trim();}}}catch(e){console.warn('读取章节标题失败',e);}}else{(self.chars||[]).slice().sort(function(a,b){return a.name.localeCompare(b.name,'zh-CN');}).forEach(function(c){var o=target.createEl('option',{text:c.name});o.value=c.name;});if(!target.options.length)target.createEl('option',{text:'暂无人物'}).value='';}hint.textContent=kind.value==='relation'?'导出所选人物与其直接关联人物的关系网络图。':kind.value==='profile'?'导出人物字段档案及其关系摘要。':kind.value==='lifecycle'?'导出出生、首次出场、死亡及相关时间线事件的纯享版。':'可选择全部大纲或某一个章节大纲。';}
+        kind.addEventListener('change',fillTargets);fillTargets();
+        function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+        function fieldRows(c){var f=c&&c.fields||{};if(Array.isArray(f))return f.map(function(x){return [x.name||x.key||'资料',x.value||''];});return Object.keys(f).map(function(k){var v=f[k];return [k,Array.isArray(v)?v.join('、'):typeof v==='object'&&v!==null?JSON.stringify(v):String(v==null?'':v)];});}
+        function makeDocument(title,body){return '<!doctype html><html><head><meta charset="utf-8"><title>'+esc(title)+'</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#202733;max-width:980px;margin:40px auto;padding:0 32px;line-height:1.7}h1{font-size:28px;border-bottom:2px solid #9aa8b8;padding-bottom:12px}h2{margin-top:28px;color:#334155}table{border-collapse:collapse;width:100%}td,th{border:1px solid #d7dee7;padding:8px;text-align:left} .muted{color:#687586}.node{fill:#426b92;stroke:#fff;stroke-width:2}.edge{stroke:#8a99aa;stroke-width:2}.nodeText{fill:white;font-size:13px;text-anchor:middle;dominant-baseline:middle}.event{border-left:3px solid #8099b5;padding:8px 14px;margin:10px 0;background:#f5f7fa}@media print{body{margin:0;max-width:none}}</style></head><body><h1>'+esc(title)+'</h1>'+body+'<p class="muted">由 Relation Weaver 导出 · '+new Date().toLocaleString()+'</p></body></html>';}
+        function downloadPng(html,title){var svg='<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="1800"><foreignObject width="100%" height="100%"><div xmlns="http://www.w3.org/1999/xhtml" style="background:white;color:#202733;font-family:Arial,sans-serif;padding:48px;box-sizing:border-box;width:1400px;height:1800px;overflow:hidden">'+html.replace(/<\/?(?:html|head|body|meta|title)[^>]*>/gi,'')+'</div></foreignObject></svg>';var blob=new Blob([svg],{type:'image/svg+xml;charset=utf-8'}),url=URL.createObjectURL(blob),img=new Image();img.onload=function(){var canvas=document.createElement('canvas');canvas.width=1400;canvas.height=1800;var ctx=canvas.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,1400,1800);ctx.drawImage(img,0,0);URL.revokeObjectURL(url);canvas.toBlob(function(png){if(!png){new obsidian.Notice('图片生成失败，请改用 PDF 导出');return;}var a=document.createElement('a'),u=URL.createObjectURL(png);a.href=u;a.download=title+'.png';a.click();setTimeout(function(){URL.revokeObjectURL(u);},1000);new obsidian.Notice('PNG 图片已生成');},'image/png');};img.onerror=function(){URL.revokeObjectURL(url);new obsidian.Notice('图片渲染失败，请改用 PDF 导出');};img.src=url;}
+        exportBtn.addEventListener('click',async function(){
+            // PDF 在 Obsidian 内部预览，不再调用 window.open，避免浏览器弹窗拦截。
+            try {
+            var type=kind.value,name=target.value,title='',body='';
+            if(type==='outline'){
+                var file=await rwResolveConfiguredFile(self.plugin,'outlineFilePath',RW_OUTLINE_FILE);if(!file)throw new Error('找不到故事大纲文件，请检查设置中的路径');var md=await self.app.vault.read(file);if(name&&name!=='*'){var headingRe=/^##\s+(.+)\s*$/gm,hm,sections=[];while((hm=headingRe.exec(md)))sections.push({title:hm[1].trim(),start:hm.index,end:headingRe.lastIndex});var chosen=sections.find(function(x){return x.title===name;});if(!chosen)throw new Error('找不到所选章节，请刷新后重试');var chosenEnd=sections[sections.indexOf(chosen)+1]?sections[sections.indexOf(chosen)+1].start:md.length;md=md.slice(chosen.start,chosenEnd).trim();title='章节大纲·'+name;}else title='章节大纲';body='<pre style="white-space:pre-wrap;font-family:inherit">'+esc(md)+'</pre>';
+            }else{
+                var c=(self.chars||[]).find(function(x){return x.name===name;});if(!c)throw new Error('请先选择有效人物');title=name+(type==='relation'?'·人物关系图':type==='profile'?'·人物档案':'·生命周期');
+                if(type==='profile'){
+                    var rows=fieldRows(c),rels=(self.relations||[]).filter(function(r){return r.charA===name||r.charB===name;});body='<h2>人物资料</h2><table><tbody>'+rows.map(function(r){return '<tr><th>'+esc(r[0])+'</th><td>'+esc(r[1])+'</td></tr>';}).join('')+'</tbody></table><h2>人物关系</h2><ul>'+rels.map(function(r){return '<li>'+esc(r.charA===name?r.charB:r.charA)+' · '+esc(r.type||'关系')+(r.desc?' · '+esc(r.desc):'')+'</li>';}).join('')+'</ul>';
+                }else if(type==='relation'){
+                    var edges=(self.relations||[]).filter(function(r){return r.charA===name||r.charB===name;}),others=Array.from(new Set(edges.map(function(r){return r.charA===name?r.charB:r.charA;}))),cx=500,cy=300,svg='<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="620" viewBox="0 0 1000 620">';others.forEach(function(n,i){var a=2*Math.PI*i/Math.max(1,others.length)-Math.PI/2,x=cx+330*Math.cos(a),y=cy+220*Math.sin(a);svg+='<line class="edge" x1="'+cx+'" y1="'+cy+'" x2="'+x+'" y2="'+y+'" stroke="#8797a8" stroke-width="3"/><text x="'+((cx+x)/2)+'" y="'+((cy+y)/2-8)+'" font-size="15" text-anchor="middle" fill="#526274">'+esc((edges.find(function(r){return r.charA===name?r.charB===n:r.charA===n;})||{}).type||'关系')+'</text><circle cx="'+x+'" cy="'+y+'" r="48" fill="#557da5" stroke="#fff" stroke-width="3"/><text x="'+x+'" y="'+(y+5)+'" fill="white" font-size="16" text-anchor="middle">'+esc(n.slice(0,8))+'</text>';});svg+='<circle cx="'+cx+'" cy="'+cy+'" r="62" fill="#b78336" stroke="#f3d89a" stroke-width="5"/><text x="'+cx+'" y="'+(cy+5)+'" fill="white" font-size="20" font-weight="bold" text-anchor="middle">'+esc(name.slice(0,8))+'</text></svg>';body='<h2>关系网络</h2>'+svg+'<p>共 '+edges.length+' 条直接关系</p><ul>'+edges.map(function(r){return '<li>'+esc(r.charA)+' — '+esc(r.type||'关系')+' — '+esc(r.charB)+(r.desc?'：'+esc(r.desc):'')+'</li>';}).join('')+'</ul>';
+                }else{
+                    var settings=self.plugin.settings||{},birth=self.getFieldValue(c,settings.birthFieldNames||'出生,出生时间'),death=self.getFieldValue(c,settings.deathFieldNames||'死亡,死亡时间'),appear=self.getFieldValue(c,settings.firstAppearFieldName||'首次出场'),events=(self.timeline||[]).filter(function(e){return String(e.event||'').indexOf(name)>=0||String(e.character||'')===name;});body='<h2>生命节点</h2>'+[['出生',birth],['首次出场',appear],['死亡',death]].filter(function(x){return x[1];}).map(function(x){return '<div class="event"><strong>'+esc(x[0])+'</strong> · '+esc(x[1])+'</div>';}).join('')+'<h2>相关故事事件</h2>'+events.map(function(e){return '<div class="event"><strong>'+esc([e.year,e.month].filter(Boolean).join('年'))+'</strong> '+esc(e.event||'')+'</div>';}).join('');
+                }
+            }
+            var html=makeDocument(title,body);if(format.value==='pdf'){new PrintPreviewModal(self.app,self,html,title).open();}else downloadPng(html,title.replace(/[\\/:*?"<>|]/g,'_'));
+            } catch(e) {
+                showUserError('导出失败',e);
+            }
+        });
+    };
+
     // ========== 导入导出视图 ==========
 
     MyView.prototype.renderImportExport = function (container) {
@@ -8018,6 +9839,7 @@ MyView.prototype.renderTimeline = function (container) {
         container.classList.add('my-char-scroll-section');
 
         container.createEl('h3', { text: '💾 数据导入/导出', cls: 'my-char-section-title' });
+        this.renderExportCenter(container);
 
         var exportDiv = container.createEl('div');
         exportDiv.className = 'my-char-panel';
@@ -8034,7 +9856,9 @@ MyView.prototype.renderTimeline = function (container) {
             }),
             timeline: this.timeline,
             orgRelations: this.orgRelations || [],
-            orgMemberships: this.orgMemberships || []
+            orgMemberships: this.orgMemberships || [],
+            orgPositionDefs: this.orgPositionDefs || [],
+            orgTerritoryChanges: normalizeOrgTerritoryChanges(this.orgTerritoryChanges || [])
         };
 
         var exportJSONBtn = exportDiv.createEl('button', { text: '📄 导出为 JSON' });
@@ -8139,6 +9963,7 @@ MyView.prototype.renderTimeline = function (container) {
     MyView.prototype.showQuickAddChar = function () {
         var self = this;
         var modal = new QuickAddCharModal(this.app, this.plugin, function(data) {
+            pushUndoSnapshot(self, '新增人物档案：' + data.name);
             novelExt.appendCharToMd(self.app, self.plugin, data.name, data.fields).then(function() {
                 return self.loadAllData({ silent: true });
             }).then(function() {
@@ -8152,6 +9977,7 @@ MyView.prototype.renderTimeline = function (container) {
     MyView.prototype.showQuickAddEvent = function (prefillText) {
         var self = this;
         var modal = new QuickAddEventModal(this.app, this.plugin, this, function(evt) {
+            pushUndoSnapshot(self, '新增时间线事件');
             novelExt.appendEventToMd(self.app, self.plugin, evt).then(function() {
                 return self.loadAllData({ silent: true });
             }).then(function() {
@@ -8186,6 +10012,7 @@ MyView.prototype.renderTimeline = function (container) {
             return;
         }
         var modal = new QuickAddEventModal(this.app, this.plugin, this, function(newEvt) {
+            pushUndoSnapshot(self, '编辑时间线事件');
             novelExt.updateEventInMd(self.app, self.plugin, existingEvent, newEvt).then(function(updated) {
                 if (!updated) throw new Error('事件未能安全定位，未执行修改');
                 return self.loadAllData({ silent: true });
@@ -8214,6 +10041,7 @@ MyView.prototype.renderTimeline = function (container) {
                 new obsidian.Notice('❌ 事件修改失败：' + (err.message || err), 8000);
             });
         }, existingEvent, function(evt) {
+            pushUndoSnapshot(self, '删除时间线事件');
             novelExt.deleteEventFromMd(self.app, self.plugin, evt).then(function(deleted) {
                 if (!deleted) return false;
                 return self.loadAllData({ silent: true });
@@ -8230,9 +10058,10 @@ MyView.prototype.renderTimeline = function (container) {
     };
 
     MyView.prototype.fixFirstAppearIssue = async function (issue, useTimelineValue) {
-        var fieldName = this.plugin.settings.firstAppearFieldName || '首次出场';
+        var fieldName = this.plugin.settings.firstAppearFieldName || '正文首次出现';
         if (issue.type === 'missing_on_char' || (issue.type === 'mismatch' && useTimelineValue)) {
             var val = issue.suggested || issue.timelineValue;
+            pushUndoSnapshot(this, '修改人物首次出场：' + issue.charName);
             var ok = await novelExt.setCharFieldInMd(this.app, this.plugin, issue.charName, fieldName, val);
             if (!ok) {
                 new obsidian.Notice('写入失败，未找到人物：' + issue.charName);
@@ -8245,11 +10074,11 @@ MyView.prototype.renderTimeline = function (container) {
             var cd = this.findChar(issue.charName);
             if (cd) this.showCharDetail(cd);
             else new obsidian.Notice('未找到人物：' + issue.charName);
-        } else if (issue.type === 'missing_on_timeline') {
+        } else if (issue.type === 'missing_in_chapters' || issue.type === 'missing_on_timeline') {
             this.tab = 'timeline';
-            this._yearSearchText = issue.charValue || '';
+            this._chapterManagerMode = 'settings';
             this.render();
-            new obsidian.Notice('请在时间线添加 [出场] 事件：' + issue.charName);
+            new obsidian.Notice('请先扫描/更新章节库，并检查人物姓名或别名：' + issue.charName);
         }
     };
 
@@ -8259,9 +10088,10 @@ MyView.prototype.renderTimeline = function (container) {
             new obsidian.Notice('没有需要补全的首次出场');
             return;
         }
-        var fieldName = this.plugin.settings.firstAppearFieldName || '首次出场';
+        var fieldName = this.plugin.settings.firstAppearFieldName || '正文首次出现';
         var count = 0;
         for (var i = 0; i < issues.length; i++) {
+            pushUndoSnapshot(this, '批量修正人物首次出场');
             var ok = await novelExt.setCharFieldInMd(this.app, this.plugin, issues[i].charName, fieldName, issues[i].suggested);
             if (ok) count++;
         }
@@ -8468,6 +10298,7 @@ MyView.prototype.renderTimeline = function (container) {
 
 // ========== 时间线可拖动人物速查弹窗 ==========
 MyView.prototype.onClose = function () {
+    if (this._rwGraphFocusRestore) this._rwGraphFocusRestore();
     this.hideCharFloatPanel();
 };
 
@@ -8669,9 +10500,11 @@ var QuickAddCharModal = /** @class */ (function (_super) {
 // ========== 设定集打印预览弹窗（Obsidian 内，无需浏览器弹窗）==========
 var PrintPreviewModal = /** @class */ (function (_super) {
     __extends(PrintPreviewModal, _super);
-    function PrintPreviewModal(app, view) {
+    function PrintPreviewModal(app, view, customHtml, customTitle) {
         var _this = Reflect.construct(_super, [app], PrintPreviewModal);
         _this.view = view;
+        _this.customHtml = customHtml || '';
+        _this.customTitle = customTitle || '';
         return _this;
     }
     PrintPreviewModal.prototype.onOpen = function () {
@@ -8679,7 +10512,7 @@ var PrintPreviewModal = /** @class */ (function (_super) {
         var el = this.contentEl;
         el.empty();
         el.className = 'my-char-modal-body my-char-print-modal';
-        el.createEl('h3', { text: '🖨️ 设定集打印预览', cls: 'my-char-section-title' });
+        el.createEl('h3', { text: this.customTitle ? '🖨️ ' + this.customTitle + ' · 打印预览' : '🖨️ 设定集打印预览', cls: 'my-char-section-title' });
         el.createEl('p', {
             text: '在 Obsidian 内预览。点击「打印」后，在系统对话框中选择打印机或「另存为 PDF」。',
             cls: 'my-char-muted'
@@ -8693,13 +10526,13 @@ var PrintPreviewModal = /** @class */ (function (_super) {
 
         var scroll = el.createEl('div', { cls: 'my-char-print-scroll' });
         var doc = scroll.createEl('div', { cls: 'my-char-print-doc' });
-        doc.innerHTML = this.view.buildPrintPreviewBodyHtml();
+        doc.innerHTML = this.customHtml ? (this.customHtml.match(/<body[^>]*>([\s\S]*)<\/body>/i) || [null, this.customHtml])[1] : this.view.buildPrintPreviewBodyHtml();
 
         var styleEl = el.createEl('style');
         styleEl.textContent = this.view.getPrintPreviewStyles();
     };
     PrintPreviewModal.prototype.triggerPrint = function () {
-        var html = this.view.buildPrintPreviewHtml();
+        var html = this.customHtml || this.view.buildPrintPreviewHtml();
         var iframe = document.createElement('iframe');
         iframe.setAttribute('aria-hidden', 'true');
         iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:none;opacity:0;pointer-events:none;';
@@ -8860,7 +10693,7 @@ var ImportPreviewModal = /** @class */ (function (_super) {
         overwrite.addEventListener('change', function () { self.overwriteConflicts = overwrite.checked; self.render(); });
         var plan = buildSmartImportPlan(this.view, this.data, this.overwriteConflicts); this.plan = plan;
         var grid = el.createEl('div'); grid.style.cssText = 'display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0;';
-        [['新增/更新阵营',plan.counts.factions],['新增/更新关系',plan.counts.relations],['新增人物',plan.counts.chars],['新增事件',plan.counts.timeline],['冲突待处理',plan.counts.conflicts],['重复跳过',plan.counts.duplicates]].forEach(function(pair) {
+        [['新增/更新阵营',plan.counts.factions],['新增/更新关系',plan.counts.relations],['新增人物',plan.counts.chars],['新增事件',plan.counts.timeline],['组织关系',plan.counts.orgRelations||0],['领地变迁',plan.counts.orgTerritoryChanges||0],['冲突待处理',plan.counts.conflicts],['重复跳过',plan.counts.duplicates]].forEach(function(pair) {
             var card = grid.createEl('div'); card.style.cssText = 'padding:10px;border:1px solid var(--background-modifier-border);border-radius:8px;background:var(--background-secondary);';
             card.createEl('div', { text: String(pair[1]), cls: 'my-char-section-title' }).style.fontSize = '20px';
             card.createEl('div', { text: pair[0], cls: 'my-char-muted' });
@@ -8877,7 +10710,10 @@ var ImportPreviewModal = /** @class */ (function (_super) {
         var previewItems = [];
         plan.chars.forEach(function(x) { previewItems.push('人物 · ' + x.name); });
         plan.timeline.forEach(function(x) { previewItems.push('事件 · ' + x.year + ' · ' + x.event); });
+        plan.orgRelations.forEach(function(x) { previewItems.push('组织关系 · '+x.from+' ↔ '+x.to+' · '+(x.type||'联盟')); });
         plan.orgMemberships.forEach(function(x) { previewItems.push('组织任职 · '+x.character+' · '+x.organization+' · '+(x.type||'加入')); });
+        plan.orgPositionDefs.forEach(function(x) { previewItems.push('组织职位 · '+x.organization+' · '+x.name); });
+        plan.orgTerritoryChanges.forEach(function(x) { previewItems.push('领地变迁 · '+x.territory+' · '+(x.action||'取得')+' · '+(x.owner||'归属未注明')); });
         plan.mergedFactions.forEach(function(x) { if (plan.factions.indexOf(x) !== -1) previewItems.push('阵营 · ' + x.name); });
         plan.mergedRelations.forEach(function(x) { if (plan.relations.indexOf(x) !== -1) previewItems.push('关系 · ' + x.charA + ' ↔ ' + x.charB + ' · ' + (x.type || '关系')); });
         if (!previewItems.length) incoming.createEl('p', { text: '没有需要写入的新内容。', cls: 'my-char-muted' });
@@ -8886,22 +10722,26 @@ var ImportPreviewModal = /** @class */ (function (_super) {
         var actions = el.createEl('div'); actions.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:14px;flex-wrap:wrap;';
         actions.createEl('button', { text: '取消', cls: 'my-char-btn-ghost' }).addEventListener('click', function() { self.close(); });
         var apply = actions.createEl('button', { text: '🛡️ 创建快照并执行合并', cls: 'my-char-btn-success' });
-        var total = plan.counts.factions + plan.counts.relations + plan.counts.chars + plan.counts.timeline + plan.counts.orgMemberships;
+        var total = plan.counts.factions + plan.counts.relations + plan.counts.chars + plan.counts.timeline + (plan.counts.orgRelations||0) + plan.counts.orgMemberships + plan.counts.orgPositionDefs + (plan.counts.orgTerritoryChanges||0);
         apply.disabled = total === 0;
         apply.addEventListener('click', async function() {
             if (!confirm('将新增/更新 ' + total + ' 项，跳过 ' + plan.counts.duplicates + ' 项重复内容。执行前会创建快照。继续吗？')) return;
             apply.disabled = true; apply.textContent = '正在备份并合并…';
             var backup = null;
             try {
+                pushUndoSnapshot(self.view, '智能合并导入人物、事件与组织资料');
                 backup = await createVaultSnapshot(self.app, self.view.plugin);
                 for (var ci = 0; ci < plan.chars.length; ci++) await appendCharToMd(self.app, self.view.plugin, plan.chars[ci].name, plan.chars[ci].fields || {});
                 for (var ti = 0; ti < plan.timeline.length; ti++) await appendEventToMd(self.app, self.view.plugin, plan.timeline[ti]);
                 self.view.factions = plan.mergedFactions;
                 self.view.relations = plan.mergedRelations;
+                self.view.orgRelations = normalizeOrgRelations((self.view.orgRelations||[]).concat(plan.orgRelations||[]));
                 self.view.orgMemberships = normalizeOrgMemberships((self.view.orgMemberships||[]).concat(plan.orgMemberships||[]));
+                self.view.orgPositionDefs = normalizeOrgPositionDefs((self.view.orgPositionDefs||[]).concat(plan.orgPositionDefs||[]));
+                self.view.orgTerritoryChanges = normalizeOrgTerritoryChanges((self.view.orgTerritoryChanges||[]).concat(plan.orgTerritoryChanges||[]));
                 await self.view.saveFactionsAndRelations();
                 await self.view.loadAllData({ silent: true }); self.view.render();
-                new obsidian.Notice('✅ 智能合并完成：新增人物 ' + plan.counts.chars + '、事件 ' + plan.counts.timeline + '、阵营 ' + plan.counts.factions + '、关系 ' + plan.counts.relations + '、组织任职履历 ' + plan.counts.orgMemberships + '。导入前快照：' + backup.folder, 10000);
+                new obsidian.Notice('✅ 智能合并完成：新增人物 ' + plan.counts.chars + '、事件 ' + plan.counts.timeline + '、阵营 ' + plan.counts.factions + '、关系 ' + plan.counts.relations + '、组织关系 ' + (plan.counts.orgRelations||0) + '、组织任职履历 ' + plan.counts.orgMemberships + '、职位定义 ' + plan.counts.orgPositionDefs + '、领地变迁 ' + (plan.counts.orgTerritoryChanges||0) + '。导入前快照：' + backup.folder, 10000);
                 self.close();
             } catch (e) {
                 var rollbackMessage = '';
@@ -9071,7 +10911,7 @@ var QuickAddEventModal = /** @class */ (function (_super) {
         }
         var appearHint = tagRow.createEl('div', { cls: 'my-char-muted' });
         appearHint.style.cssText = 'font-size:12px;margin-top:4px;display:none;';
-        var fieldLabel = this.plugin.settings.firstAppearFieldName || '首次出场';
+        var fieldLabel = this.plugin.settings.firstAppearFieldName || '正文首次出现';
         function updateAppearHint() {
             if (novelExt.isAppearTimelineTag(tagSelect.value)) {
                 appearHint.textContent = '💡 [出场] 标签会写入事件内提及人物的「' + fieldLabel + '」字段';
@@ -9102,10 +10942,49 @@ var QuickAddEventModal = /** @class */ (function (_super) {
             if (isEdit && evt.plotStatus === novelExt.PLOT_STATUSES[si]) sopt.selected = true;
         }
         var noteRow = el.createEl('div', { cls: 'my-char-form-row' });
-        noteRow.createEl('label', { text: '关联章节（可选，可多个）', cls: 'my-char-form-label' });
+        noteRow.createEl('label', { text: '关联章节（可多选）', cls: 'my-char-form-label' });
         var noteInput = noteRow.createEl('input', { type: 'text', cls: 'my-char-form-input' });
-        noteInput.placeholder = '[[第一章]]、[[第五章]]；也可以暂时留空';
-        if (isEdit) noteInput.value = normalizeChapterNotes(evt.chapterNotes && evt.chapterNotes.length ? evt.chapterNotes : evt.chapterNote).join('、');
+        noteInput.style.display = 'none'; // 继续沿用 chapterNotes 字段写入时间线，兼容旧版本与全局模块。
+        var chapterLibrary = this.plugin.settings.chapterLibrary || { chapters: [] };
+        var availableChapters = Array.isArray(chapterLibrary.chapters) ? chapterLibrary.chapters.slice() : [];
+        var selectedChapterRefs = normalizeChapterNotes(evt && (evt.chapterNotes && evt.chapterNotes.length ? evt.chapterNotes : evt.chapterNote));
+        var picker = noteRow.createEl('div', { cls: 'rw-event-chapter-picker' });
+        var pickerSummary = picker.createEl('div', { cls: 'rw-event-chapter-picker-summary', text: '尚未选择章节' });
+        var pickerSearch = picker.createEl('input', { type: 'search', cls: 'my-char-form-input', attr: { placeholder: '搜索章节名称或路径…' } });
+        pickerSearch.style.margin = '6px 0';
+        var pickerList = picker.createEl('div', { cls: 'rw-event-chapter-picker-list' });
+        function syncChapterSelection() {
+            noteInput.value = selectedChapterRefs.join('、');
+            pickerSummary.textContent = selectedChapterRefs.length ? ('已选择 ' + selectedChapterRefs.length + ' 个章节：' + selectedChapterRefs.map(function(ref) { var ch = availableChapters.filter(function(c) { return rwChapterReferenceMatches(ref, c); })[0]; return ch ? ch.name : ref; }).join('、')) : '尚未选择章节';
+        }
+        function renderChapterChoices() {
+            pickerList.empty();
+            var query = String(pickerSearch.value || '').trim().toLowerCase();
+            var choices = availableChapters.filter(function(ch) { return !query || String((ch.name || '') + ' ' + (ch.path || '')).toLowerCase().indexOf(query) >= 0; });
+            if (!availableChapters.length) {
+                pickerList.createEl('p', { text: '章节库尚无章节。请先到「时间线 → 章节库与故事时间」扫描正文目录；也可以在下方手动填写章节引用。', cls: 'my-char-muted' });
+                var manual = pickerList.createEl('input', { type: 'text', cls: 'my-char-form-input', attr: { placeholder: '例如：[[第一章]]、[[第五章]]' } });
+                manual.value = selectedChapterRefs.join('、');
+                manual.addEventListener('change', function() { selectedChapterRefs = normalizeChapterNotes(manual.value); syncChapterSelection(); });
+                return;
+            }
+            if (!choices.length) { pickerList.createEl('p', { text: '没有匹配的章节。', cls: 'my-char-muted' }); return; }
+            choices.forEach(function(ch) {
+                var value = rwChapterPickerValue(ch);
+                var row = pickerList.createEl('label', { cls: 'rw-event-chapter-picker-option' });
+                var cb = row.createEl('input', { type: 'checkbox' });
+                cb.checked = selectedChapterRefs.some(function(ref) { return rwChapterReferenceMatches(ref, ch); });
+                row.createEl('span', { text: ch.name || ch.path });
+                if (ch.storyTime) row.createEl('small', { text: ch.storyTime });
+                cb.addEventListener('change', function() {
+                    if (cb.checked) { if (!selectedChapterRefs.some(function(ref) { return rwChapterReferenceMatches(ref, ch); })) selectedChapterRefs.push(value); }
+                    else selectedChapterRefs = selectedChapterRefs.filter(function(ref) { return !rwChapterReferenceMatches(ref, ch); });
+                    syncChapterSelection();
+                });
+            });
+        }
+        pickerSearch.addEventListener('input', renderChapterChoices);
+        renderChapterChoices(); syncChapterSelection();
         if (isEdit) {
             var designRow = el.createEl('div', { cls: 'my-char-form-row' });
             designRow.createEl('label', { text: '章节化故事构思', cls: 'my-char-form-label' });
@@ -9155,7 +11034,8 @@ var QuickAddEventModal = /** @class */ (function (_super) {
 }(obsidian.Modal));
 
 // ========== 组织关系模型（3.9.8） ==========
-var ORG_RELATION_TYPES = ['联盟', '敌对', '附属', '从属', '中立', '竞争'];
+var ORG_RELATION_TYPES = ['联盟', '敌对', '附属', '从属', '臣服', '保护', '竞争', '战争', '联姻', '吞并', '分裂', '独立', '灭亡', '中立'];
+var ORG_APPOINTMENT_TYPES = ['正式任命', '代理任职', '暂代', '留任', '荣誉头衔', '临时委派'];
 function createOrgRelationId() {
     return 'orgrel-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 9);
 }
@@ -9169,9 +11049,9 @@ function normalizeOrgRelations(items) {
         seenIds[id] = true;
         return {
             id: id, from: String(r.from), to: String(r.to),
-            type: ORG_RELATION_TYPES.indexOf(r.type) >= 0 ? r.type : '联盟',
+            type: String(r.type || '联盟').trim() || '联盟',
             startTime: String(r.startTime || ''), endTime: String(r.endTime || ''),
-            desc: String(r.desc || ''), createdAt: r.createdAt || ''
+            desc: String(r.desc || ''), territory: String(r.territory || ''), eventRef: String(r.eventRef || ''), createdAt: r.createdAt || ''
         };
     });
 }
@@ -9223,23 +11103,199 @@ function normalizeOrgMemberships(items) {
             type: ORG_MEMBERSHIP_TYPES.indexOf(r.type) >= 0 ? r.type : '加入',
             position: String(r.position || ''), startTime: String(r.startTime || ''),
             endTime: String(r.endTime || ''), reason: String(r.reason || ''),
-            linkedEvent: String(r.linkedEvent || ''), notes: String(r.notes || ''),
+            linkedEvent: String(r.linkedEvent || ''), notes: String(r.notes || ''), successionFrom: String(r.successionFrom || ''), successionBasis: String(r.successionBasis || ''), appointmentType: ORG_APPOINTMENT_TYPES.indexOf(r.appointmentType) >= 0 ? r.appointmentType : '正式任命',
             createdAt: r.createdAt || ''
         };
     });
 }
-function classifyOrgMembershipAtProgress(record, progressText) {
+function classifyOrgMembershipAtProgress(record, progressText, allRecords) {
     var state = classifyOrgRelationAtProgress({ startTime: record.startTime, endTime: record.endTime }, progressText);
-    // 阵营被删除时，关联履历标记为「组织解散」；不应继续显示在当前任职分组。
-    if (record && record.type === '组织解散' && state === 'current') return 'history';
-    return state;
+    if (state !== 'current' || !record) return state;
+    var terminalTypes = ['退出', '被逐', '叛变', '组织解散'];
+    // 退出/被逐/叛变/组织解散是状态终止事件，本身保留在历史履历，不作为当前任职。
+    if (terminalTypes.indexOf(record.type) >= 0) return 'history';
+    var progress = parseHistoricalDate(progressText || ''), start = parseHistoricalDate(record.startTime || '');
+    if (!progress || !start || progress.sortValue == null || start.sortValue == null) return state;
+    // 同一人物在同一组织发生后续履历变更时，旧职位自动转为历史，避免升迁/调任后旧职位仍显示为现任。
+    var superseded = normalizeOrgMemberships(allRecords || []).some(function(other) {
+        if (!other || other.id === record.id || other.character !== record.character || !other.startTime) return false;
+        var next = parseHistoricalDate(other.startTime);
+        if (!next || next.sortValue == null) return false;
+        if ((next.era === 'chapter' || start.era === 'chapter' || progress.era === 'chapter') && !(next.era === start.era && start.era === progress.era)) return false;
+        if ((next.era === 'modern' || start.era === 'modern' || progress.era === 'modern') && !(next.era === start.era && start.era === progress.era)) return false;
+        if (!(next.sortValue > start.sortValue && next.sortValue <= progress.sortValue)) return false;
+        // 同一组织的后续任职会替代旧职位；跨组织则只在明确叛变/投诚时终止旧阵营，
+        // 普通「加入」允许多重身份并存，避免误删作者有意设置的兼任关系。
+        if (other.organization === record.organization) return true;
+        return ['叛变','投诚'].indexOf(other.type) >= 0;
+    });
+    return superseded ? 'history' : state;
 }
+
+// 组织职位编制定义：与人物任职履历分离，避免修改编制时破坏历史。
+function createOrgPositionId() { return 'orgpos-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8); }
+function normalizeOrgPositionDefs(items) {
+    var seen = Object.create(null);
+    return (Array.isArray(items) ? items : []).filter(function(x) { return x && typeof x === 'object' && String(x.organization || '').trim() && String(x.name || '').trim(); }).map(function(x) {
+        var id = String(x.id || createOrgPositionId()); if (seen[id]) id = createOrgPositionId(); seen[id] = true;
+        var limit = x.limit === '' || x.limit === null || x.limit === undefined ? null : Number(x.limit);
+        return { id:id, organization:String(x.organization), name:String(x.name).trim(), level:String(x.level || ''), levelOrder:x.levelOrder===null||x.levelOrder===undefined||x.levelOrder==='' ? null : (Number.isFinite(Number(x.levelOrder)) ? Number(x.levelOrder) : null), successionRule:['manual','eldest','seniority','appointment','election','rotation'].indexOf(x.successionRule)>=0?x.successionRule:'manual', parentId:String(x.parentId || ''), limit:Number.isFinite(limit) && limit >= 0 ? Math.floor(limit) : null, allowConcurrent:x.allowConcurrent === true, allowActing:x.allowActing !== false, description:String(x.description || ''), archived:x.archived === true };
+    });
+}
+// 领地变迁独立建模：一条记录描述某段时间内的归属状态，沿用统一历史时间解析。
+var ORG_TERRITORY_ACTIONS = ['取得', '占领', '收复', '割让', '失守', '归还', '独立', '合并', '改名', '其他'];
+function createOrgTerritoryChangeId() { return 'orgterritory-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8); }
+function normalizeOrgTerritoryChanges(items) {
+    var seen = Object.create(null);
+    return (Array.isArray(items) ? items : []).filter(function(x) { return x && typeof x === 'object' && String(x.territory || '').trim(); }).map(function(x) {
+        var id = String(x.id || createOrgTerritoryChangeId()); if (seen[id]) id = createOrgTerritoryChangeId(); seen[id] = true;
+        var action = ORG_TERRITORY_ACTIONS.indexOf(x.action) >= 0 ? x.action : '取得';
+        return { id:id, territory:String(x.territory).trim(), owner:String(x.owner || '').trim(), previousOwner:String(x.previousOwner || '').trim(), action:action, startTime:String(x.startTime || '').trim(), endTime:String(x.endTime || '').trim(), eventRef:String(x.eventRef || '').trim(), desc:String(x.desc || ''), createdAt:x.createdAt || '' };
+    });
+}
+function classifyOrgTerritoryAtProgress(record, progressText, allRecords) {
+    var base = classifyOrgRelationAtProgress({startTime:record.startTime,endTime:record.endTime}, progressText);
+    if (base !== 'current') return base;
+    var progress = parseHistoricalDate(progressText || ''), start = parseHistoricalDate(record && record.startTime || '');
+    if (!progress || !start || progress.sortValue == null || start.sortValue == null) return base;
+    // 后续同一领地的归属变更一旦生效，旧归属即转为历史；不要求作者必须手工补填旧记录的结束时间。
+    var superseded = normalizeOrgTerritoryChanges(allRecords || []).some(function(other) {
+        if (!other || other.id === record.id || other.territory !== record.territory || !other.startTime) return false;
+        var next = parseHistoricalDate(other.startTime);
+        if (!next || next.sortValue == null) return false;
+        if ((next.era === 'chapter' || start.era === 'chapter' || progress.era === 'chapter') && !(next.era === start.era && start.era === progress.era)) return false;
+        if ((next.era === 'modern' || start.era === 'modern' || progress.era === 'modern') && !(next.era === start.era && start.era === progress.era)) return false;
+        return next.sortValue > start.sortValue && next.sortValue <= progress.sortValue;
+    });
+    return superseded ? 'history' : base;
+}
+function getTerritoryOwnerAtProgress(view, territory, progressText) {
+    var rows = normalizeOrgTerritoryChanges(view && view.orgTerritoryChanges || []).filter(function(r) { return r.territory === territory && classifyOrgTerritoryAtProgress(r, progressText, view.orgTerritoryChanges) === 'current'; });
+    rows.sort(function(a,b) { return compareOrgRelationTime(b,a); });
+    return rows.length ? rows[0].owner : '';
+}
+function getCurrentTerritoryOwner(view, territory) {
+    var progress = view && view.plugin && view.plugin.settings ? view.plugin.settings.currentTimePoint || '' : '';
+    return getTerritoryOwnerAtProgress(view, territory, progress);
+}
+
+function getOrgPositionDefsForOrganization(view, organization) {
+    var all = normalizeOrgPositionDefs(view && view.orgPositionDefs || []);
+    var shared = all.filter(function(d) { return d.organization === '__shared__'; });
+    // Once a shared template exists, all organizations use it. Before that, legacy local templates remain readable.
+    return shared.length ? shared : all.filter(function(d) { return d.organization === organization; });
+}
+function getOrgPositionDef(view, organization, position) {
+    return getOrgPositionDefsForOrganization(view, organization).find(function(d) { return d.name === position && !d.archived; }) || null;
+}
+function getOrgPositionHierarchy(view, organization) {
+    var defs = getOrgPositionDefsForOrganization(view, organization);
+    var byId = Object.create(null); defs.forEach(function(d) { byId[d.id] = d; });
+    return defs.map(function(d) { var parent = byId[d.parentId] || defs.find(function(x) { return x.name === d.parentId; }); return Object.assign({}, d, { parentName: parent ? parent.name : '', depth: (function(){ var depth=0, p=parent, seen=Object.create(null); while(p && !seen[p.id] && depth<defs.length){seen[p.id]=true;depth++;p=byId[p.parentId]||defs.find(function(x){return x.name===p.parentId;});} return depth;})() }); }).sort(function(a,b){ if(a.depth!==b.depth)return a.depth-b.depth; if(a.levelOrder!==null&&b.levelOrder!==null&&a.levelOrder!==b.levelOrder)return a.levelOrder-b.levelOrder; return a.name.localeCompare(b.name,'zh-CN'); });
+}
+function validateOrgPositionParent(defs, candidate) {
+    if (!candidate.parentId) return {ok:true};
+    var parent = defs.find(function(d){return d.id===candidate.parentId;}) || defs.find(function(d){return d.name===candidate.parentId;});
+    if (!parent) return {ok:false,message:'上级职位不存在，请从本组织已定义职位中选择。'};
+    if (parent.id===candidate.id) return {ok:false,message:'职位不能设置自己为上级。'};
+    var byId=Object.create(null); defs.forEach(function(d){byId[d.id]=d;}); var cursor=parent, seen=Object.create(null);
+    while(cursor){ if(cursor.id===candidate.id)return {ok:false,message:'职位上下级关系不能形成循环。'}; if(seen[cursor.id])return {ok:false,message:'现有职位层级已存在循环，请先修复。'}; seen[cursor.id]=true; cursor=byId[cursor.parentId]||defs.find(function(d){return d.name===cursor.parentId;}); }
+    return {ok:true};
+}
+function getCurrentOrgPositionText(view, characterName) {
+    var progress=view&&view.plugin&&view.plugin.settings?view.plugin.settings.currentTimePoint||'':'';
+    var rows=normalizeOrgMemberships(view&&view.orgMemberships||[]).filter(function(r){return r.character===characterName&&r.position&&r.type!=='组织解散'&&r.appointmentType!=='荣誉头衔'&&classifyOrgMembershipAtProgress(r,progress,view.orgMemberships)==='current';});
+    var seen=[]; rows.forEach(function(r){var label=r.position;if(seen.indexOf(label)<0)seen.push(label);}); return seen.join(' / ');
+}
+function getOrgPositionOccupants(view, organization, position, excludeId) {
+    var records = normalizeOrgMemberships(view.orgMemberships || []), progress=view&&view.plugin&&view.plugin.settings?view.plugin.settings.currentTimePoint||'':'';
+    return records.filter(function(r) { return (organization === '__shared__' || r.organization === organization) && r.position === position && r.id !== excludeId && r.type !== '退出' && r.type !== '被逐' && r.type !== '叛变' && r.type !== '组织解散' && r.appointmentType !== '荣誉头衔' && classifyOrgMembershipAtProgress(r,progress,records)==='current'; });
+}
+function validateOrgMembershipCapacity(view, candidate) {
+    var def=getOrgPositionDef(view,candidate.organization,candidate.position);
+    if(!def) return {ok:true};
+    if(['退出','被逐','叛变','组织解散'].indexOf(candidate.type)>=0 || candidate.appointmentType==='荣誉头衔') return {ok:true};
+    var actingTypes=['代理任职','暂代','临时委派'];
+    if(actingTypes.indexOf(candidate.appointmentType)>=0 && def.allowActing===false) return {ok:false,message:'职位「'+def.name+'」不允许代理、暂代或临时任职。'};
+    var start=String(candidate.startTime||'').trim(), end=String(candidate.endTime||'').trim();
+    function overlaps(other){
+        var os=String(other.startTime||'').trim(), oe=String(other.endTime||'').trim();
+        if(start&&oe&&timesAreComparable(start,oe)&&getTimeSortValue(start)>getTimeSortValue(oe)) return false;
+        if(end&&os&&timesAreComparable(end,os)&&getTimeSortValue(end)<getTimeSortValue(os)) return false;
+        return true; // 时间无法比较时采取保守策略，避免静默超编
+    }
+    var active=normalizeOrgMemberships(view.orgMemberships||[]).filter(function(r){return r.id!==candidate.id&&r.organization===candidate.organization&&r.position===candidate.position&&!['退出','被逐','叛变','组织解散'].includes(r.type)&&r.appointmentType!=='荣誉头衔'&&overlaps(r);});
+    if(def.limit!==null&&active.length>=def.limit) return {ok:false,message:'职位「'+def.name+'」编制为 '+def.limit+' 人，当前时间区间已有 '+active.length+' 人任职，无法新增或调整。请检查任职时间或调整编制。'};
+    if(!def.allowConcurrent){var other=normalizeOrgMemberships(view.orgMemberships||[]).filter(function(r){return r.id!==candidate.id&&r.character===candidate.character&&r.organization===candidate.organization&&r.position!==candidate.position&&!['退出','被逐','叛变','组织解散'].includes(r.type)&&r.appointmentType!=='荣誉头衔'&&overlaps(r);}); if(other.length) return {ok:false,message:'该职位规则不允许同一人物在重叠时间内兼任本组织其他职位。'};}
+    return {ok:true};
+}
+var OrgPositionManagerModal = /** @class */ (function (_super) {
+    __extends(OrgPositionManagerModal, _super);
+    function OrgPositionManagerModal(app, view, organization, onSaved) { var _this = Reflect.construct(_super, [app], OrgPositionManagerModal); _this.view=view; _this.organization=organization; _this.onSaved=onSaved; return _this; }
+    OrgPositionManagerModal.prototype.onOpen = function() {
+        var self=this, el=this.contentEl; el.addClass('my-char-modal-body'); el.style.cssText='padding:18px;max-height:82vh;overflow:auto;';
+        el.createEl('h3',{text:'全阵营共享 · 职位与编制管理'});
+        el.createEl('p',{text:'所有派系共用这套职位模板；人物在不同派系的实际任职仍分别记录。旧版各组织独立职位数据会保留，不会被覆盖。名额留空表示不限人数。',cls:'my-char-muted'});
+        var list=el.createEl('div',{cls:'rw-position-manager-list'});
+        var legacyDefs=normalizeOrgPositionDefs(self.view.orgPositionDefs||[]).filter(function(d){return d.organization!=='__shared__';});
+        var sharedDefs=normalizeOrgPositionDefs(self.view.orgPositionDefs||[]).filter(function(d){return d.organization==='__shared__';});
+        if(self.organization==='__shared__'&&!sharedDefs.length&&legacyDefs.length){
+            var migrate=el.createEl('button',{text:'从现有派系职位汇总为共享模板',cls:'my-char-view-btn my-char-btn-sm'});
+            migrate.addEventListener('click',function(){var byName=Object.create(null), merged=[];legacyDefs.forEach(function(d){if(!byName[d.name]){byName[d.name]=true;merged.push(Object.assign({},d,{id:createOrgPositionId(),organization:'__shared__'}));}});if(!merged.length)return;var before=deepCloneJson(self.view.orgPositionDefs||[]);pushUndoSnapshot(self.view,'汇总旧职位为共享模板');self.view.orgPositionDefs=normalizeOrgPositionDefs(self.view.orgPositionDefs||[]).concat(merged);self.view.saveFactionsAndRelations().then(function(){new obsidian.Notice('已汇总 '+merged.length+' 个共享职位；旧派系职位定义仍保留');refresh();}).catch(async function(e){self.view.orgPositionDefs=before;try{await self.view.saveFactionsAndRelations();}catch(re){console.error(re);}new obsidian.Notice('汇总失败：'+(e.message||e),8000);});});
+        }
+        function refresh(){ list.empty(); var defs=normalizeOrgPositionDefs(self.view.orgPositionDefs||[]).filter(function(d){return d.organization===self.organization;});
+            if(!defs.length) list.createEl('p',{text:'尚未建立共享职位。可以添加统一职位，或先汇总旧派系职位。',cls:'my-char-view-muted'});
+            getOrgPositionHierarchy(self.view,self.organization).forEach(function(d){var row=list.createEl('div',{cls:'rw-position-manager-row'}); row.style.marginLeft=(Math.min(d.depth,5)*12)+'px'; var info=row.createEl('div'); info.createEl('strong',{text:d.name+(d.archived?'（已归档）':'')}); info.createEl('div',{text:(d.level?'等级：'+d.level+' · ':'')+(d.parentId?'上级：'+((normalizeOrgPositionDefs(self.view.orgPositionDefs||[]).find(function(p){return p.id===d.parentId;})||{}).name||d.parentId)+' · ':'')+'编制：'+(d.limit===null?'不限':d.limit+'人')+' · 继任：'+({manual:'作者指定',eldest:'嫡长继任',seniority:'资历递补',appointment:'上级任命',election:'推举选任',rotation:'轮值轮任'}[d.successionRule]||'作者指定')+' · 当前未结束任职：'+getOrgPositionOccupants(self.view,self.organization,d.name).length+'人',cls:'my-char-muted'}); if(d.description) info.createEl('small',{text:d.description,cls:'my-char-muted'});
+                var actions=row.createEl('div',{cls:'my-char-btn-group'}); actions.createEl('button',{text:'编辑',cls:'my-char-btn-ghost my-char-btn-xs'}).addEventListener('click',function(){edit(d);}); actions.createEl('button',{text:d.archived?'恢复':'归档',cls:'my-char-btn-ghost my-char-btn-xs'}).addEventListener('click',function(){var before=deepCloneJson(self.view.orgPositionDefs||[]);pushUndoSnapshot(self.view,'调整职位归档状态'); self.view.orgPositionDefs=normalizeOrgPositionDefs(self.view.orgPositionDefs).map(function(x){return x.id===d.id?Object.assign({},x,{archived:!x.archived}):x;}); persist(before);}); actions.createEl('button',{text:'删除',cls:'my-char-btn-danger my-char-btn-xs'}).addEventListener('click',function(){var used=(self.view.orgMemberships||[]).some(function(m){return (self.organization==='__shared__'||m.organization===self.organization)&&m.position===d.name;}); if(used){new obsidian.Notice('该职位已有任职历史，请归档而不要删除。');return;} var confirmModal=new obsidian.Modal(self.app);confirmModal.onOpen=function(){var ce=this.contentEl;ce.addClass('my-char-modal-body');ce.style.padding='18px';ce.createEl('h3',{text:'删除职位定义'});ce.createEl('p',{text:'确定删除职位「'+d.name+'」？此操作仅允许删除没有任何任职历史的职位。'});var ca=ce.createEl('div',{cls:'my-char-btn-group'});ca.style.justifyContent='flex-end';ca.createEl('button',{text:'取消',cls:'my-char-btn-ghost'}).addEventListener('click',function(){confirmModal.close();});ca.createEl('button',{text:'确认删除',cls:'my-char-btn-danger'}).addEventListener('click',function(){var before=deepCloneJson(self.view.orgPositionDefs||[]);pushUndoSnapshot(self.view,'删除职位定义');self.view.orgPositionDefs=self.view.orgPositionDefs.filter(function(x){return x.id!==d.id;});confirmModal.close();persist(before);});};confirmModal.open();});
+            }); }
+        function persist(before){self.view.saveFactionsAndRelations().then(function(){new obsidian.Notice('职位编制已保存');refresh();if(self.onSaved)self.onSaved();}).catch(async function(e){if(before)self.view.orgPositionDefs=before;try{await self.view.saveFactionsAndRelations();}catch(rollbackError){console.error('[职位编制] 回滚保存失败',rollbackError);}new obsidian.Notice('保存失败，已尝试恢复原职位定义：'+(e.message||e),8000);refresh();});}
+        function edit(old){
+            var modal=new obsidian.Modal(self.app);
+            modal.onOpen=function(){
+                var form=this.contentEl; form.addClass('my-char-modal-body'); form.style.cssText='padding:18px;max-height:82vh;overflow:auto;';
+                form.createEl('h3',{text:old?'编辑职位':'新增职位'});
+                function field(label,value,placeholder,type){var wrap=form.createEl('div',{cls:'my-char-form-row'});wrap.createEl('label',{text:label,cls:'my-char-form-label'});var input=wrap.createEl('input',{type:type||'text'});input.value=value==null?'':String(value);input.placeholder=placeholder||'';input.style.cssText='width:100%;box-sizing:border-box;padding:9px;border:1px solid var(--background-modifier-border);border-radius:8px;background:var(--background-primary);color:var(--text-normal);';return input;}
+                var name=field('职位名称',old?old.name:'','例如：宗主');
+                var level=field('职位等级 / 层级',old?old.level:'','例如：最高级、长老级');
+                var lim=field('最大任职人数',old&&old.limit!==null?old.limit:'','留空表示不限；填写0表示暂不开放','text');lim.inputMode='numeric';lim.autocomplete='off';lim.setAttribute('pattern','[0-9]*');lim.setAttribute('aria-label','最大任职人数');
+                var parentWrap=form.createEl('div',{cls:'my-char-form-row'}); parentWrap.createEl('label',{text:'上级职位',cls:'my-char-form-label'}); var parent=parentWrap.createEl('select'); var parentDefs=normalizeOrgPositionDefs(self.view.orgPositionDefs||[]).filter(function(d){return d.organization===self.organization&&(!old||d.id!==old.id);}); var noParent=parent.createEl('option',{text:'无上级（顶层职位）'}); noParent.value=''; parentDefs.forEach(function(d){var op=parent.createEl('option',{text:d.name+(d.level?' · '+d.level:'')});op.value=d.id;}); parent.value=old?(parentDefs.find(function(d){return d.id===old.parentId||d.name===old.parentId;})||{}).id||'':''; parent.style.cssText='width:100%;padding:9px;border:1px solid var(--background-modifier-border);border-radius:8px;background:var(--background-primary);color:var(--text-normal);';
+                var order=field('品级排序数字',old&&old.levelOrder!==null?old.levelOrder:'','数字越小排序越靠前；可留空','text'); order.inputMode='numeric';
+                var successionWrap=form.createEl('div',{cls:'my-char-form-row'}); successionWrap.createEl('label',{text:'职位继承规则',cls:'my-char-form-label'}); var succession=successionWrap.createEl('select'); [['manual','由作者指定'],['eldest','嫡长继任'],['seniority','按资历递补'],['appointment','上级任命'],['election','推举 / 选任'],['rotation','轮值 / 轮任']].forEach(function(pair){var op=succession.createEl('option',{text:pair[1]});op.value=pair[0];}); succession.value=old&&old.successionRule||'manual'; succession.style.cssText='width:100%;padding:9px;border:1px solid var(--background-modifier-border);border-radius:8px;background:var(--background-primary);color:var(--text-normal);';
+                var desc=field('职位职责 / 说明',old?old.description:'','可留空');
+                var checkWrap=form.createEl('label',{cls:'my-char-form-row'});checkWrap.style.cssText='display:flex;align-items:center;gap:8px;margin-top:10px;';
+                var concurrent=checkWrap.createEl('input',{type:'checkbox'});concurrent.checked=!!(old&&old.allowConcurrent);
+                checkWrap.createEl('span',{text:'允许同一人物同时兼任本组织的其他职位'});
+                var actingWrap=form.createEl('label',{cls:'my-char-form-row'}); actingWrap.style.cssText='display:flex;align-items:center;gap:8px;margin-top:8px;'; var acting=actingWrap.createEl('input',{type:'checkbox'}); acting.checked=!(old&&old.allowActing===false); actingWrap.createEl('span',{text:'允许代理、暂代及临时任职'});
+                var actions=form.createEl('div',{cls:'my-char-btn-group'});actions.style.cssText='justify-content:flex-end;margin-top:16px;';
+                var cancel=actions.createEl('button',{text:'取消',cls:'my-char-btn-ghost'});cancel.addEventListener('click',function(){modal.close();});
+                var save=actions.createEl('button',{text:'保存职位',cls:'my-char-view-btn'});save.addEventListener('click',function(){
+                    var n=name.value.trim(), l=String(lim.value==null?'':lim.value).trim();
+                    if(!n){new obsidian.Notice('职位名称不能为空');name.focus();return;}
+                    if(l!==''&&(!/^\d+$/.test(l)||!Number.isSafeInteger(Number(l)))){new obsidian.Notice('名额必须为非负整数');lim.focus();return;}
+                    var next={id:old?old.id:createOrgPositionId(),organization:self.organization,name:n,level:level.value.trim(),levelOrder:String(order.value).trim()===''?null:Number(order.value),successionRule:succession.value,parentId:parent.value.trim(),limit:l===''?null:Number(l),description:desc.value.trim(),allowConcurrent:concurrent.checked,allowActing:acting.checked,archived:false};
+                    var duplicate=(self.view.orgPositionDefs||[]).some(function(x){return x.organization===self.organization&&x.name===n&&x.id!==next.id;});
+                    if(duplicate){new obsidian.Notice('该组织已存在同名职位');name.focus();return;}
+                    if(String(order.value).trim()!==''&&!Number.isFinite(Number(order.value))){new obsidian.Notice('品级排序必须为数字');order.focus();return;}
+                    var parentCheck=validateOrgPositionParent(normalizeOrgPositionDefs(self.view.orgPositionDefs||[]),next); if(!parentCheck.ok){new obsidian.Notice(parentCheck.message);parent.focus();return;}
+                    var before=deepCloneJson(self.view.orgPositionDefs||[]);pushUndoSnapshot(self.view,old?'编辑职位定义':'新增职位定义');
+                    var arr=normalizeOrgPositionDefs(self.view.orgPositionDefs||[]);if(old)arr=arr.map(function(x){return x.id===old.id?next:x;});else arr.push(next);
+                    self.view.orgPositionDefs=arr;modal.close();persist(before);
+                });
+                name.focus();
+            };
+            modal.open();
+        }
+        var add=el.createEl('button',{text:'+ 新增职位',cls:'my-char-view-btn'}); add.addEventListener('click',function(){edit(null);}); refresh();
+        var close=el.createEl('button',{text:'完成',cls:'my-char-btn-ghost'}); close.style.marginLeft='8px'; close.addEventListener('click',function(){self.close();});
+    };
+    OrgPositionManagerModal.prototype.onClose=function(){this.contentEl.empty();}; return OrgPositionManagerModal;
+}(obsidian.Modal));
 
 var OrgMembershipModal = /** @class */ (function (_super) {
     __extends(OrgMembershipModal, _super);
-    function OrgMembershipModal(app, character, factions, record, onSubmit) {
+    function OrgMembershipModal(app, character, factions, record, onSubmit, view) {
         var _this = Reflect.construct(_super, [app], OrgMembershipModal);
-        _this.character = character; _this.factions = factions || []; _this.record = record || null; _this.onSubmit = onSubmit;
+        _this.character = character; _this.factions = factions || []; _this.record = record || null; _this.onSubmit = onSubmit; _this.view = view || null;
         return _this;
     }
     OrgMembershipModal.prototype.onOpen = function() {
@@ -9262,7 +11318,13 @@ var OrgMembershipModal = /** @class */ (function (_super) {
         if (!orgNames.length) orgNames=['（请先建立组织/阵营）'];
         var org=select('所属组织',r.organization,orgNames);
         var type=select('履历类型',r.type,ORG_MEMBERSHIP_TYPES);
+        var appointmentType=select('任职性质',r.appointmentType,ORG_APPOINTMENT_TYPES);
         var position=field('职位 / 身份',r.position,'如：外门弟子、长老、统领');
+        var successionFrom=field('继任自（前任人物，可选）',r.successionFrom,'填写前任人物姓名；不涉及继任可留空');
+        var successionBasis=select('继任依据',r.successionBasis||'未注明',['未注明','作者指定','嫡长继任','资历递补','上级任命','推举选任','轮值轮任','其他']);
+        successionFrom.addEventListener('change',function(){if(successionFrom.value.trim()===self.character){new obsidian.Notice('继任来源不能填写人物本人');successionFrom.value='';}});
+        var definedPositions=getOrgPositionDefsForOrganization(this.view,org.value).filter(function(d){return !d.archived;});
+        if(definedPositions.length){var listId='rw-position-options-'+createOrgPositionId(); position.setAttribute('list',listId); var dl=el.createEl('datalist',{attr:{id:listId}}); definedPositions.forEach(function(d){dl.createEl('option',{value:d.name});}); var hint=el.createEl('div',{cls:'my-char-muted'});hint.setText('可从已定义职位中选择，也可填写特殊身份：'+definedPositions.map(function(d){return d.name+(d.limit===null?'':'（限'+d.limit+'人）');}).join('、'));}
         var start=field('开始时间',r.startTime,'例如：公元前221年 / 第三章');
         var end=field('结束时间',r.endTime,'尚未离开可留空');
         var reason=field('变动原因',r.reason,'如：主动退出、被逐、策反');
@@ -9273,8 +11335,8 @@ var OrgMembershipModal = /** @class */ (function (_super) {
         actions.createEl('button',{text:'保存',cls:'my-char-view-btn'}).addEventListener('click',function(){
             if(!org.value || org.value.indexOf('请先建立')>=0){new obsidian.Notice('请先建立组织/阵营');return;}
             if(start.value.trim() && end.value.trim() && timesAreComparable(start.value.trim(),end.value.trim()) && getTimeSortValue(start.value.trim())>getTimeSortValue(end.value.trim())){new obsidian.Notice('结束时间不能早于开始时间');return;}
-            self.onSubmit({id:r.id||createOrgMembershipId(),character:self.character,organization:org.value,type:type.value,position:position.value.trim(),startTime:start.value.trim(),endTime:end.value.trim(),reason:reason.value.trim(),linkedEvent:linked.value.trim(),notes:notes.value.trim(),createdAt:r.createdAt||new Date().toISOString()});
-            self.close();
+            var submitted=self.onSubmit({id:r.id||createOrgMembershipId(),character:self.character,organization:org.value,type:type.value,appointmentType:appointmentType.value,position:position.value.trim(),successionFrom:successionFrom.value.trim(),successionBasis:successionBasis.value,startTime:start.value.trim(),endTime:end.value.trim(),reason:reason.value.trim(),linkedEvent:linked.value.trim(),notes:notes.value.trim(),createdAt:r.createdAt||new Date().toISOString()});
+            if(submitted===false)return; self.close();
         });
         actions.createEl('button',{text:'取消',cls:'my-char-btn-ghost'}).addEventListener('click',function(){self.close();});
     };
@@ -9307,16 +11369,18 @@ var OrgRelationModal = /** @class */ (function (_super) {
     var names=this.factions.map(function(f){return f.name;});
     var from=field('组织 A','select',r.from||names[0],names.map(function(n){return {value:n,label:n};}));
     var to=field('组织 B','select',r.to||names[1]||names[0],names.map(function(n){return {value:n,label:n};}));
-    var type=field('关系类型','select',r.type||'联盟',ORG_RELATION_TYPES.map(function(n){return {value:n,label:n};}));
+    var type=field('关系类型','text',r.type||'联盟'); type.placeholder='自定义关系名称，例如：联盟、敌对、贸易协定、暗中操控';
     var start=field('开始时间','text',r.startTime||''); start.placeholder='例如：公元前221年 / 第三章';
     var end=field('结束时间（可留空）','text',r.endTime||''); end.placeholder='留空表示尚未记录结束时间';
+    var territory=field('涉及领地 / 地域','text',r.territory||''); territory.placeholder='可填写地区、城池或疆域；可留空';
+    var eventRef=field('关联事件','text',r.eventRef||''); eventRef.placeholder='填写时间线事件关键词或名称';
     var desc=field('关系说明','textarea',r.desc||''); desc.rows=3;
     var actions=el.createEl('div',{cls:'my-char-btn-group'}); actions.style.cssText='justify-content:flex-end;margin-top:14px;';
     var save=actions.createEl('button',{text:'保存',cls:'my-char-view-btn'});
     save.addEventListener('click',function(){
         if(!from.value||!to.value||from.value===to.value){new obsidian.Notice('请选择两个不同的组织');return;}
         if(start.value.trim()&&end.value.trim()&&timesAreComparable(start.value.trim(),end.value.trim())&&getTimeSortValue(start.value.trim())>getTimeSortValue(end.value.trim())){new obsidian.Notice('结束时间不能早于开始时间');return;}
-        self.onSubmit({id:r.id||('orgrel-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,7)),from:from.value,to:to.value,type:type.value,startTime:start.value.trim(),endTime:end.value.trim(),desc:desc.value.trim(),createdAt:r.createdAt||new Date().toISOString()});
+        self.onSubmit({id:r.id||('orgrel-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,7)),from:from.value,to:to.value,type:type.value,startTime:start.value.trim(),endTime:end.value.trim(),territory:territory.value.trim(),eventRef:eventRef.value.trim(),desc:desc.value.trim(),createdAt:r.createdAt||new Date().toISOString()});
         self.close();
     });
     var cancel=actions.createEl('button',{text:'取消',cls:'my-char-btn-ghost'}); cancel.addEventListener('click',function(){self.close();});
@@ -9337,6 +11401,40 @@ MyView.prototype.showOrgRelationDialog = function(relation) {
     }).open();
 };
 
+
+MyView.prototype.renderOrgRelationsManager = function(container) {
+    var self=this, all=normalizeOrgRelations(this.orgRelations||[]);
+    this.orgRelations=all;
+    var panel=container.createEl('section',{cls:'rw-org-rel-panel rw-org-rel-manager'});
+    var head=panel.createEl('div',{cls:'rw-org-rel-head'});
+    head.createEl('div',{text:'组织关系管理',cls:'rw-org-rel-title'});
+    head.createEl('button',{text:'+ 添加组织关系',cls:'my-char-view-btn my-char-btn-sm'}).addEventListener('click',function(){self.showOrgRelationDialog(null);});
+    panel.createEl('div',{text:'在这里新增、编辑和删除组织之间的关系。上下级隶属关系与联盟、敌对等普通关系分别保存，互不覆盖；同一对组织可以同时拥有多种关系。',cls:'rw-org-rel-progress'});
+    if(!all.length){panel.createEl('div',{text:'暂无组织关系。点击「添加组织关系」建立组织之间的联系。',cls:'my-char-view-empty'});return;}
+    var list=panel.createEl('div',{cls:'rw-org-rel-list'});
+    all.slice().sort(compareOrgRelationTime).forEach(function(r){
+        var row=list.createEl('article',{cls:'rw-org-rel-row'});
+        var top=row.createEl('div',{cls:'rw-org-rel-row-top'});
+        top.createEl('strong',{text:r.from});top.createEl('span',{text:r.type,cls:'rw-org-rel-type'});top.createEl('strong',{text:r.to});
+        row.createEl('div',{text:(r.startTime||'开始时间未注明')+(r.endTime?' — '+r.endTime:' — 未记录结束时间'),cls:'rw-org-rel-time'});
+        if(r.territory)row.createEl('div',{text:'涉及地域：'+r.territory,cls:'rw-org-rel-desc'});
+        if(r.eventRef)row.createEl('div',{text:'关联事件：'+r.eventRef,cls:'rw-org-rel-desc'});
+        if(r.desc)row.createEl('div',{text:r.desc,cls:'rw-org-rel-desc'});
+        var actions=row.createEl('div',{cls:'rw-org-rel-actions'});
+        actions.createEl('button',{text:'编辑',cls:'my-char-btn-ghost my-char-btn-xs'}).addEventListener('click',function(){self.showOrgRelationDialog(r);});
+        actions.createEl('button',{text:'删除',cls:'my-char-btn-danger my-char-btn-xs'}).addEventListener('click',function(){
+            if(!confirmDestructiveAction('删除这条组织关系？','只删除当前关系，不会删除组织或同一对组织的其他关系。'))return;
+            var before=deepCloneJson(self.orgRelations||[]);pushUndoSnapshot(self,'删除组织关系');
+            self.orgRelations=(self.orgRelations||[]).filter(function(x){return x.id!==r.id;});
+            self.saveFactionsAndRelations().then(async function(){
+                var saved=await loadSavedData(self.plugin), exists=normalizeOrgRelations(saved.orgRelations||[]).some(function(x){return x.id===r.id;});
+                if(exists)throw new Error('保存校验未通过');
+                new obsidian.Notice('组织关系已删除');self.render();
+            }).catch(async function(e){self.orgRelations=before;try{await self.saveFactionsAndRelations();}catch(re){console.error(re);}new obsidian.Notice('删除失败，已尝试恢复：'+(e.message||e),8000);self.render();});
+        });
+    });
+};
+
 MyView.prototype.renderOrgRelationsPanel = function(container) {
     var self=this, all=normalizeOrgRelations(this.orgRelations||[]);
     // 将补齐后的 ID 回写到视图数据，保证编辑、删除和保存始终引用同一条记录。
@@ -9347,10 +11445,166 @@ MyView.prototype.renderOrgRelationsPanel = function(container) {
     Object.keys(buckets).forEach(function(k) { buckets[k].sort(compareOrgRelationTime); });
     var panel=container.createEl('section',{cls:'rw-org-rel-panel'});
     var head=panel.createEl('div',{cls:'rw-org-rel-head'});
-    head.createEl('div',{text:'组织关系',cls:'rw-org-rel-title'});
-    head.createEl('button',{text:'+ 建立关系',cls:'my-char-view-btn my-char-btn-sm'}).addEventListener('click',function(){self.showOrgRelationDialog(null);});
+    head.createEl('div',{text:'组织关系网络',cls:'rw-org-rel-title'});
     var progress=panel.createEl('div',{cls:'rw-org-rel-progress'});
     progress.textContent='按当前写作进度判断：'+(progressText || '尚未设置。请先在事件线设置当前时间点。');
+    var graphBox=panel.createEl('section',{cls:'rw-org-history-graph'});
+    var graphHead=graphBox.createEl('div',{cls:'rw-org-rel-head'}); graphHead.createEl('strong',{text:'组织关系图谱'});
+    var orgFocusBtn=graphHead.createEl('button',{text:'🔍',cls:'my-char-btn-ghost my-char-btn-xs'});orgFocusBtn.title='一览组织图谱：铺满可用窗口，不需要页面滚动';orgFocusBtn.setAttribute('aria-label','一览组织图谱');orgFocusBtn.addEventListener('click',function(){var viewport=graphBox.querySelector('.rw-org-network-viewport');if(viewport)rwOpenGraphFocusOverlay(self,viewport,'组织关系网络 · 全图浏览',self._rwOrgGraphApi);});
+    var graphTimeSelect=graphHead.createEl('select',{cls:'my-char-form-input'});
+    graphTimeSelect.createEl('option',{text:'选择时间线节点…',value:''});
+    var graphTimePoints=novelExt.getTimelineTimePoints(this.timeline||[],this.plugin.settings||{});
+    graphTimePoints.forEach(function(point){var opt=graphTimeSelect.createEl('option',{text:point.label,value:point.year});});
+    var graphTime=graphHead.createEl('input',{type:'text',placeholder:'或输入历史时间点',cls:'my-char-form-input'}); graphTime.value=this._orgGraphTime || progressText;
+    graphTimeSelect.value=graphTime.value;
+    var useNow=graphHead.createEl('button',{text:'当前进度',cls:'my-char-btn-ghost my-char-btn-xs'});
+    var graphCanvas=graphBox.createEl('div',{cls:'rw-org-history-graph-canvas'});
+    var graphTools=graphBox.createEl('div',{cls:'rw-org-graph-tools'});
+    var relationKind=graphTools.createEl('select',{cls:'my-char-form-input'});
+    [['all','全部关系'],['hierarchy','仅上下级'],['ordinary','仅普通关系']].forEach(function(x){var o=relationKind.createEl('option',{text:x[1]});o.value=x[0];});
+    var typeFilter=graphTools.createEl('select',{cls:'my-char-form-input'});
+    var searchOrg=graphTools.createEl('input',{type:'search',placeholder:'搜索组织…',cls:'my-char-form-input'});
+    var resetGraph=graphTools.createEl('button',{text:'一键恢复布局',cls:'my-char-btn-ghost my-char-btn-xs'});
+    var graphViewport=graphBox.createEl('div',{cls:'rw-org-network-viewport'});
+    graphViewport.style.cssText='position:relative;overflow:auto;min-height:480px;border:1px solid var(--background-modifier-border);border-radius:12px;background:var(--background-primary);';
+    var graphSvg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+    var graphW=Math.max(520,Math.min(1200,graphBox.clientWidth||container.clientWidth||960)),graphH=Math.max(620,Math.round(graphW*.78)),orgPositions={},visibleOrgNames=[],orgScale=1,orgOffset={x:0,y:0},dragState=null,orgJustDragged=false,focusedOrgName=null,orgClickTimer=null;
+    graphSvg.setAttribute('width',graphW);graphSvg.setAttribute('height',graphH);graphSvg.setAttribute('viewBox','0 0 '+graphW+' '+graphH);
+    // SVG 连线与 HTML 节点共用完全相同的固定坐标画布，避免 SVG 自适应缩放与 HTML 覆盖层产生偏移。
+    graphSvg.style.cssText='display:block;width:'+graphW+'px;height:'+graphH+'px;min-width:0;max-width:none;flex:none;touch-action:none;cursor:default;user-select:none;-webkit-user-select:none;';graphViewport.style.cursor='default';graphViewport.appendChild(graphSvg);
+    var orgHtmlLayer=graphViewport.createEl('div',{cls:'rw-org-html-label-layer'});orgHtmlLayer.style.cssText='position:absolute;left:0;top:0;width:'+graphW+'px;height:'+graphH+'px;transform-origin:0 0;pointer-events:none;z-index:2;';
+    var zoomTools=graphBox.createEl('div',{cls:'rw-org-graph-zoom'});
+    var orgOverviewBtn=zoomTools.createEl('button',{text:'🔍 全图',cls:'my-char-btn-ghost my-char-btn-xs',attr:{title:'全图浏览：只放大关系网络画布，不带入上方说明和筛选长栏'}});orgOverviewBtn.addEventListener('click',function(){rwOpenGraphFocusOverlay(self,graphViewport,'组织关系网络 · 全图浏览',self._rwOrgGraphApi);});
+    var zoomOut=zoomTools.createEl('button',{text:'−',cls:'my-char-btn-ghost my-char-btn-xs'}),zoomIn=zoomTools.createEl('button',{text:'+',cls:'my-char-btn-ghost my-char-btn-xs'}),zoomReset=zoomTools.createEl('button',{text:'适应全图',cls:'my-char-btn-ghost my-char-btn-xs'});
+    var graphCanvasCaption=graphBox.createEl('div',{cls:'rw-org-history-graph-caption'});
+    function drawOrgGraph(){
+        graphSvg.empty();orgHtmlLayer.empty();orgHtmlLayer.style.transform='translate('+orgOffset.x+'px,'+orgOffset.y+'px) scale('+orgScale+')';var at=String(graphTime.value||'').trim();
+        // 每次绘制都读取最新的阵营和组织关系，避免图谱持有初次渲染时的旧快照。
+        var graphRelations=normalizeOrgRelations(self.orgRelations||[]);
+        var active=graphRelations.filter(function(r){var state=classifyOrgRelationAtProgress(r,at);return state==='current'||state==='unknown';});
+        var orgs=Object.create(null);(self.factions||[]).forEach(function(f){if(f&&f.name)orgs[String(f.name)]=f;});
+        active.forEach(function(r){if(!orgs[r.from])orgs[r.from]={name:r.from};if(!orgs[r.to])orgs[r.to]={name:r.to};});
+        // 上级组织即使未单独建立阵营档案，也作为层级节点显示，避免层级链断裂。
+        Object.keys(orgs).slice().forEach(function(n){
+            var parent=String((orgs[n]||{}).parentOrganization||'').trim();
+            if(parent&&!orgs[parent])orgs[parent]={name:parent,_implicitParent:true};
+        });
+        var names=Object.keys(orgs).sort(function(a,b){return a.localeCompare(b,'zh-CN');}),query=String(searchOrg.value||'').trim().toLowerCase();
+        var visibleSet=Object.create(null), searchMatches=Object.create(null);
+        names.forEach(function(n){if(!query||n.toLowerCase().indexOf(query)>=0){visibleSet[n]=true;if(query)searchMatches[n]=true;}});
+        // 搜索命中下级组织时，自动补齐全部上级节点。
+        if(query)Object.keys(visibleSet).forEach(function(n){
+            var cursor=n,seen=Object.create(null);
+            while(cursor&&!seen[cursor]){seen[cursor]=true;var parent=String((orgs[cursor]||{}).parentOrganization||'').trim();if(parent&&orgs[parent]){visibleSet[parent]=true;cursor=parent;}else break;}
+        });
+        var visibleNames=names.filter(function(n){return !!visibleSet[n];}),visible=Object.create(null);visibleOrgNames=visibleNames.slice();visibleNames.forEach(function(n){visible[n]=true;});
+        if(focusedOrgName&&!visible[focusedOrgName])focusedOrgName=null;
+        var mode=relationKind.value||'all';
+        var hierarchy=[];visibleNames.forEach(function(n){var parent=String((orgs[n]||{}).parentOrganization||'').trim();if(parent&&visible[parent]&&parent!==n)hierarchy.push({from:parent,to:n,type:'隶属',hierarchy:true});});
+        var ordinary=active.filter(function(r){return visible[r.from]&&visible[r.to];});
+        var types=Array.from(new Set(ordinary.map(function(r){return r.type;}))).sort();var selected=typeFilter.value||'__all__';typeFilter.empty();var ao=typeFilter.createEl('option',{text:'全部关系标签'});ao.value='__all__';types.forEach(function(t){var o=typeFilter.createEl('option',{text:t});o.value=t;});typeFilter.value=types.indexOf(selected)>=0?selected:'__all__';
+        if(typeFilter.value!=='__all__')ordinary=ordinary.filter(function(r){return r.type===typeFilter.value;});
+        var edges=(mode==='ordinary'?[]:hierarchy).concat(mode==='hierarchy'?[]:ordinary);
+        var connectedOrg=Object.create(null);
+        if(focusedOrgName){connectedOrg[focusedOrgName]=true;edges.forEach(function(edge){if(edge.from===focusedOrgName)connectedOrg[edge.to]=true;if(edge.to===focusedOrgName)connectedOrg[edge.from]=true;});}
+        var cx=graphW/2,cy=graphH/2,radius=Math.max(190,Math.min(310,visibleNames.length*15));
+        // 初始布局按组织树分层：上级在上、下级在下；没有上级的阵营作为独立根节点。
+        // 用户手动拖动后的坐标会保留，不会在每次重绘时覆盖。
+        if(!Object.keys(orgPositions).length){
+            var children=Object.create(null),roots=[];
+            visibleNames.forEach(function(n){
+                var parent=String((orgs[n]||{}).parentOrganization||'').trim();
+                if(parent&&visible[parent]&&parent!==n)(children[parent]||(children[parent]=[])).push(n);
+                else roots.push(n);
+            });
+            Object.keys(children).forEach(function(k){children[k].sort(function(a,b){return a.localeCompare(b,'zh-CN');});});
+            roots.sort(function(a,b){return a.localeCompare(b,'zh-CN');});
+            var leafCursor=0,treeMeta=Object.create(null),visiting=Object.create(null);
+            function measureTree(n,depth){
+                if(visiting[n])return {leaves:1,depth:depth};
+                visiting[n]=true;
+                var kids=children[n]||[],count=0,maxDepth=depth;
+                kids.forEach(function(k){var m=measureTree(k,depth+1);count+=m.leaves;maxDepth=Math.max(maxDepth,m.depth);});
+                visiting[n]=false;
+                treeMeta[n]={depth:depth,leaves:Math.max(1,count||1)};
+                return {leaves:Math.max(1,count||1),depth:maxDepth};
+            }
+            roots.forEach(function(r){measureTree(r,0);});
+            var totalLeaves=roots.reduce(function(sum,r){return sum+(treeMeta[r]?treeMeta[r].leaves:1);},0);
+            var maxDepth=0;Object.keys(treeMeta).forEach(function(n){maxDepth=Math.max(maxDepth,treeMeta[n].depth);});
+            var rowGap=Math.max(105,Math.min(155,(graphH-100)/Math.max(1,maxDepth+1)));
+            var xGap=Math.max(125,Math.min(190,(graphW-100)/Math.max(1,totalLeaves)));
+            function placeTree(n){
+                var kids=children[n]||[],meta=treeMeta[n]||{depth:0,leaves:1},start=leafCursor;
+                if(!kids.length){orgPositions[n]={x:50+(leafCursor+.5)*xGap,y:55+meta.depth*rowGap};leafCursor++;return;}
+                kids.forEach(placeTree);
+                var childXs=kids.map(function(k){return orgPositions[k].x;});
+                orgPositions[n]={x:(Math.min.apply(Math,childXs)+Math.max.apply(Math,childXs))/2,y:55+meta.depth*rowGap};
+            }
+            roots.forEach(placeTree);
+            // 处理循环引用等异常层级数据，确保所有节点仍然可见。
+            visibleNames.forEach(function(n,i){if(!orgPositions[n])orgPositions[n]={x:50+(i+.5)*Math.max(100,(graphW-100)/Math.max(1,visibleNames.length)),y:graphH/2};});
+        }
+        visibleNames.forEach(function(n,i){if(!orgPositions[n]){var a=-Math.PI/2+Math.PI*2*i/Math.max(1,visibleNames.length);orgPositions[n]={x:cx+Math.cos(a)*radius,y:cy+Math.sin(a)*radius};}});
+        var defs=document.createElementNS('http://www.w3.org/2000/svg','defs'),marker=document.createElementNS('http://www.w3.org/2000/svg','marker');marker.setAttribute('id','rw-org-arrow');marker.setAttribute('markerWidth','8');marker.setAttribute('markerHeight','8');marker.setAttribute('refX','7');marker.setAttribute('refY','3');marker.setAttribute('orient','auto');var arrow=document.createElementNS('http://www.w3.org/2000/svg','path');arrow.setAttribute('d','M0,0 L0,6 L7,3 z');arrow.setAttribute('fill','#8292a5');marker.appendChild(arrow);defs.appendChild(marker);graphSvg.appendChild(defs);
+        var viewport=document.createElementNS('http://www.w3.org/2000/svg','g');viewport.setAttribute('transform','translate('+orgOffset.x+' '+orgOffset.y+') scale('+orgScale+')');graphSvg.appendChild(viewport);
+        edges.forEach(function(r){var a=orgPositions[r.from],b=orgPositions[r.to];if(!a||!b)return;var focusOk=!focusedOrgName||r.from===focusedOrgName||r.to===focusedOrgName;var line=document.createElementNS('http://www.w3.org/2000/svg','line');line.setAttribute('x1',a.x);line.setAttribute('y1',a.y);line.setAttribute('x2',b.x);line.setAttribute('y2',b.y);line.setAttribute('stroke',r.hierarchy?'#8b929d':(r.type==='敌对'||r.type==='战争'?'#d65b5b':r.type==='联盟'?'#3b9b72':'#8292a5'));line.setAttribute('stroke-width',r.hierarchy?'3':'2');line.setAttribute('stroke-dasharray',r.hierarchy?'6 4':'none');line.setAttribute('marker-end','url(#rw-org-arrow)');line.setAttribute('opacity',focusOk?'.9':'.10');viewport.appendChild(line);var label=document.createElementNS('http://www.w3.org/2000/svg','text');label.setAttribute('x',(a.x+b.x)/2);label.setAttribute('y',(a.y+b.y)/2-7);label.setAttribute('text-anchor','middle');label.setAttribute('font-size','12');label.setAttribute('fill','var(--text-normal)');label.setAttribute('paint-order','stroke');label.setAttribute('stroke','var(--background-primary)');label.setAttribute('stroke-width','4');label.setAttribute('opacity',focusOk?'1':'.08');label.textContent=r.type||'关系';viewport.appendChild(label);});
+        function getOrgDepth(name) { var depth=0,cursor=name,seen=Object.create(null); while(cursor&&!seen[cursor]){seen[cursor]=true;var parent=String((orgs[cursor]||{}).parentOrganization||'').trim();if(parent&&visible[parent]&&parent!==cursor){depth++;cursor=parent;}else break;}return depth; }
+        visibleNames.forEach(function(n){
+            var p=orgPositions[n],f=orgs[n]||{},depth=getOrgDepth(n),isRoot=depth===0,rank=f.hierarchyRank==null?Math.min(5,depth+1):Math.max(1,Math.min(5,Number(f.hierarchyRank)||5)),tierText=String(f.hierarchyLabel||'').trim()||(isRoot?'独立组织':'第 '+depth+' 层'),node=orgHtmlLayer.createEl('div',{cls:'rw-org-html-node-label '+(isRoot?'rw-org-node-root':'rw-org-node-level-'+Math.min(depth,4))+' rw-org-node-rank-'+rank});
+            var nodeSize={1:104,2:92,3:80,4:70,5:60}[rank]||70;
+            node.createEl('span',{text:n.length>(nodeSize>=90?10:7)?n.slice(0,(nodeSize>=90?10:7))+'…':n});
+            var tierLabel=node.createEl('small',{text:tierText});
+            node.title=n+' · '+tierText+' · 结构深度 '+depth+' · 单击聚焦直接关系，双击打开组织详情';
+            node.setAttribute('role','button');node.setAttribute('tabindex','0');node.setAttribute('aria-label',n+'，'+tierText+'，单击聚焦关系，双击查看详情');
+            node.classList.toggle('is-focused',n===focusedOrgName);
+            node.classList.toggle('is-dimmed',!!focusedOrgName&&!connectedOrg[n]);
+            node.classList.toggle('is-search-hit',!!searchMatches[n]);
+            node.classList.toggle('is-search-context',!!query&&!searchMatches[n]);
+            node.style.position='absolute';node.style.left=p.x+'px';node.style.top=p.y+'px';node.style.transform='translate(-50%,-50%)';
+            node.style.width=nodeSize+'px';node.style.height=nodeSize+'px';node.style.borderRadius=isRoot?'18px':(depth===1?'14px':'50%');node.style.boxSizing='border-box';
+            node.style.display='flex';node.style.flexDirection='column';node.style.alignItems='center';node.style.justifyContent='center';node.style.gap='3px';node.style.textAlign='center';
+            node.style.padding='5px';node.style.overflow='hidden';node.style.overflowWrap='anywhere';node.style.whiteSpace='normal';
+            node.style.fontSize=nodeSize>=90?'14px':(nodeSize>=75?'13px':'11px');node.style.fontWeight='800';node.style.lineHeight='1.15';node.style.color='#fff';
+            tierLabel.style.fontSize=nodeSize>=90?'10px':'9px';tierLabel.style.fontWeight='700';tierLabel.style.opacity='.9';tierLabel.style.letterSpacing='.04em';
+            node.style.textShadow='0 1px 2px rgba(0,0,0,.85)';node.style.background=f.color||'var(--interactive-accent)';
+            node.style.border=rank===1?'4px double #f0c36d':(rank===2?'3px solid rgba(255,255,255,.95)':rank===3?'2px solid rgba(255,255,255,.8)':'1px solid var(--background-modifier-border)');node.style.boxShadow=rank===1?'0 0 0 4px rgba(218,165,32,.22),0 5px 16px rgba(0,0,0,.28)':rank===2?'0 3px 12px rgba(0,0,0,.24)':'0 2px 7px rgba(0,0,0,.18)';
+            node.style.pointerEvents='auto';node.style.cursor='default';node.style.userSelect='none';node.style.webkitUserSelect='none';node.style.touchAction='none';
+            node.style.opacity=(focusedOrgName&&!connectedOrg[n])?'.18':(query&&!searchMatches[n]?'.72':'1');
+            node.addEventListener('pointerdown',function(ev){orgJustDragged=false;ev.stopPropagation();dragState={name:n,startX:ev.clientX,startY:ev.clientY,baseX:p.x,baseY:p.y,pointerId:ev.pointerId,moved:false};try{node.setPointerCapture(ev.pointerId);}catch(e){}});
+            node.addEventListener('pointermove',function(ev){if(!dragState||dragState.name!==n)return;var dx=ev.clientX-dragState.startX,dy=ev.clientY-dragState.startY;if(Math.abs(dx)+Math.abs(dy)>3){dragState.moved=true;orgJustDragged=true;orgPositions[n]={x:dragState.baseX+dx/orgScale,y:dragState.baseY+dy/orgScale};node.style.left=orgPositions[n].x+'px';node.style.top=orgPositions[n].y+'px';}});
+            function finishOrgNodeDrag(ev){if(!dragState||dragState.name!==n)return;var moved=dragState.moved;dragState=null;try{if(node.hasPointerCapture&&node.hasPointerCapture(ev.pointerId))node.releasePointerCapture(ev.pointerId);}catch(e){}if(moved)drawOrgGraph();}
+            node.addEventListener('pointerup',finishOrgNodeDrag);node.addEventListener('pointercancel',finishOrgNodeDrag);
+            node.addEventListener('click',function(ev){if(ev){ev.preventDefault();ev.stopPropagation();}if(orgJustDragged){orgJustDragged=false;return;}if(orgClickTimer)clearTimeout(orgClickTimer);orgClickTimer=setTimeout(function(){orgClickTimer=null;focusedOrgName=focusedOrgName===n?null:n;drawOrgGraph();},320);});
+            node.addEventListener('dblclick',function(ev){if(ev){ev.preventDefault();ev.stopPropagation();}if(orgClickTimer){clearTimeout(orgClickTimer);orgClickTimer=null;}var fnd=(self.factions||[]).find(function(x){return x.name===n;});if(!fnd){new obsidian.Notice('「'+n+'」目前只有关系节点，尚未建立正式阵营档案');return;}self._focusFactionName=n;self.expandedFactions=self.expandedFactions||{};self.expandedFactions[n]=true;self.tab='factions';self.render();});
+            node.addEventListener('keydown',function(ev){if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();focusedOrgName=focusedOrgName===n?null:n;drawOrgGraph();}});
+        });
+        graphCanvasCaption.textContent='查看时间：'+(at||'未设置；显示全部未归档关系')+' · '+visibleNames.length+' 个组织 · '+hierarchy.length+' 条内部隶属关系 · '+ordinary.length+' 条组织间关系；层级名称与节点大小可在阵营编辑中自定义，独立组织不默认视为顶级阵营。';
+    }
+    graphSvg.addEventListener('pointerdown',function(ev){if(ev.target===graphSvg){dragState={pan:true,startX:ev.clientX,startY:ev.clientY,baseX:orgOffset.x,baseY:orgOffset.y};graphSvg.style.cursor='grabbing';try{graphSvg.setPointerCapture(ev.pointerId);}catch(e){}}});
+    graphSvg.addEventListener('pointermove',function(ev){if(dragState&&dragState.pan){orgOffset={x:dragState.baseX+ev.clientX-dragState.startX,y:dragState.baseY+ev.clientY-dragState.startY};drawOrgGraph();}});
+    function endOrgGraphDrag(){dragState=null;graphSvg.style.cursor='default';}
+    graphSvg.addEventListener('pointerup',endOrgGraphDrag);graphSvg.addEventListener('pointercancel',endOrgGraphDrag);graphSvg.addEventListener('lostpointercapture',endOrgGraphDrag);
+    graphSvg.addEventListener('wheel',function(ev){ev.preventDefault();var rect=graphSvg.getBoundingClientRect(),px=ev.clientX-rect.left,py=ev.clientY-rect.top,old=orgScale,next=Math.max(.4,Math.min(3.2,old*(ev.deltaY<0?1.10:.90)));var ratio=next/old;orgOffset={x:px-(px-orgOffset.x)*ratio,y:py-(py-orgOffset.y)*ratio};orgScale=next;drawOrgGraph();},{passive:false});
+    relationKind.addEventListener('change',drawOrgGraph);typeFilter.addEventListener('change',drawOrgGraph);searchOrg.addEventListener('input',drawOrgGraph);
+    function fitOrgGraphToView(){var keys=visibleOrgNames.length?visibleOrgNames.slice():Object.keys(orgPositions);if(!keys.length){orgOffset={x:0,y:0};orgScale=1;drawOrgGraph();return;}var minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;keys.forEach(function(n){var p=orgPositions[n];minX=Math.min(minX,p.x-42);maxX=Math.max(maxX,p.x+42);minY=Math.min(minY,p.y-42);maxY=Math.max(maxY,p.y+42);});var vw=graphViewport.clientWidth||graphW,vh=graphViewport.clientHeight||graphH,bw=Math.max(1,maxX-minX),bh=Math.max(1,maxY-minY);orgScale=Math.max(.12,Math.min(2.4,(vw-48)/bw,(vh-48)/bh));orgOffset={x:vw/2-((minX+maxX)/2)*orgScale,y:vh/2-((minY+maxY)/2)*orgScale};drawOrgGraph();}
+    function zoomOrgGraphIn(){orgScale=Math.min(3.2,orgScale*1.2);drawOrgGraph();}
+    function zoomOrgGraphOut(){orgScale=Math.max(.4,orgScale/1.2);drawOrgGraph();}
+    self._fitOrgGraphToView=fitOrgGraphToView;
+    self._rwOrgGraphApi = {
+        fit: fitOrgGraphToView,
+        zoomIn: zoomOrgGraphIn,
+        zoomOut: zoomOrgGraphOut,
+        getState: function(){return {scale:orgScale,offset:{x:orgOffset.x,y:orgOffset.y},focusedOrgName:focusedOrgName};},
+        setState: function(state){if(!state)return;orgScale=Number(state.scale)||1;orgOffset=state.offset?{x:Number(state.offset.x)||0,y:Number(state.offset.y)||0}:{x:0,y:0};focusedOrgName=state.focusedOrgName||null;drawOrgGraph();}
+    };
+    resetGraph.addEventListener('click',function(){orgPositions={};orgOffset={x:0,y:0};orgScale=1;focusedOrgName=null;drawOrgGraph();});zoomIn.addEventListener('click',zoomOrgGraphIn);zoomOut.addEventListener('click',zoomOrgGraphOut);zoomReset.addEventListener('click',fitOrgGraphToView);
+    graphTime.addEventListener('change',function(){self._orgGraphTime=graphTime.value;graphTimeSelect.value=graphTime.value;drawOrgGraph();});
+    graphTimeSelect.addEventListener('change',function(){graphTime.value=graphTimeSelect.value;self._orgGraphTime=graphTime.value;drawOrgGraph();});
+    useNow.addEventListener('click',function(){graphTime.value=progressText;graphTimeSelect.value=progressText;self._orgGraphTime=progressText;drawOrgGraph();});
+    drawOrgGraph();
+    // 关系图谱 Tab 只呈现网络，不重复放置组织关系的管理列表。
+    return;
     var tabs=panel.createEl('div',{cls:'rw-org-rel-tabs'}), body=panel.createEl('div',{cls:'rw-org-rel-list'});
     var mode='current';
     function draw(){
@@ -9370,6 +11624,8 @@ MyView.prototype.renderOrgRelationsPanel = function(container) {
             row.createEl('div',{text:timeLabel,cls:'rw-org-rel-time'});
             if(mode==='future') row.createEl('div',{text:'尚未到达这段关系的开始时间',cls:'rw-org-rel-status'});
             if(mode==='unknown') row.createEl('div',{text:'缺少当前进度或时间格式无法可靠比较，请补充/统一时间格式',cls:'rw-org-rel-status'});
+            if(r.territory)row.createEl('div',{text:'涉及地域：'+r.territory,cls:'rw-org-rel-desc'});
+            if(r.eventRef)row.createEl('div',{text:'关联事件：'+r.eventRef,cls:'rw-org-rel-desc'});
             if(r.desc)row.createEl('div',{text:r.desc,cls:'rw-org-rel-desc'});
             var tools=row.createEl('div',{cls:'rw-org-rel-actions'});
             tools.createEl('button',{text:'编辑',cls:'my-char-btn-ghost my-char-btn-xs'}).addEventListener('click',function(){self.showOrgRelationDialog(r);});
@@ -9405,12 +11661,50 @@ MyView.prototype.renderOrgRelationsPanel = function(container) {
     setTab('current');
 };
 
+// ========== 领地变迁管理 ==========
+MyView.prototype.showOrgTerritoryDialog = function(record) {
+    var self=this, r=record || {}, modal=new obsidian.Modal(this.app);
+    modal.onOpen=function() {
+        var el=this.contentEl; el.addClass('my-char-modal-body'); el.style.cssText='padding:18px;max-height:82vh;overflow:auto;';
+        el.createEl('h3',{text:r.id?'编辑领地变迁':'新增领地变迁'});
+        function field(label,value,type,options) { var wrap=el.createEl('div',{cls:'my-char-form-row'}); wrap.createEl('label',{text:label,cls:'my-char-form-label'}); var input=wrap.createEl(type==='select'?'select':type==='textarea'?'textarea':'input',type==='input'?{type:'text'}:{}); if(type==='select')(options||[]).forEach(function(o){var op=input.createEl('option',{text:o});op.value=o;}); input.value=value||''; input.style.cssText='width:100%;padding:8px;border:1px solid var(--background-modifier-border);border-radius:8px;background:var(--background-primary);color:var(--text-normal);box-sizing:border-box;'; return input; }
+        var territory=field('领地 / 城池名称',r.territory,'input');
+        var action=field('变迁类型',r.action||'取得','select',ORG_TERRITORY_ACTIONS);
+        var owner=field('变迁后归属组织',r.owner,'select',[''].concat((self.factions||[]).map(function(f){return f.name;})));
+        var previous=field('原归属组织',r.previousOwner,'select',[''].concat((self.factions||[]).map(function(f){return f.name;})));
+        var start=field('生效时间',r.startTime,'input'); start.placeholder='例如：公元前221年 / 第三章';
+        var end=field('结束时间（可留空）',r.endTime,'input'); end.placeholder='留空表示尚未记录结束时间';
+        var event=field('关联时间线事件',r.eventRef,'input');
+        var desc=field('变迁说明',r.desc,'textarea'); desc.rows=3;
+        var actions=el.createEl('div',{cls:'my-char-btn-group'}); actions.style.cssText='justify-content:flex-end;margin-top:14px;';
+        actions.createEl('button',{text:'取消',cls:'my-char-btn-ghost'}).addEventListener('click',function(){modal.close();});
+        actions.createEl('button',{text:'保存记录',cls:'my-char-view-btn'}).addEventListener('click',function(){
+            if(!territory.value.trim()){new obsidian.Notice('请填写领地名称');territory.focus();return;}
+            if(start.value.trim()&&end.value.trim()&&timesAreComparable(start.value.trim(),end.value.trim())&&getTimeSortValue(start.value.trim())>getTimeSortValue(end.value.trim())){new obsidian.Notice('结束时间不能早于开始时间');end.focus();return;}
+            var result={id:r.id||createOrgTerritoryChangeId(),territory:territory.value.trim(),action:action.value,owner:owner.value,previousOwner:previous.value,startTime:start.value.trim(),endTime:end.value.trim(),eventRef:event.value.trim(),desc:desc.value.trim(),createdAt:r.createdAt||new Date().toISOString()};
+            var historySnapshot=createUndoSnapshot(self,'领地变迁记录'); var before=deepCloneJson(self.orgTerritoryChanges||[]); self.orgTerritoryChanges=normalizeOrgTerritoryChanges(self.orgTerritoryChanges||[]); var idx=self.orgTerritoryChanges.findIndex(function(x){return x.id===result.id;}); if(idx>=0)self.orgTerritoryChanges[idx]=result;else self.orgTerritoryChanges.push(result);
+            self.saveFactionsAndRelations().then(async function(){var saved=await loadSavedData(self.plugin);var check=normalizeOrgTerritoryChanges(saved.orgTerritoryChanges||[]);if(!check.some(function(x){return x.id===result.id;}))throw new Error('保存校验未通过');commitUndoSnapshot(self,historySnapshot);modal.close();self.render();new obsidian.Notice('领地变迁已保存');}).catch(async function(e){self.orgTerritoryChanges=before;try{await self.saveFactionsAndRelations();}catch(re){console.error('[领地变迁] 回滚失败',re);}new obsidian.Notice('保存失败，已恢复原记录：'+(e.message||e),8000);});
+        });
+    }; modal.onClose=function(){this.contentEl.empty();}; modal.open();
+};
+MyView.prototype.renderOrgTerritoryPanel = function(container) {
+    var self=this, all=normalizeOrgTerritoryChanges(this.orgTerritoryChanges||[]), progress=String(this.plugin.settings.currentTimePoint||'').trim();
+    this.orgTerritoryChanges=all;
+    var panel=container.createEl('section',{cls:'rw-org-rel-panel'}); var head=panel.createEl('div',{cls:'rw-org-rel-head'}); head.createEl('div',{text:'领地变迁',cls:'rw-org-rel-title'});
+    head.createEl('button',{text:'+ 添加变迁',cls:'my-char-view-btn my-char-btn-sm'}).addEventListener('click',function(){self.showOrgTerritoryDialog(null);});
+    panel.createEl('div',{text:'按当前写作进度「'+(progress||'未设置')+'」计算领地归属；同一领地以最近一条已生效记录为当前状态。',cls:'rw-org-rel-progress'});
+    if(!all.length){panel.createEl('div',{text:'暂无领地变迁记录。可记录城池取得、占领、割让、失守、收复与独立等历史。',cls:'my-char-view-empty'});return;}
+    var list=panel.createEl('div',{cls:'rw-org-rel-list'}); var groups={current:[],history:[],future:[],unknown:[]}; all.forEach(function(r){groups[classifyOrgTerritoryAtProgress(r,progress,all)].push(r);});
+    ['current','future','history','unknown'].forEach(function(k){if(!groups[k].length)return; var title={current:'当前有效',future:'待发生',history:'历史记录',unknown:'待确认'}[k]; list.createEl('h4',{text:title+' · '+groups[k].length}); groups[k].sort(function(a,b){return compareOrgRelationTime(b,a);}).forEach(function(r){var row=list.createEl('article',{cls:'rw-org-rel-row'});var top=row.createEl('div',{cls:'rw-org-rel-row-top'});top.createEl('strong',{text:r.territory});top.createEl('span',{text:r.action,cls:'rw-org-rel-type'});var ownerBtn=top.createEl('button',{text:r.owner||'归属未注明',cls:'rw-text-link'});if(r.owner)ownerBtn.addEventListener('click',function(ev){ev.stopPropagation();self._focusFactionName=r.owner;self.expandedFactions=self.expandedFactions||{};self.expandedFactions[r.owner]=true;self.renderCurrentTab(panel.parentElement.parentElement);});row.createEl('div',{text:(r.startTime||'时间未注明')+(r.endTime?' — '+r.endTime:' — 至今/未注明'),cls:'rw-org-rel-time'});if(r.previousOwner)row.createEl('div',{text:'原归属：'+r.previousOwner,cls:'rw-org-rel-desc'});if(r.eventRef)row.createEl('div',{text:'关联事件：'+r.eventRef,cls:'rw-org-rel-desc'});var linked=(self.orgRelations||[]).filter(function(or){return String(or.territory||'').trim()===r.territory;});if(linked.length){var linkBox=row.createEl('div',{cls:'rw-org-rel-desc'});linkBox.createEl('strong',{text:'关联组织关系：'});linked.forEach(function(or){var relationState=classifyOrgRelationAtProgress(or,progress);var stateLabel={current:'当前',history:'历史',future:'待发生',unknown:'待确认'}[relationState]||relationState;linkBox.createEl('span',{text:or.from+' '+or.type+' '+or.to+'（'+stateLabel+'）；'});});}if(r.owner && self.factions && self.factions.length && !self.factions.some(function(f){return f.name===r.owner;}))row.createEl('div',{text:'提示：当前归属「'+r.owner+'」尚未在阵营/组织列表中登记，可检查名称是否一致。',cls:'rw-org-rel-status'});if(r.desc)row.createEl('div',{text:r.desc,cls:'rw-org-rel-desc'});var tools=row.createEl('div',{cls:'rw-org-rel-actions'});tools.createEl('button',{text:'编辑',cls:'my-char-btn-ghost my-char-btn-xs'}).addEventListener('click',function(){self.showOrgTerritoryDialog(r);});tools.createEl('button',{text:'删除',cls:'my-char-btn-danger my-char-btn-xs'}).addEventListener('click',function(){if(!confirmDestructiveAction('删除这条领地变迁记录？','不会删除组织或其他历史记录。'))return;var before=deepCloneJson(self.orgTerritoryChanges),historySnapshot=createUndoSnapshot(self,'删除领地变迁记录');self.orgTerritoryChanges=self.orgTerritoryChanges.filter(function(x){return x.id!==r.id;});self.saveFactionsAndRelations().then(function(){commitUndoSnapshot(self,historySnapshot);self.render();new obsidian.Notice('领地变迁记录已删除');}).catch(async function(e){self.orgTerritoryChanges=before;try{await self.saveFactionsAndRelations();}catch(re){console.error(re);}new obsidian.Notice('删除失败，已尝试恢复：'+(e.message||e),8000);});});});});
+};
+
 // ========== 阵营编辑弹窗 ==========
 var FactionModal = /** @class */ (function (_super) {
     __extends(FactionModal, _super);
-    function FactionModal(app, faction, onSubmit) {
+    function FactionModal(app, faction, onSubmit, factions) {
         var _this = Reflect.construct(_super, [app], FactionModal);
         _this.faction = faction;
+        _this.factions = factions || [];
         _this.onSubmit = onSubmit;
         return _this;
     }
@@ -9424,6 +11718,9 @@ var FactionModal = /** @class */ (function (_super) {
         var nameValue = this.faction ? this.faction.name : '';
         var colorValue = this.faction ? this.faction.color || '#4a90e2' : '#4a90e2';
         var descValue = this.faction ? this.faction.desc || '' : '';
+        var parentValue = this.faction ? this.faction.parentOrganization || '' : '';
+        var hierarchyLabelValue = this.faction ? this.faction.hierarchyLabel || '' : '';
+        var hierarchyRankValue = this.faction && this.faction.hierarchyRank != null ? String(this.faction.hierarchyRank) : 'auto';
 
         var nameRow = el.createEl('div');
         nameRow.className = 'my-char-form-row';
@@ -9445,6 +11742,28 @@ var FactionModal = /** @class */ (function (_super) {
         descInput.style.cssText = 'width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;height:60px;box-sizing:border-box;';
         descInput.addEventListener('input', function () { descValue = descInput.value; });
 
+        var parentRow = el.createEl('div'); parentRow.className = 'my-char-form-row';
+        parentRow.createEl('label', { text: '上级组织（可选）', cls: 'my-char-form-label' });
+        var parentSelect = parentRow.createEl('select');
+        var noneParent = parentSelect.createEl('option', { text: '无上级（独立组织／根节点）' }); noneParent.value = '';
+        var factionCandidates = this.factions || [];
+        factionCandidates.forEach(function(f) { if (!f || !f.name || (this.faction && f.name === this.faction.name)) return; var op = parentSelect.createEl('option', { text: f.name }); op.value = f.name; }, this);
+        parentSelect.value = parentValue;
+        parentSelect.style.cssText = 'width:100%;padding:8px;border:1px solid var(--background-modifier-border);border-radius:6px;background:var(--background-primary);color:var(--text-normal);';
+
+        var tierRow = el.createEl('div'); tierRow.className = 'my-char-form-row';
+        tierRow.createEl('label', { text: '层级名称（自定义显示，如：帝国、王国、宗门、部门）', cls: 'my-char-form-label' });
+        var tierInput = tierRow.createEl('input', { type: 'text', value: hierarchyLabelValue, placeholder: '留空则自动显示结构层级/独立组织' });
+        tierInput.style.cssText = 'width:100%;padding:8px;border:1px solid var(--background-modifier-border);border-radius:6px;background:var(--background-primary);color:var(--text-normal);box-sizing:border-box;';
+        tierInput.addEventListener('input', function(){ hierarchyLabelValue = tierInput.value; });
+
+        var rankRow = el.createEl('div'); rankRow.className = 'my-char-form-row';
+        rankRow.createEl('label', { text: '节点视觉级别（决定图谱节点大小；不改变上下级关系）', cls: 'my-char-form-label' });
+        var rankSelect = rankRow.createEl('select');
+        [['auto','自动（按实际上下级深度）'],['1','特大型'],['2','大型'],['3','中型'],['4','小型'],['5','微型']].forEach(function(pair){ var op=rankSelect.createEl('option',{text:pair[1]});op.value=pair[0]; });
+        rankSelect.value = hierarchyRankValue;
+        rankSelect.style.cssText = 'width:100%;padding:8px;border:1px solid var(--background-modifier-border);border-radius:6px;background:var(--background-primary);color:var(--text-normal);';
+
         var btnRow = el.createEl('div');
         btnRow.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:15px;';
 
@@ -9453,7 +11772,10 @@ var FactionModal = /** @class */ (function (_super) {
         saveBtn.style.cssText = 'padding:8px 16px;background:#4a90e2;color:white;border:none;border-radius:4px;cursor:pointer;';
         saveBtn.addEventListener('click', function () {
             if (!nameValue.trim()) { new obsidian.Notice('请输入名称'); return; }
-            self.onSubmit({ name: nameValue.trim(), color: colorValue, desc: descValue.trim() });
+            if (parentSelect.value && parentSelect.value === nameValue.trim()) { new obsidian.Notice('组织不能将自己设为上级'); return; }
+            var parentCursor = parentSelect.value, seenParents = Object.create(null);
+            while (parentCursor) { if (parentCursor === nameValue.trim()) { new obsidian.Notice('组织上下级关系不能形成循环'); return; } if (seenParents[parentCursor]) { new obsidian.Notice('现有组织层级存在循环，请先修复'); return; } seenParents[parentCursor] = true; var parentRecord = (self.factions || []).find(function(f) { return f.name === parentCursor; }); parentCursor = parentRecord ? String(parentRecord.parentOrganization || '') : ''; }
+            self.onSubmit({ name: nameValue.trim(), color: colorValue, desc: descValue.trim(), parentOrganization: parentSelect.value, hierarchyLabel: String(tierInput.value || '').trim(), hierarchyRank: rankSelect.value === 'auto' ? null : Number(rankSelect.value) });
             self.close();
         });
 
@@ -9470,12 +11792,13 @@ var FactionModal = /** @class */ (function (_super) {
 // ========== 关系编辑弹窗 ==========
 var RelationModal = /** @class */ (function (_super) {
     __extends(RelationModal, _super);
-    function RelationModal(app, chars, prefill, relTypes, onSubmit) {
+    function RelationModal(app, chars, prefill, relTypes, onSubmit, plugin) {
         var _this = Reflect.construct(_super, [app], RelationModal);
         _this.chars = chars;
         _this.prefill = prefill;
         _this.relTypes = relTypes;
         _this.onSubmit = onSubmit;
+        _this.plugin = plugin;
         return _this;
     }
 
@@ -9488,8 +11811,8 @@ var RelationModal = /** @class */ (function (_super) {
         el.createEl('h3', { text: isEdit ? '编辑人物关系' : '添加人物关系' });
         el.createEl('p', {
             text: isEdit
-                ? '可改类型、亲密度、起止时间；保存后会写回人物索引 MD。'
-                : '建议从这里设计关系（朋友/恋人/师徒等）。「同期出场」只是时间线辅助，不必作为主关系。',
+                ? '可设置上属分类和具体关系，并调整亲密度、起止时间；保存后会写回人物索引 MD。'
+                : '先选择关系上属分类（如亲属关系），再填写具体关系（如兄弟、表亲）。具体关系支持自由输入。',
             cls: 'my-char-muted'
         }).style.cssText = 'font-size:12px;margin:0 0 12px;';
 
@@ -9513,24 +11836,50 @@ var RelationModal = /** @class */ (function (_super) {
         for (var i = 0; i < this.chars.length; i++) listA.createEl('option', { value: this.chars[i].name });
         selA.value = charA || '';
 
+        var rowCategory = el.createEl('div');
+        rowCategory.style.cssText = 'margin:10px 0;';
+        rowCategory.createEl('label', { text: '关系上属分类' }).style.cssText = 'display:block;font-weight:bold;margin-bottom:4px;';
+        var categorySelect = rowCategory.createEl('select');
+        categorySelect.style.cssText = 'width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;';
+        var relationCategories = getRelationCategories(this.plugin);
+        var initialCategory = (this.prefill && this.prefill.category) ? this.prefill.category : inferRelationCategory(type);
+        relationCategories.forEach(function(c) { categorySelect.createEl('option', { text: c, value: c }); });
+        if (initialCategory && relationCategories.indexOf(initialCategory) < 0) {
+            categorySelect.createEl('option', { text: initialCategory, value: initialCategory });
+        }
+        categorySelect.value = initialCategory || '其他';
+        var customCategoryInput = rowCategory.createEl('input', { type: 'text', placeholder: '也可以输入新分类，例如：政治关系、商业关系' });
+        customCategoryInput.style.cssText = 'width:100%;box-sizing:border-box;margin-top:7px;padding:8px;border:1px solid var(--background-modifier-border);border-radius:6px;background:var(--background-primary);color:var(--text-normal);';
+        customCategoryInput.addEventListener('input', function() { if (customCategoryInput.value.trim()) categorySelect.value = ''; });
+        categorySelect.addEventListener('change', function() { if (categorySelect.value) customCategoryInput.value = ''; });
+
         var rowType = el.createEl('div');
         rowType.style.cssText = 'margin:10px 0;';
-        rowType.createEl('label', { text: '关系类型' }).style.cssText = 'display:block;font-weight:bold;margin-bottom:4px;';
+        rowType.createEl('label', { text: '具体关系' }).style.cssText = 'display:block;font-weight:bold;margin-bottom:4px;';
         var selType = rowType.createEl('select');
         selType.style.cssText = 'width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;';
 
-        var hasMatch = false;
-        for (var i = 0; i < this.relTypes.length; i++) {
-            var opt = selType.createEl('option', { text: this.relTypes[i], value: this.relTypes[i] });
-            if (this.relTypes[i] === type) { opt.selected = true; hasMatch = true; }
+        function refreshCategoryRelationTypes(preferred) {
+            var categoryName = customCategoryInput.value.trim() || categorySelect.value || initialCategory;
+            var configured = getRelationCategoryConfig(thisPlugin, categoryName).types;
+            var candidates = configured.length ? configured : thisPluginTypes.slice();
+            selType.empty();
+            candidates.forEach(function(t){ selType.createEl('option', { text: t, value: t }); });
+            var target = preferred || type;
+            if (target && candidates.indexOf(target) < 0) selType.createEl('option', { text: target, value: target });
+            if (target) selType.value = target;
+            if (!selType.value && candidates.length) selType.value = candidates[0];
         }
-        if (!hasMatch && type) {
-            var customOpt = selType.createEl('option', { text: type, value: type });
-            customOpt.selected = true;
-        }
-        if (!selType.value && this.relTypes.length > 0) {
-            selType.value = this.relTypes.indexOf('朋友') !== -1 ? '朋友' : this.relTypes[0];
-        }
+        var thisPlugin = this.plugin;
+        var thisPluginTypes = this.relTypes.slice();
+        refreshCategoryRelationTypes(type);
+        var customTypeInput = rowType.createEl('input', { type: 'text', placeholder: '也可以直接输入自定义关系名称，例如：宿命共生、血契、暗中扶持' });
+        customTypeInput.style.cssText = 'width:100%;box-sizing:border-box;margin-top:7px;padding:8px;border:1px solid var(--background-modifier-border);border-radius:6px;background:var(--background-primary);color:var(--text-normal);';
+        customTypeInput.value = (this.relTypes.indexOf(type) === -1) ? type : '';
+        customTypeInput.addEventListener('input', function(){ if(customTypeInput.value.trim()) selType.value=''; });
+        selType.addEventListener('change', function(){ if(selType.value) customTypeInput.value=''; });
+        categorySelect.addEventListener('change', function(){ refreshCategoryRelationTypes(''); customTypeInput.value = ''; });
+        customCategoryInput.addEventListener('change', function(){ if (customCategoryInput.value.trim()) refreshCategoryRelationTypes(''); });
         var quickTypes = rowType.createEl('div', { cls: 'my-char-rel-quick-types' });
         quickTypes.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;margin-top:7px;';
         ['朋友','敌对','恋人','亲属','师徒','同盟'].forEach(function(t) {
@@ -9538,7 +11887,7 @@ var RelationModal = /** @class */ (function (_super) {
             chip.addEventListener('click', function() {
                 var exists = Array.prototype.some.call(selType.options, function(o) { return o.value === t; });
                 if (!exists) selType.add(new Option(t, t));
-                selType.value = t;
+                selType.value = t; customTypeInput.value = '';
             });
         });
 
@@ -9597,7 +11946,17 @@ var RelationModal = /** @class */ (function (_super) {
             // 以控件当前值为准，避免「看起来选了但变量仍为空」
             var a = selA.value;
             var b = selB.value;
-            var t = selType.value;
+            var t = customTypeInput.value.trim() || selType.value;
+            var category = customCategoryInput.value.trim() || categorySelect.value || inferRelationCategory(t);
+            if (category) {
+                var existingCategories = getRelationCategories(self.plugin);
+                if (existingCategories.indexOf(category) < 0) {
+                    var customCategories = String(self.plugin.settings.customRelationCategories || '').split(',').map(function(x) { return x.trim(); }).filter(Boolean);
+                    if (customCategories.indexOf(category) < 0) customCategories.push(category);
+                    self.plugin.settings.customRelationCategories = customCategories.join(',');
+                    self.plugin.saveSettings();
+                }
+            }
             var intimacyVal = parseInt(selIntimacy.value, 10);
             if (isNaN(intimacyVal)) intimacyVal = 1;
             var knownNames = self.chars.map(function(c) { return c.name; });
@@ -9609,6 +11968,7 @@ var RelationModal = /** @class */ (function (_super) {
                 charA: a,
                 charB: b,
                 type: t,
+                category: category,
                 desc: descInput.value.trim(),
                 intimacy: intimacyVal,
                 startTime: startInput.value.trim(),
@@ -10161,7 +12521,7 @@ var DetailModal = /** @class */ (function (_super) {
         var records=view.orgMemberships.filter(function(r){return r.character===name;});
         var progress=(view.plugin.settings.currentTimePoint||'').trim();
         var buckets={current:[],history:[],future:[],unknown:[]};
-        records.forEach(function(r){buckets[classifyOrgMembershipAtProgress(r,progress)].push(r);});
+        records.forEach(function(r){buckets[classifyOrgMembershipAtProgress(r,progress,view.orgMemberships)].push(r);});
         var sec=el.createEl('details',{cls:'my-char-detail-accordion rw-org-membership-section'});
         var summary=sec.createEl('summary'); summary.createEl('strong',{text:'🏛 组织任职履历'}); summary.createEl('span',{text:records.length+' 条',cls:'my-char-muted'});
         var body=sec.createEl('div',{cls:'my-char-detail-panel my-char-detail-accordion-body'});
@@ -10169,9 +12529,9 @@ var DetailModal = /** @class */ (function (_super) {
         top.createEl('span',{text:'当前写作进度：'+(progress||'未设置'),cls:'my-char-muted'});
         top.createEl('button',{text:'+ 添加履历',cls:'my-char-view-btn my-char-btn-sm'}).addEventListener('click',function(){
             new OrgMembershipModal(self.app,name,view.factions||[],null,function(result){
-                pushUndoSnapshot(view,'新增组织任职履历'); view.orgMemberships=normalizeOrgMemberships(view.orgMemberships||[]); view.orgMemberships.push(result);
+                var capacity=validateOrgMembershipCapacity(view,result); if(!capacity.ok){new obsidian.Notice(capacity.message,8000);return false;} pushUndoSnapshot(view,'新增组织任职履历'); view.orgMemberships=normalizeOrgMemberships(view.orgMemberships||[]); view.orgMemberships.push(result);
                 view.saveFactionsAndRelations().then(function(){new obsidian.Notice('组织任职履历已保存');self.onOpen();}).catch(function(e){new obsidian.Notice('保存失败：'+(e.message||e),8000);});
-            }).open();
+            },view).open();
         });
         [['current','当前任职'],['history','历史任职'],['future','待生效'],['unknown','待确认']].forEach(function(pair){
             var list=buckets[pair[0]]; var group=body.createEl('details',{cls:'rw-org-membership-group'}); group.open=pair[0]==='current';
@@ -10184,11 +12544,12 @@ var DetailModal = /** @class */ (function (_super) {
                 if(r.position)card.createEl('div',{text:'职位 / 身份：'+r.position,cls:'rw-org-membership-meta'});
                 card.createEl('div',{text:(r.startTime||'开始时间未注明')+' — '+(r.endTime||'未记录结束时间'),cls:'rw-org-membership-meta'});
                 if(r.reason)card.createEl('div',{text:'变动原因：'+r.reason,cls:'rw-org-membership-meta'});
+                if(r.successionFrom)card.createEl('div',{text:'继任自：'+r.successionFrom+(r.successionBasis&&r.successionBasis!=='未注明'?' · '+r.successionBasis:''),cls:'rw-org-membership-meta'});
                 if(r.linkedEvent)card.createEl('div',{text:'关联事件：'+r.linkedEvent,cls:'rw-org-membership-meta'});
                 if(r.notes)card.createEl('p',{text:r.notes,cls:'rw-org-membership-notes'});
                 var actions=card.createEl('div',{cls:'rw-org-rel-actions'});
                 actions.createEl('button',{text:'编辑',cls:'my-char-btn-ghost my-char-btn-xs'}).addEventListener('click',function(){
-                    new OrgMembershipModal(self.app,name,view.factions||[],r,function(result){pushUndoSnapshot(view,'编辑组织任职履历');view.orgMemberships=normalizeOrgMemberships(view.orgMemberships||[]).map(function(x){return x.id===result.id?result:x;});view.saveFactionsAndRelations().then(function(){new obsidian.Notice('履历已更新');self.onOpen();}).catch(function(e){new obsidian.Notice('保存失败：'+(e.message||e),8000);});}).open();
+                    new OrgMembershipModal(self.app,name,view.factions||[],r,function(result){var capacity=validateOrgMembershipCapacity(view,result);if(!capacity.ok){new obsidian.Notice(capacity.message,8000);return false;}pushUndoSnapshot(view,'编辑组织任职履历');view.orgMemberships=normalizeOrgMemberships(view.orgMemberships||[]).map(function(x){return x.id===result.id?result:x;});view.saveFactionsAndRelations().then(function(){new obsidian.Notice('履历已更新');self.onOpen();}).catch(function(e){new obsidian.Notice('保存失败：'+(e.message||e),8000);});},view).open();
                 });
                 actions.createEl('button',{text:'删除',cls:'my-char-btn-danger my-char-btn-xs'}).addEventListener('click',function(){
                     if(!confirmDestructiveAction('删除这条任职履历？','只删除这条履历，不会删除人物或组织。'))return;
@@ -10283,14 +12644,16 @@ var DetailModal = /** @class */ (function (_super) {
                 var birthRow = lcPanel.createEl('div', { cls: 'my-char-lifecycle-row' });
                 birthRow.createEl('strong', { text: '出生：' });
                 birthRow.createEl('span', { text: lc.birth });
+                if (lc.lifespan !== null && lc.lifespan !== undefined && lc.death) birthRow.createEl('small', { text: '（享年约 ' + lc.lifespan + ' 岁）', cls: 'my-char-view-muted' });
                 if (lc.birthParsed && lc.birthParsed.sortValue !== null) {
                     birthRow.createEl('small', { text: ' (' + formatSortValue(lc.birthParsed.sortValue) + ')', cls: 'my-char-view-muted' });
                 }
             }
             if (lc.firstAppear) {
                 var appearRow = lcPanel.createEl('div', { cls: 'my-char-lifecycle-row' });
-                appearRow.createEl('strong', { text: '首次出场：' });
+                appearRow.createEl('strong', { text: '正文首次出现：' });
                 appearRow.createEl('span', { text: lc.firstAppear });
+                if (lc.ageAtFirstAppear !== null && lc.ageAtFirstAppear !== undefined) appearRow.createEl('small', { text: '（约 ' + lc.ageAtFirstAppear + ' 岁）', cls: 'my-char-view-muted' });
                 if (lc.firstAppearParsed && lc.firstAppearParsed.sortValue !== null) {
                     appearRow.createEl('small', { text: ' (' + formatSortValue(lc.firstAppearParsed.sortValue) + ')', cls: 'my-char-view-muted' });
                 }
@@ -10432,6 +12795,7 @@ var DetailModal = /** @class */ (function (_super) {
                 if (self._fieldInputs[k].value.trim()) out[k] = self._fieldInputs[k].value.trim();
             }
             if (newKeyInput.value.trim()) out[newKeyInput.value.trim()] = newValInput.value.trim();
+            pushUndoSnapshot(self.view, '编辑人物档案：' + self.charData.name);
             await novelExt.updateCharInMd(self.app, self.view.plugin, self.charData.name, out);
             await self.view.loadAllData({ silent: true });
             self.charData = self.view.findChar(self.charData.name) || self.charData;
@@ -10624,93 +12988,80 @@ var EventTagModal = /** @class */ (function (_super) {
     return EventTagModal;
 }(obsidian.Modal));
 
-// ========== 关系类型管理弹窗 ==========
+// ========== 人物关系分类与常用关系管理弹窗 ==========
 var RelationTypeModal = /** @class */ (function (_super) {
     __extends(RelationTypeModal, _super);
     function RelationTypeModal(app, plugin, onSave) {
         var _this = Reflect.construct(_super, [app], RelationTypeModal);
-        _this.plugin = plugin;
-        _this.onSave = onSave;
-        var existing = plugin.settings.customRelationTypes || '';
-        _this.tempTypes = existing ? existing.split(',').map(function(s) { return s.trim(); }) : 
-            ['父子', '母子', '父女', '母女', '兄弟', '姐妹', '夫妻', '恋人', '朋友', '敌人'];
+        _this.plugin = plugin; _this.onSave = onSave;
+        _this.tempCategories = getRelationCategories(plugin).map(function(name) {
+            var cfg = getRelationCategoryConfig(plugin, name);
+            return { name: name, color: cfg.color, types: cfg.types.join(',') };
+        });
         return _this;
     }
-
     RelationTypeModal.prototype.onOpen = function () {
-        var self = this;
-        var el = this.contentEl;
-        el.style.cssText = 'padding:20px;min-width:400px;max-height:80vh;overflow-y:auto;';
-        
-        el.createEl('h3', { text: '📌 管理关系类型' }).style.cssText = 'margin:0 0 12px;border-bottom:1px solid #eee;padding-bottom:8px;';
-        
-        var helpText = el.createEl('p', { text: '添加、编辑或删除关系类型。这些类型将显示在关系编辑下拉菜单中。' });
-        helpText.style.cssText = 'font-size:12px;color:#666;margin-bottom:12px;';
-        
-        var container = el.createEl('div');
-        container.style.cssText = 'margin-bottom:12px;max-height:300px;overflow-y:auto;border:1px solid #e8e8e8;border-radius:6px;padding:10px;background:#fafafa;';
-        
-        function renderList() {
-            container.empty();
-            if (self.tempTypes.length === 0) {
-                var emptyMsg = container.createEl('div');
-                emptyMsg.style.cssText = 'text-align:center;color:#999;padding:20px;';
-                emptyMsg.createEl('span', { text: '暂无关系类型，点击下方按钮添加' });
-                return;
-            }
-            for (var i = 0; i < self.tempTypes.length; i++) {
-                (function(idx) {
-                    var row = container.createEl('div');
-                    row.style.cssText = 'display:flex;gap:8px;margin-bottom:6px;align-items:center;';
-                    
-                    var input = row.createEl('input', { type: 'text', value: self.tempTypes[idx] });
-                    input.style.cssText = 'flex:1;padding:6px 10px;border:1px solid #ddd;border-radius:4px;font-size:13px;';
-                    input.addEventListener('change', function() {
-                        self.tempTypes[idx] = input.value.trim();
-                    });
-                    
-                    var delBtn = row.createEl('button', { text: '✕' });
-                    delBtn.style.cssText = 'padding:2px 10px;background:#e74c3c;color:white;border:none;border-radius:4px;cursor:pointer;font-size:14px;';
-                    delBtn.addEventListener('click', function() {
-                        self.tempTypes.splice(idx, 1);
-                        renderList();
-                    });
-                })(i);
-            }
+        var self = this, el = this.contentEl;
+        el.style.cssText = 'padding:20px;min-width:520px;max-width:760px;max-height:82vh;overflow-y:auto;';
+        el.createEl('h3', { text: '📌 人物关系分类管理' }).style.cssText = 'margin:0 0 8px;';
+        el.createEl('p', { text: '每个上属分类可单独设置颜色和常用具体关系。具体关系用英文逗号或中文逗号分隔；新增关系时会优先显示当前分类的常用关系，也可以自由输入。' }).style.cssText = 'font-size:12px;color:var(--text-muted);margin:0 0 14px;';
+        var list = el.createEl('div');
+        function render() {
+            list.empty();
+            self.tempCategories.forEach(function(item, idx) {
+                var card = list.createEl('div');
+                card.style.cssText = 'border:1px solid var(--background-modifier-border);border-radius:8px;padding:12px;margin:0 0 10px;background:var(--background-secondary);';
+                var top = card.createEl('div'); top.style.cssText = 'display:flex;gap:8px;align-items:center;margin-bottom:8px;';
+                var name = top.createEl('input', { type: 'text', value: item.name, placeholder: '分类名称' });
+                name.style.cssText = 'flex:1;min-width:120px;padding:7px;border:1px solid var(--background-modifier-border);border-radius:5px;';
+                name.addEventListener('input', function(){ item.name = name.value; });
+                var color = top.createEl('input', { type: 'color', value: /^#[0-9a-f]{6}$/i.test(item.color) ? item.color : '#7f8c8d' });
+                color.title = '该分类在关系图谱中的连线颜色'; color.style.cssText = 'width:42px;height:34px;padding:2px;border:1px solid var(--background-modifier-border);border-radius:5px;';
+                color.addEventListener('input', function(){ item.color = color.value; });
+                var del = top.createEl('button', { text: '删除分类' });
+                del.style.cssText = 'padding:6px 9px;border:0;border-radius:5px;background:#c0392b;color:white;';
+                del.addEventListener('click', function(){ self.tempCategories.splice(idx,1); render(); });
+                card.createEl('div', { text: '该分类的常用具体关系' }).style.cssText = 'font-size:12px;font-weight:600;margin-bottom:5px;';
+                var types = card.createEl('textarea', { text: item.types });
+                types.value = item.types; types.rows = 2;
+                types.placeholder = '例如：父子，兄弟，姐妹，夫妻';
+                types.style.cssText = 'width:100%;box-sizing:border-box;padding:8px;border:1px solid var(--background-modifier-border);border-radius:5px;background:var(--background-primary);color:var(--text-normal);';
+                types.addEventListener('input', function(){ item.types = types.value; });
+                var preview = card.createEl('div', { text: '颜色预览：' }); preview.style.cssText = 'font-size:11px;color:var(--text-muted);margin-top:6px;';
+                var chip = preview.createEl('span', { text: item.name || '分类示例' });
+                chip.style.cssText = 'display:inline-block;margin-left:6px;padding:2px 9px;border-radius:12px;color:white;background:' + item.color + ';';
+            });
         }
-        renderList();
-        
-        var addBtn = el.createEl('button', { text: '+ 添加类型' });
-        addBtn.style.cssText = 'padding:8px 16px;background:#27ae60;color:white;border:none;border-radius:4px;cursor:pointer;margin-bottom:12px;width:100%;font-size:13px;';
-        addBtn.addEventListener('click', function() {
-            self.tempTypes.push('新类型');
-            renderList();
-            container.scrollTop = container.scrollHeight;
-        });
-        
-        var btnRow = el.createEl('div');
-        btnRow.style.cssText = 'display:flex;gap:10px;margin-top:5px;';
-        
-        var saveBtn = btnRow.createEl('button', { text: '✅ 保存' });
-        saveBtn.style.cssText = 'flex:2;padding:10px;background:#4a90e2;color:white;border:none;border-radius:4px;cursor:pointer;font-size:14px;';
-        saveBtn.addEventListener('click', function() {
-            var validTypes = self.tempTypes.filter(function(t) { return t && t.trim(); });
-            self.plugin.settings.customRelationTypes = validTypes.join(',');
-            self.plugin.saveSettings();
+        render();
+        var add = el.createEl('button', { text: '+ 添加上属分类' });
+        add.style.cssText = 'width:100%;padding:9px;margin:2px 0 14px;border:1px dashed var(--interactive-accent);border-radius:6px;background:transparent;color:var(--text-normal);';
+        add.addEventListener('click', function(){ self.tempCategories.push({name:'新分类',color:'#7f8c8d',types:''}); render(); });
+        var actions = el.createEl('div'); actions.style.cssText = 'display:flex;gap:8px;';
+        var save = actions.createEl('button', { text: '保存分类设置' });
+        save.style.cssText = 'flex:2;padding:10px;background:var(--interactive-accent);color:white;border:0;border-radius:6px;';
+        save.addEventListener('click', async function(){
+            var configs = {}, names = [], duplicate = false;
+            self.tempCategories.forEach(function(item){
+                var name = String(item.name || '').trim(); if (!name) return;
+                if (names.indexOf(name) >= 0) { duplicate = true; return; }
+                names.push(name);
+                var types = String(item.types || '').split(/[,，、\n]/).map(function(x){return x.trim();}).filter(function(x,i,a){return x && a.indexOf(x)===i;});
+                configs[name] = { color: /^#[0-9a-f]{6}$/i.test(item.color) ? item.color : '#7f8c8d', types: types };
+            });
+            if (duplicate) { new obsidian.Notice('分类名称不能重复'); return; }
+            if (!names.length) { new obsidian.Notice('至少保留一个上属分类'); return; }
+            self.plugin.settings.relationCategoryConfigs = configs;
+            self.plugin.settings.relationCategoryNames = names.slice();
+            self.plugin.settings.customRelationCategories = names.filter(function(n){return DEFAULT_RELATION_CATEGORIES.indexOf(n)<0;}).join(',');
+            await self.plugin.saveSettings();
             if (self.onSave) self.onSave();
-            self.close();
-            new obsidian.Notice('关系类型已保存');
+            self.close(); new obsidian.Notice('关系分类、常用关系及颜色已保存');
         });
-        
-        var cancelBtn = btnRow.createEl('button', { text: '取消' });
-        cancelBtn.style.cssText = 'flex:1;padding:10px;background:#888;color:white;border:none;border-radius:4px;cursor:pointer;font-size:14px;';
-        cancelBtn.addEventListener('click', function() { self.close(); });
+        var cancel = actions.createEl('button', { text: '取消' });
+        cancel.style.cssText = 'flex:1;padding:10px;border:1px solid var(--background-modifier-border);border-radius:6px;';
+        cancel.addEventListener('click', function(){ self.close(); });
     };
-    
-    RelationTypeModal.prototype.onClose = function() {
-        this.contentEl.empty();
-    };
-    
+    RelationTypeModal.prototype.onClose = function(){ this.contentEl.empty(); };
     return RelationTypeModal;
 }(obsidian.Modal));
 
@@ -10977,6 +13328,19 @@ el.createEl('p', {
                     });
             });
 
+        new obsidian.Setting(el)
+            .setName('章节正文文件夹')
+            .setDesc('章节库扫描的正文目录；日常扫描、逐章设置故事时间请到「时间线 → 章节库与故事时间」操作。')
+            .addText(function(text) {
+                text.setPlaceholder('例如：小说/正文')
+                    .setValue((self.plugin.settings.chapterLibrary && self.plugin.settings.chapterLibrary.folder) || '')
+                    .onChange(async function(value) {
+                        if (!self.plugin.settings.chapterLibrary) self.plugin.settings.chapterLibrary = { folder: '', chapters: [] };
+                        self.plugin.settings.chapterLibrary.folder = value.trim().replace(/^\/+|\/+$/g, '');
+                        await self.plugin.saveSettings();
+                    });
+            });
+
         el.createEl('h3', { text: '资料文件位置' });
         el.createEl('p', { text: '为世界观资料、大纲和抽签池分别指定 Vault 内的 Markdown 文件路径。文件移动后只需更新这里；路径失效时插件不会自动创建同名副本。', cls: 'my-char-muted' });
         function addManagedMarkdownSetting(label, key, fallback, initial, desc) {
@@ -11173,10 +13537,10 @@ el.createEl('p', {
         el.createEl('h3', { text: '📌 关系类型配置' }).style.cssText = 'margin-top:10px;font-size:14px;font-weight:bold;color:#e67e22;';
         
         new obsidian.Setting(el)
-            .setName('管理关系类型（可视化）')
-            .setDesc('在可视化界面中添加、编辑或删除关系类型列表')
+            .setName('人物关系分类管理（分类／常用关系／颜色）')
+            .setDesc('为每个上属分类分别设置常用具体关系和图谱连线颜色；支持新增、重命名、删除分类。具体关系仍可在新增关系时自由输入。')
             .addButton(function (btn) {
-                btn.setButtonText('📌 管理关系类型')
+                btn.setButtonText('📌 管理关系分类')
                     .setCta()
                     .onClick(function () {
                         var modal = new RelationTypeModal(self.app, self.plugin, function() {
@@ -11291,13 +13655,13 @@ el.createEl('p', {
             }.bind(this));
 
         new obsidian.Setting(el)
-            .setName('首次出场字段名')
+            .setName('正文首次出现字段名')
             .setDesc('人物文件中用于标识首次出场的字段名')
             .addText(function (text) {
                 text.setPlaceholder('首次出场')
-                    .setValue(this.plugin.settings.firstAppearFieldName || '首次出场')
+                    .setValue(this.plugin.settings.firstAppearFieldName || '正文首次出现')
                     .onChange(async function (value) {
-                        this.plugin.settings.firstAppearFieldName = value || '首次出场';
+                        this.plugin.settings.firstAppearFieldName = value || '正文首次出现';
                         await this.plugin.saveSettings();
                     }.bind(this));
             }.bind(this));
@@ -11446,6 +13810,14 @@ var RelationWeaverPlugin = /** @class */ (function (_super) {
         });
 
         this.addCommand({
+            id: 'open-app-floating-workbench',
+            name: '打开应用级自由工作台',
+            callback: function () {
+                openCharViewAndRun(this.app, function (view) { view.openAppFloatingWorkbench(); });
+            }.bind(this)
+        });
+
+        this.addCommand({
             id: 'refresh-char-data',
             name: '刷新人物数据',
             callback: function () {
@@ -11465,7 +13837,7 @@ var RelationWeaverPlugin = /** @class */ (function (_super) {
                 var view = leaves[0].view;
                 await view.loadAllData();
                 var res = await syncGraphNotesToVault(this, view);
-                new obsidian.Notice('✅ 已同步 ' + res.count + ' 个图谱节点');
+                new obsidian.Notice('✅ 已同步 ' + res.count + ' 个人物图谱节点' + (res.migrated ? '，并迁移旧笔记 ' + res.migrated + ' 个' : '') + '；已按阵营层级归档');
             }.bind(this)
         });
 
@@ -11590,6 +13962,13 @@ var RelationWeaverPlugin = /** @class */ (function (_super) {
 
     RelationWeaverPlugin.prototype.onunload = function () {
         this.app.workspace.detachLeavesOfType(VIEW_TYPE);
+        var owner=this._rwAppFloatOwner;
+        if(owner&&owner._rwGraphFocusRestore)owner._rwGraphFocusRestore();
+        if(owner&&owner._rwAppFloatRuntime)Object.keys(owner._rwAppFloatRuntime).forEach(function(id){var runtime=owner._rwAppFloatRuntime[id];if(runtime&&runtime.resizeObserver)try{runtime.resizeObserver.disconnect();}catch(e){}});
+        if (this._rwAppFloatLayer && this._rwAppFloatLayer._rwResizeHandler) window.removeEventListener('resize', this._rwAppFloatLayer._rwResizeHandler);
+        if (this._rwAppFloatLayer && this._rwAppFloatLayer.remove) this._rwAppFloatLayer.remove();
+        this._rwAppFloatLayer = null;
+        this._rwAppFloatOwner = null;
     };
 
     RelationWeaverPlugin.prototype.loadSettings = async function () {
@@ -11600,10 +13979,11 @@ var RelationWeaverPlugin = /** @class */ (function (_super) {
             timelineFolder: '',
             customFields: '',
             customRelationTypes: '',
+            deletedRelationTypeValues: [],
             factionFieldName: '阵营',
             deathFieldNames: '死亡,死亡时间',
             birthFieldNames: '出生,出生时间',
-            firstAppearFieldName: '首次出场',
+            firstAppearFieldName: '正文首次出现',
             intimateFieldName: '亲密人物',
             preset: 'default',
             customEventTags: [],
@@ -11619,6 +13999,7 @@ var RelationWeaverPlugin = /** @class */ (function (_super) {
             termLabels: {},
             tabLabels: {},
             currentTimePoint: '',
+            chapterLibrary: { folder: '', chapters: [] },
             timeFilterEnabled: true,
             settingCollectionFile: '设定集.md',
             novelCompactUI: true,
@@ -12208,6 +14589,7 @@ var ChangeHistoryModal = /** @class */ (function (_super) {
                         ? '确定删除这条起点设定吗？删除后曲线起点会重新计算。'
                         : '确定删除这条变化记录吗？删除后当前亲密度会回退到上一条记录的值。';
                     if (!confirmDestructiveAction(confirmMsg, '亲密度历史记录将被删除，关系当前值会重新计算。')) return;
+                    pushUndoSnapshot(self.view, '删除关系变化记录：' + self.relation.charA + ' × ' + self.relation.charB);
                     removeIntimacyRecord(self.view.plugin, record.id);
                     recalcRelationIntimacyFromHistory(self.view.plugin, self.relation);
                     self.view.saveFactionsAndRelations({ skipGraphSync: true }).then(function() {
@@ -12508,6 +14890,7 @@ MyView.prototype.showChangeHistory = function(relation) {
 MyView.prototype.showRecordChange = function(relation, callback) {
     var self = this;
     var modal = new RecordChangeModal(this.app, relation, this, function(record) {
+        pushUndoSnapshot(self, '记录关系变化：' + relation.charA + ' × ' + relation.charB);
         addIntimacyRecord(self.plugin, record);
         if (record.changeReason === '初始值设定') {
             var changes = getChangeRecordsOnly(getRelationHistory(self.plugin, relation.charA, relation.charB));
@@ -12686,8 +15069,7 @@ MyView.prototype.showDeadAfterAppear = function() {
             var deathSort = deathParsed && deathParsed.sortValue !== null ? deathParsed.sortValue : null;
             if (deathSort !== null) {
                 for (var j = 0; j < this.timeline.length; j++) {
-                    var yearParsed = parseHistoricalDate(this.timeline[j].storyYear || this.timeline[j].year);
-                    var yearSort = yearParsed && yearParsed.sortValue !== null ? yearParsed.sortValue : null;
+                    var yearSort = rwGetCalendarSortValue(this.timeline[j].storyYear || this.timeline[j].chapterStoryTime || this.timeline[j].year, this.timeline[j].month, !!this.timeline[j].calendarYearExplicit);
                     if (yearSort !== null && yearSort > deathSort) {
                         var appeared = findCharsInEvent(this.timeline[j].event, [c.name]);
                         if (appeared.length > 0) {
@@ -12797,6 +15179,8 @@ MyView.prototype.renderDeskTab = function(container) {
         tools.forEach(function (id) {
             var tool = toolSection.createEl('button', { text: '备份、导入与导出  ›', cls: 'rw-home-tool-link' });
             tool.addEventListener('click', function () { self.tab = id; self.render(); });
+            var visualExport = toolSection.createEl('button', { text: '🖨️ 可视化成果导出中心  ›', cls: 'rw-home-tool-link' });
+            visualExport.addEventListener('click', function () { self.tab = id; self.render(); setTimeout(function(){var panel=self.containerEl&&self.containerEl.querySelector('.rw-export-center');if(panel)panel.scrollIntoView({behavior:'smooth',block:'start'});},80); });
         });
     }
 };
@@ -12853,7 +15237,7 @@ MyView.prototype.renderPlotsTab = function(container) {
             g.events.forEach(function (e, index) {
                 var details = card.createEl('details', { cls: 'rw-plot-event' });
                 var summary = details.createEl('summary', { cls: 'rw-plot-event-summary' });
-                summary.createEl('span', { text: (e.storyYear || e.year || '未注明时间') + ' · ' + (e.plotStatus || '未标状态'), cls: 'rw-plot-event-meta' });
+                summary.createEl('span', { text: (e.storyYear || e.chapterStoryTime || e.year || '未注明时间') + ' · ' + (e.plotStatus || '未标状态'), cls: 'rw-plot-event-meta' });
                 var previewText = String(e.event || '（该节点没有填写事件内容）').replace(/\s+/g, ' ').trim();
                 summary.createEl('span', { text: previewText, cls: 'rw-plot-event-preview' });
                 var body = details.createEl('div', { cls: 'rw-plot-event-body' });
@@ -12875,51 +15259,100 @@ MyView.prototype.renderContinuityTab = function(container) {
     container.empty();
     container.classList.add('my-char-scroll-section');
     container.createEl('h3', { text: '🧬 P2 故事逻辑体检', cls: 'my-char-section-title' });
-    container.createEl('p', { text: '检查人物出场、出生/死亡、年龄、关系时段、伏笔状态与时间线顺序。结果仅作提示，不会自动修改设定。', cls: 'my-char-muted' });
+    container.createEl('p', { text: '检查人物出场、出生/死亡、年龄、关系时段、伏笔状态与时间线顺序。首次出现依据章节正文扫描结果（章节库索引），不再以时间线事件或档案预设作为事实依据。请先扫描/更新章节库。', cls: 'my-char-muted' });
     var all = collectStoryLogicIssues(this);
+    var handled = this.plugin.settings.storyAuditHandled || {};
+    function issueKey(x) {
+        var evt = x.event || {};
+        var raw = [x.kind, x.charName || '', x.plotLine || '', evt.storyYear || evt.chapterStoryTime || evt.year || '', evt.event || evt.title || '', x.message || ''].join('|');
+        var hash = 2166136261;
+        for (var i = 0; i < raw.length; i++) { hash ^= raw.charCodeAt(i); hash = Math.imul(hash, 16777619); }
+        return 'audit-' + (hash >>> 0).toString(16);
+    }
+    var active = all.filter(function(x) { return !handled[issueKey(x)]; });
+    var handledRows = all.filter(function(x) { return !!handled[issueKey(x)]; });
     var counts = {};
-    all.forEach(function(x) { counts[x.kind] = (counts[x.kind] || 0) + 1; });
+    active.forEach(function(x) { counts[x.kind] = (counts[x.kind] || 0) + 1; });
     var summary = container.createEl('div', { cls: 'my-char-panel-card' });
-    summary.createEl('strong', { text: '检查摘要 · ' + all.length + ' 条提醒' });
+    summary.createEl('strong', { text: '检查摘要 · ' + active.length + ' 条待处理 · ' + handledRows.length + ' 条已处理' });
     var grid = summary.createEl('div', { cls: 'my-char-p2-summary' });
-    ['人物首次出场','人物出生时间','人物死亡时间','年龄与事件时间','人物关系变化','伏笔回收检查','时间线冲突'].forEach(function(k) {
-        var chip = grid.createEl('span', { text: k + ' ' + (counts[k] || 0), cls: 'my-char-p2-chip' });
-    });
+    ['人物首次出场','人物出生时间','人物死亡时间','年龄与事件时间','人物关系变化','伏笔回收检查','时间线冲突'].forEach(function(k) { grid.createEl('span', { text: k + ' ' + (counts[k] || 0), cls: 'my-char-p2-chip' }); });
     var filters = container.createEl('div', { cls: 'my-char-p2-filters' });
     var select = filters.createEl('select', { cls: 'my-char-select' });
     [['all','全部类型'],['人物首次出场','人物首次出场'],['人物出生时间','出生时间'],['人物死亡时间','死亡时间'],['年龄与事件时间','年龄检查'],['人物关系变化','关系变化'],['伏笔回收检查','伏笔回收'],['时间线冲突','时间线冲突']].forEach(function(x) { select.createEl('option', { text: x[1], attr: { value: x[0] } }); });
-    var search = filters.createEl('input', { type: 'text', placeholder: '搜索人物、伏笔或事件…', cls: 'my-char-form-input' });
-    search.style.flex = '1';
+    var statusSelect = filters.createEl('select', { cls: 'my-char-select' });
+    [['pending','待处理（默认）'],['ignored','已忽略'],['intentional','作者刻意安排'],['all','全部状态']].forEach(function(x) { statusSelect.createEl('option', { text: x[1], attr: { value: x[0] } }); });
+    statusSelect.value = 'pending';
+    var search = filters.createEl('input', { type: 'text', placeholder: '搜索人物、伏笔或事件…', cls: 'my-char-form-input' }); search.style.flex = '1';
     var list = container.createEl('div');
+    function navigateIssue(x) {
+        // 「定位查看」只负责导航，不执行修正、不写入人物档案。
+        var targetEvent = x.event || (x.firstIssue && x.firstIssue.event);
+        var targetName = x.charName || (x.firstIssue && x.firstIssue.charName);
+        if (targetEvent) {
+            self.tab = 'timeline';
+            self.render();
+            self.showEditEvent(targetEvent);
+        } else if (targetName) {
+            self.tab = 'chars';
+            self.render();
+            var c = self.findChar(targetName);
+            if (c) self.showCharDetail(c);
+            else new obsidian.Notice('未找到人物：' + targetName);
+        } else if (x.plotLine) {
+            self.tab = 'timeline'; self._plotLineFilter = x.plotLine; self.render();
+        } else {
+            new obsidian.Notice('该提醒暂时没有可定位的事件或人物');
+        }
+    }
+    function saveHandled(x, status) {
+        var key = issueKey(x);
+        if (status) handled[key] = { status: status, message: x.message, updatedAt: Date.now() };
+        else delete handled[key];
+        self.plugin.settings.storyAuditHandled = handled;
+        self.plugin.saveSettings().then(function() { draw(); }).catch(function(e) { showUserError('保存逻辑检查处理状态失败', e); });
+    }
     function draw() {
         list.empty();
         var q = (search.value || '').toLowerCase();
-        var rows = all.filter(function(x) { return (select.value === 'all' || x.kind === select.value) && (!q || (x.message + ' ' + x.kind + ' ' + (x.charName || '') + ' ' + (x.plotLine || '')).toLowerCase().indexOf(q) !== -1); });
-        if (!rows.length) { list.createEl('div', { text: all.length ? '没有符合筛选条件的提醒。' : '✅ 暂未发现结构化设定中的明显冲突。建议继续补全人物出生/死亡时间、关系起止时间和伏笔状态。', cls: 'my-char-todo-ok' }); return; }
+        var rows = all.filter(function(x) {
+            var state = handled[issueKey(x)];
+            var statusMatch = statusSelect.value === 'all' ||
+                (statusSelect.value === 'pending' && !state) ||
+                (statusSelect.value === 'ignored' && state && state.status === 'ignored') ||
+                (statusSelect.value === 'intentional' && state && state.status === 'intentional');
+            return statusMatch && (select.value === 'all' || x.kind === select.value) &&
+                (!q || (x.message + ' ' + x.kind + ' ' + (x.charName || '') + ' ' + (x.plotLine || '')).toLowerCase().indexOf(q) !== -1);
+        });
+        if (!rows.length) {
+            var emptyText = statusSelect.value === 'pending' && !active.length
+                ? '✅ 暂无待处理的逻辑提醒。已忽略或标记为作者刻意安排的项目默认收起，不会重复打扰。'
+                : '没有符合当前状态和筛选条件的提醒。';
+            list.createEl('div', { text: emptyText, cls: 'my-char-todo-ok' }); return;
+        }
         rows.forEach(function(x) {
-            var row = list.createEl('button', { cls: 'my-char-todo-item' + (x.severity === 'high' ? ' is-high' : '') });
-            row.style.cssText = 'display:block;width:100%;text-align:left;white-space:normal;margin:6px 0;';
-            var level = x.severity === 'high' ? '高优先级' : (x.severity === 'low' ? '待确认' : (x.severity === 'info' ? '提示' : '建议核对'));
-            row.createEl('strong', { text: '【' + x.kind + ' · ' + level + '】' });
-            row.appendText(' ' + x.message);
-            row.addEventListener('click', function() {
-                if (x.firstIssue) {
-                    if (x.firstIssue.type === 'mismatch') self.fixFirstAppearIssue(x.firstIssue, true);
-                    else self.fixFirstAppearIssue(x.firstIssue);
-                } else if (x.event) {
-                    self.tab = 'timeline'; self.render(); self.showEditEvent(x.event);
-                } else if (x.charName) {
-                    self.tab = 'chars'; self.render();
-                    var c = self.findChar(x.charName); if (c) self.showCharDetail(c);
-                } else if (x.plotLine) {
-                    self.tab = 'timeline'; self._plotLineFilter = x.plotLine; self.render();
-                }
-            });
+            var key = issueKey(x), state = handled[key];
+            var row = list.createEl('div', { cls: 'my-char-todo-item' + (x.severity === 'high' ? ' is-high' : '') });
+            row.style.cssText = 'display:block;width:100%;text-align:left;white-space:normal;margin:6px 0;padding:10px;';
+            var head = row.createEl('div', { cls: 'rw-audit-row-head' });
+            head.createEl('strong', { text: '【' + x.kind + '】' });
+            if (state) head.createEl('span', { text: state.status === 'intentional' ? '作者刻意安排' : '已忽略', cls: 'my-char-p2-chip' });
+            row.createEl('div', { text: x.message });
+            var actions = row.createEl('div', { cls: 'rw-audit-actions' });
+            var locate = actions.createEl('button', { text: x.event || x.charName ? '定位查看' : '查看详情', cls: 'my-char-view-btn' });
+            locate.addEventListener('click', function(ev) { ev.stopPropagation(); navigateIssue(x); });
+            if (!state) {
+                var ignore = actions.createEl('button', { text: '忽略此项', cls: 'my-char-view-btn' });
+                ignore.addEventListener('click', function(ev) { ev.stopPropagation(); saveHandled(x, 'ignored'); });
+                var intentional = actions.createEl('button', { text: '作者刻意安排', cls: 'my-char-view-btn' });
+                intentional.addEventListener('click', function(ev) { ev.stopPropagation(); saveHandled(x, 'intentional'); });
+            } else {
+                var restore = actions.createEl('button', { text: '恢复检查', cls: 'my-char-view-btn' });
+                restore.addEventListener('click', function(ev) { ev.stopPropagation(); saveHandled(x, ''); });
+            }
         });
     }
-    select.addEventListener('change', draw);
-    search.addEventListener('input', draw);
-    draw();
+    select.addEventListener('change', draw); statusSelect.addEventListener('change', draw); search.addEventListener('input', draw); draw();
     var refresh = container.createEl('button', { text: '🔄 重新读取并检查', cls: 'my-char-view-btn' });
     refresh.addEventListener('click', function() { self.loadAllData({ silent: true }).then(function() { self.render(); }).catch(function(e) { showUserError('检查失败', e); }); });
 };
@@ -13059,6 +15492,24 @@ function rwGetOutlineLinkedEventIds(body) {
     var m = String(body || '').match(/<!--\s*rw-timeline-events:([^>]*)-->/i);
     return m ? m[1].split(',').map(function(x){return x.trim();}).filter(Boolean) : [];
 }
+// 故事大纲章节与时间线事件采用双通道联动：稳定事件 ID 是首选，
+// 事件自身的多章节引用/故事设计章节是兼容回退，避免旧版临时 ID 或历史数据导致大纲漏显。
+function rwOutlineEventMatchesSection(settings, event, sectionTitle, linkedIds) {
+    if (!event || !sectionTitle) return false;
+    var id = String(event.eventId || '').trim();
+    if (id && (linkedIds || []).map(String).indexOf(id) >= 0) return true;
+    var section = String(sectionTitle || '').replace(/\.md$/i, '').trim();
+    var sectionNo = rwExtractChapterNumber(section);
+    var pseudo = { name: section, path: section, chapterNumber: sectionNo };
+    var refs = rwGetEventChapterReferences(event);
+    if (refs.some(function(ref) { return rwChapterReferenceMatches(ref, pseudo); })) return true;
+    var designs = rwGetStoryDesignEntries(event);
+    if (designs.some(function(d) { return d.chapter && rwChapterReferenceMatches(d.chapter, pseudo); })) return true;
+    // 章节库可能保存的是完整文件路径，而大纲标题只写章节名；统一再经章节库解析一次。
+    var chapter = rwResolveChapterRecord(settings, section);
+    if (chapter && refs.some(function(ref) { return rwChapterReferenceMatches(ref, chapter); })) return true;
+    return false;
+}
 function rwSetOutlineLinkedEventIds(body, ids) {
     var text = String(body || '');
     text = text.replace(/\n?<!--\s*rw-timeline-events:[^>]*-->\s*/ig, '\n').trim();
@@ -13159,7 +15610,7 @@ MyView.prototype.renderOutlineTab = function(container) {
             var body=card.createEl('div',{cls:'rw-outline-card-body'});
             var sectionTools=body.createEl('div',{cls:'rw-module-actions'});var deleteSection=sectionTools.createEl('button',{text:'删除本章大纲',cls:'my-char-btn-ghost'});deleteSection.addEventListener('click',async function(ev){ev.preventDefault();ev.stopPropagation();if(!confirm('删除章节大纲「'+sec.title+'」？\n\n将删除该标题下的全部大纲内容及其事件关联；不会删除时间线事件或故事线设计。此操作不可自动撤销。'))return;try{var latest=await self.app.vault.read(file);var fresh=[],rr=/^##\s+(.+)\s*$/gm,mm2;while((mm2=rr.exec(latest)))fresh.push({title:mm2[1].trim(),start:mm2.index,end:rr.lastIndex});var target=fresh[sec.index];if(!target||target.title!==sec.title){var same=fresh.filter(function(x){return x.title===sec.title;});if(same.length===1)target=same[0];else{new obsidian.Notice('大纲结构已变化或存在同名章节，请刷新后重试');return;}}var end=fresh[fresh.indexOf(target)+1]?fresh[fresh.indexOf(target)+1].start:latest.length;var before=latest.slice(0,target.start);var after=latest.slice(end);var nextText=(before.replace(/\n+$/,'\n\n')+after.replace(/^\n+/, '')).replace(/\n{4,}/g,'\n\n\n');await self.app.vault.modify(file,nextText.trimEnd()+'\n');new obsidian.Notice('已删除章节大纲：'+sec.title);self.render();}catch(err){showUserError('删除章节大纲失败',err);}});
             var linkedIds=rwGetOutlineLinkedEventIds(sec.body);
-            var linkedEvents=(self.timeline||[]).filter(function(e){return e.eventId&&linkedIds.indexOf(e.eventId)>=0;});
+            var linkedEvents=(self.timeline||[]).filter(function(e){return rwOutlineEventMatchesSection(self.plugin.settings,e,sec.title,linkedIds);});
             var linkedBox=body.createEl('section',{cls:'rw-outline-linked-events'});
             var linkedHead=linkedBox.createEl('div',{cls:'rw-outline-linked-head'});
             linkedHead.createEl('strong',{text:'关联的时间线事件'});
@@ -13200,7 +15651,8 @@ MyView.prototype.renderOutlineTab = function(container) {
                     var allEvents=(self.timeline||[]).slice();
                     if(!allEvents.length){new obsidian.Notice('当前时间线还没有事件');return;}
                     await rwPersistTimelineEventIds(self.app,self.plugin,allEvents);
-                    var ids=await chooseTimelineEvents(self.app,allEvents,linkedEvents.map(function(e){return e.eventId;}));
+                    var currentLinkedIds=linkedEvents.map(function(e){return e.eventId;}).filter(Boolean);
+                    var ids=await chooseTimelineEvents(self.app,allEvents,currentLinkedIds);
                     if(ids===null)return;
                     var latest=await self.app.vault.read(file);
                     var sectionRe=/^##\s+(.+)\s*$/gm, mm, starts=[];while((mm=sectionRe.exec(latest)))starts.push({title:mm[1].trim(),start:mm.index,end:sectionRe.lastIndex});
@@ -13234,8 +15686,8 @@ MyView.prototype.renderWorldTab = function(container) {
         {id:'wb-rules',name:'规则与体系',icon:'▤'},
         {id:'wb-other',name:'其他设定',icon:'＋'}
     ];
-    var cats=Array.isArray(settings.worldCategories)&&settings.worldCategories.length?settings.worldCategories:defaultCats.map(function(c){return Object.assign({},c);});
-    var records=Array.isArray(settings.worldRecords)?settings.worldRecords:[];
+    var cats=Array.isArray(settings.worldCategories)&&settings.worldCategories.length?deepCloneJson(settings.worldCategories):defaultCats.map(function(c){return Object.assign({},c);});
+    var records=Array.isArray(settings.worldRecords)?deepCloneJson(settings.worldRecords):[];
     function normalize(){
         cats=cats.map(function(c){return {id:c.id||('cat-'+Date.now()+'-'+Math.random().toString(36).slice(2,7)),name:String(c.name||'未命名分类'),icon:c.icon||'▤'};});
         records=records.map(function(r){var x=Object.assign({},r);x.id=x.id||('world-'+Date.now()+'-'+Math.random().toString(36).slice(2,8));x.name=String(x.name||'未命名资料');x.type=String(x.type||'其他设定');x.summary=x.summary||'';x.description=x.description||'';x.fields=x.fields&&typeof x.fields==='object'?x.fields:{};x.tags=Array.isArray(x.tags)?x.tags:[];x.aliases=Array.isArray(x.aliases)?x.aliases:(x.aliases?String(x.aliases).split(/[、,，;；]/).map(function(v){return v.trim();}).filter(Boolean):[]);x.people=Array.isArray(x.people)?x.people:(x.owner?[String(x.owner)]:[]);x.links=Array.isArray(x.links)?x.links:(x.related?[String(x.related)]:[]);if(!x.people.length){var legacyPeople=x.fields['所属人物']||x.fields['归属']||x.fields['持有者']||x.fields['使用者'];if(legacyPeople)x.people=String(legacyPeople).split(/[、,，;；]/).map(function(v){return v.trim();}).filter(Boolean);}if(!x.links.length){var legacyLinks=x.fields['关联地点']||x.fields['关联势力']||x.fields['关联势力或地点'];if(legacyLinks)x.links=String(legacyLinks).split(/[、,，;；]/).map(function(v){return v.trim();}).filter(Boolean);}x.drawEnabled=!!x.drawEnabled;return x;});
@@ -13243,7 +15695,7 @@ MyView.prototype.renderWorldTab = function(container) {
     }
     normalize();
     self._rwWorldRecords=records;
-    async function persist(){settings.worldCategories=cats;settings.worldRecords=records;settings.worldDataSchemaVersion=3;await self.plugin.saveSettings();self._rwWorldRecords=records;}
+    async function persist(){pushUndoSnapshot(self,'修改世界观资料');settings.worldCategories=cats;settings.worldRecords=records;settings.worldDataSchemaVersion=3;await self.plugin.saveSettings();self._rwWorldRecords=records;}
     function catFor(name){return cats.filter(function(c){return c.name===name;})[0];}
     function make(tag,parent,cls){return parent.createEl(tag,{cls:cls||''});}
     var hero=make('section',container,'rw-wb-hero');
@@ -13383,8 +15835,7 @@ MyView.prototype.renderDashboard = function(container) {
                 var deathSort = deathParsed && deathParsed.sortValue !== null ? deathParsed.sortValue : null;
                 if (deathSort !== null) {
                     for (var j = 0; j < this.timeline.length; j++) {
-                        var yearParsed = parseHistoricalDate(this.timeline[j].storyYear || this.timeline[j].year);
-                        var yearSort = yearParsed && yearParsed.sortValue !== null ? yearParsed.sortValue : null;
+                        var yearSort = rwGetCalendarSortValue(this.timeline[j].storyYear || this.timeline[j].chapterStoryTime || this.timeline[j].year, this.timeline[j].month, !!this.timeline[j].calendarYearExplicit);
                         if (yearSort !== null && yearSort > deathSort) {
                             var appeared2 = findCharsInEvent(this.timeline[j].event, [c.name]);
                             if (appeared2.length > 0) { deadAfterAppearNames.push(c.name); break; }
@@ -13402,6 +15853,11 @@ MyView.prototype.renderDashboard = function(container) {
     timeBar.createEl('span', { text: '⏱️ 当前时间点：', cls: 'my-char-time-label' });
     timeBar.createEl('span', { text: currentTimeStr || '（未设置）', cls: 'my-char-time-value' + (currentTimeStr ? ' is-set' : '') });
     var setTimeBtn = timeBar.createEl('button', { text: '⚙️ 设置' });
+    var calendarStart = Math.max(1, Math.min(12, Number(settings.calendarYearStartMonth) || 1));
+    var calendarNames = Array.isArray(settings.calendarMonthNames) && settings.calendarMonthNames.length === 12 ? settings.calendarMonthNames : rwCalendarMonthNames();
+    var calendarOrder = calendarNames.slice(calendarStart - 1).concat(calendarNames.slice(0, calendarStart - 1));
+    var calendarInfo = container.createEl('div', { cls: 'my-char-muted rw-dashboard-calendar-info' });
+    calendarInfo.setText('📅 全局故事历法：' + calendarNames[calendarStart - 1] + '为岁首 · ' + calendarOrder.join(' → ') + ' · 人物、关系、章节、事件与仪表盘共用');
     setTimeBtn.className = 'my-char-btn-ghost my-char-btn-xs';
     setTimeBtn.addEventListener('click', function() { self.app.setting.open(); self.app.setting.openTabById(self.plugin.manifest.id); });
 
@@ -13671,8 +16127,8 @@ MyView.prototype.renderDashboard = function(container) {
 
     var allYears = [];
     for (var i = 0; i < this.timeline.length; i++) {
-        var y = parseHistoricalDate(this.timeline[i].storyYear || this.timeline[i].year);
-        if (y && y.sortValue !== null) allYears.push(y.sortValue);
+        var y = eventSortValue(this.timeline[i]);
+        if (y !== null) allYears.push(y);
     }
     for (var i = 0; i < this.chars.length; i++) {
         var lc = getCharLifecycle(this, this.chars[i]);
@@ -13730,18 +16186,17 @@ MyView.prototype.renderDashboard = function(container) {
     // 筛选出当前时间点之前的事件
     if (currentSortRecent !== null) {
         recentEvents = recentEvents.filter(function(evt) {
-            var evtParsed = parseHistoricalDate(evt.storyYear || evt.year);
-            var evtSort = evtParsed && evtParsed.sortValue !== null ? evtParsed.sortValue : null;
+            var evtSort = eventSortValue(evt);
             return evtSort !== null && evtSort <= currentSortRecent;
         });
     }
 
     // 按年份从晚到早排序
     recentEvents.sort(function(a, b) {
-        var ay = parseHistoricalDate(a.storyYear || a.year);
-        var by = parseHistoricalDate(b.storyYear || b.year);
-        var av = ay && ay.sortValue !== null ? ay.sortValue : -Infinity;
-        var bv = by && by.sortValue !== null ? by.sortValue : -Infinity;
+        var av = eventSortValue(a);
+        var bv = eventSortValue(b);
+        if (av === null) av = -Infinity;
+        if (bv === null) bv = -Infinity;
         return bv - av;
     });
 
@@ -13753,7 +16208,7 @@ MyView.prototype.renderDashboard = function(container) {
             row.style.cssText = 'padding:4px 0;border-bottom:1px solid #f0f0f0;font-size:12px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px;';
             var left = row.createEl('span');
             var tagLabel = evt.tag ? getTagLabel(self.plugin, evt.tag) : '📋';
-            left.textContent = '[' + (evt.storyYear || evt.year || '未标注') + '] ' + tagLabel + ' ' + String(evt.event || '').substring(0, 40) + (String(evt.event || '').length > 40 ? '...' : '');
+            left.textContent = '[' + (getTimelineStoryTimeLabel(evt) !== '未注明故事时间' ? getTimelineStoryTimeLabel(evt) : '未标注') + '] ' + tagLabel + ' ' + String(evt.event || '').substring(0, 40) + (String(evt.event || '').length > 40 ? '...' : '');
             row.style.cursor = 'pointer';
             row.title = '点击打开该事件';
             row.addEventListener('click', function() { self.tab = 'timeline'; self.render(); self.showEditEvent(evt); });
@@ -13822,13 +16277,160 @@ MyView.prototype.renderDashboard = function(container) {
 
 // ========== 扩展设置（使用场景、Tab 显示、术语、当前时间点） ==========
 
+function rwOrganizeSettingsSections(root) {
+    if (!root || root.querySelector('.rw-settings-organized')) return;
+    var doc = root.ownerDocument;
+    var nodes = Array.prototype.slice.call(root.children);
+    var title = nodes.length && nodes[0].tagName === 'H2' ? nodes.shift() : null;
+    var intro = nodes.length && nodes[0].tagName === 'P' ? nodes.shift() : null;
+    var groups = [];
+    var current = null;
+    nodes.forEach(function(node) {
+        if (node.classList && node.classList.contains('rw-settings-scene-section')) {
+            current = { title: '界面布局与使用场景', nodes: [node] };
+            groups.push(current);
+            current = null;
+        } else if (node.tagName === 'H3') {
+            current = { title: node.textContent || '设置分组', nodes: [] };
+            groups.push(current);
+        } else {
+            if (!current) {
+                current = { title: groups.length ? '其他设置' : '基础数据与文件路径', nodes: [] };
+                groups.push(current);
+            }
+            current.nodes.push(node);
+        }
+    });
+    root.empty();
+    if (title) root.appendChild(title);
+    if (intro) root.appendChild(intro);
+    var marker = root.createEl('div', { cls: 'rw-settings-organized' });
+    groups.forEach(function(group, index) {
+        var details = doc.createElement('details');
+        details.className = 'rw-settings-section';
+        details.open = index === 0;
+        var summary = doc.createElement('summary');
+        summary.textContent = group.title;
+        details.appendChild(summary);
+        var body = doc.createElement('div');
+        body.className = 'rw-settings-section-body';
+        group.nodes.forEach(function(node) { body.appendChild(node); });
+        details.appendChild(body);
+        marker.appendChild(details);
+    });
+}
+
 var __origDisplayFinal = SettingTab.prototype.display;
 SettingTab.prototype.display = function() {
     __origDisplayFinal.call(this);
     var el = this.containerEl;
     var self = this;
 
-    var sceneSection = el.createEl('div');
+    var calendarSection = el.createEl('div', { cls: 'rw-settings-scene-section rw-calendar-settings' });
+    calendarSection.style.cssText = 'margin-top:16px;padding:12px 14px;border:1px solid var(--background-modifier-border);border-radius:10px;';
+    calendarSection.createEl('h3', { text: '📅 全局故事历法' }).style.cssText = 'margin:0 0 6px;font-size:15px;font-weight:bold;';
+    calendarSection.createEl('p', { text: '全局故事历法用于辅助月份名称、月份顺序和未明确纪年的时间推算。时间线 MD 的二级标题是明确纪年，始终优先，不会被岁首设置改写。' }).style.cssText = 'font-size:12px;color:var(--text-muted);margin:0 0 10px;';
+    new obsidian.Setting(calendarSection)
+        .setName('历法辅助模式')
+        .setDesc('自动历法辅助：对未明确指定纪年的日期，按岁首推算故事年。手动纪年优先：不自动将月份折算到上一故事年。MD 时间线二级标题在两种模式下始终是权威纪年。')
+        .addDropdown(function(dropdown) {
+            dropdown.addOption('auto', '自动历法辅助');
+            dropdown.addOption('manual', '手动纪年优先');
+            dropdown.setValue(self.plugin.settings.calendarAssistMode || 'auto');
+            dropdown.onChange(async function(value) {
+                self.plugin.settings.calendarAssistMode = value === 'manual' ? 'manual' : 'auto';
+                ACTIVE_STORY_CALENDAR.assistMode = self.plugin.settings.calendarAssistMode;
+                await self.plugin.saveSettings();
+                refreshCharView(self.app, { silent: true });
+                new obsidian.Notice('历法模式已切换：' + (value === 'manual' ? '手动纪年优先' : '自动历法辅助'));
+            });
+        });
+    new obsidian.Setting(calendarSection)
+        .setName('岁首月份')
+        .setDesc('设置故事历法从哪个月份开始新年。此设置决定月份排序；是否将岁首之前的月份自动归入前一历年，由下面的独立选项控制。')
+        .addDropdown(function(dropdown) {
+            var monthNames = rwCalendarMonthNames();
+            for (var mi = 1; mi <= 12; mi++) dropdown.addOption(String(mi), monthNames[mi - 1] + '（第' + mi + '月）');
+            dropdown.setValue(String(self.plugin.settings.calendarYearStartMonth || 1));
+            dropdown.onChange(async function(value) {
+                self.plugin.settings.calendarYearStartMonth = Math.max(1, Math.min(12, parseInt(value, 10) || 1));
+                ACTIVE_STORY_CALENDAR.startMonth = self.plugin.settings.calendarYearStartMonth;
+                await self.plugin.saveSettings();
+                refreshCharView(self.app, { silent: true });
+                new obsidian.Notice('全局岁首已设为：' + monthNames[self.plugin.settings.calendarYearStartMonth - 1]);
+            });
+        });
+    new obsidian.Setting(calendarSection)
+        .setName('岁首前月份自动归入上一历年')
+        .setDesc('关闭时：若十月为岁首，一月至九月仍保留在 MD 当前 ## 标题所写的年份，不会被自动算到上一年或下一年。开启时：未明确指定纪年的日期才按岁首推算；MD 中明确写出的 ## 年份始终不变。默认关闭，适合已手动整理好 MD 年份的作者。')
+        .addToggle(function(toggle) {
+            toggle.setValue(self.plugin.settings.calendarRolloverBeforeStart === true);
+            toggle.onChange(async function(value) {
+                self.plugin.settings.calendarRolloverBeforeStart = !!value;
+                ACTIVE_STORY_CALENDAR.rolloverBeforeStart = !!value;
+                await self.plugin.saveSettings();
+                refreshCharView(self.app, { silent: true });
+                new obsidian.Notice(value ? '已启用岁首跨年推算' : '已关闭岁首跨年推算，月份保留在手动纪年中');
+            });
+        });
+    new obsidian.Setting(calendarSection)
+        .setName('月份名称（按一月至十二月对应）')
+        .setDesc('用英文逗号或中文逗号分隔12个名称。例：正月,二月,三月,四月,五月,六月,七月,八月,九月,十月,十一月,十二月。')
+        .addTextArea(function(text) {
+            text.setPlaceholder('正月,二月,三月,四月,五月,六月,七月,八月,九月,十月,十一月,十二月')
+                .setValue(rwCalendarMonthNames().join('、'))
+                .onChange(async function(value) {
+                    var names = String(value || '').split(/[、，,]/).map(function(x) { return x.trim(); }).filter(Boolean);
+                    if (names.length !== 12 || names.some(function(x) { return !x; })) return;
+                    self.plugin.settings.calendarMonthNames = names;
+                    ACTIVE_STORY_CALENDAR.monthNames = names;
+                    await self.plugin.saveSettings();
+                    refreshCharView(self.app, { silent: true });
+                });
+        });
+    // Season-to-month mapping is stored by month index, so renaming a month
+    // does not break its seasonal assignment.
+    var seasonDefaults = { spring: [1,2,3], summer: [4,5,6], autumn: [7,8,9], winter: [10,11,12] };
+    var seasonLabels = [
+        { key: 'spring', label: '春' },
+        { key: 'summer', label: '夏' },
+        { key: 'autumn', label: '秋' },
+        { key: 'winter', label: '冬' }
+    ];
+    if (!self.plugin.settings.calendarSeasonMonths || typeof self.plugin.settings.calendarSeasonMonths !== 'object') {
+        self.plugin.settings.calendarSeasonMonths = JSON.parse(JSON.stringify(seasonDefaults));
+    }
+    calendarSection.createEl('h4', { text: '🌸 季节与月份映射' }).style.cssText = 'font-size:13px;margin:14px 0 4px;';
+    calendarSection.createEl('p', { text: '分别填写每个季节包含的月份。可输入月份名称或月份序号（1–12），用逗号分隔；允许某季节留空，也允许不同季节包含不同数量的月份。此设置只定义季节归属，不改变岁首和月份排序。' }).style.cssText = 'font-size:11px;color:var(--text-muted);margin:0 0 8px;';
+    var seasonMonthNames = rwCalendarMonthNames();
+    seasonLabels.forEach(function(season) {
+        var current = self.plugin.settings.calendarSeasonMonths[season.key];
+        if (!Array.isArray(current)) current = seasonDefaults[season.key];
+        var displayValue = current.map(function(index) { return seasonMonthNames[index - 1] || String(index); }).join('、');
+        new obsidian.Setting(calendarSection)
+            .setName(season.label + '季包含的月份')
+            .setDesc('当前月份：' + (displayValue || '未指定'))
+            .addText(function(text) {
+                text.setPlaceholder('例如：' + (season.key === 'spring' ? '正月、二月、三月' : '4、5、6'))
+                    .setValue(displayValue)
+                    .onChange(async function(value) {
+                        var tokens = String(value || '').split(/[、，,;；\s]+/).map(function(x) { return x.trim(); }).filter(Boolean);
+                        var indexes = [];
+                        tokens.forEach(function(token) {
+                            var numeric = token.match(/^(?:第)?(\\d{1,2})(?:月)?$/);
+                            var index = numeric ? parseInt(numeric[1], 10) : seasonMonthNames.indexOf(token) + 1;
+                            if (!numeric && index === 0) index = seasonMonthNames.indexOf(token + '月') + 1;
+                            if (index >= 1 && index <= 12 && indexes.indexOf(index) === -1) indexes.push(index);
+                        });
+                        self.plugin.settings.calendarSeasonMonths[season.key] = indexes;
+                        ACTIVE_STORY_CALENDAR.seasonMonths = self.plugin.settings.calendarSeasonMonths;
+                        await self.plugin.saveSettings();
+                    });
+            });
+    });
+    calendarSection.createEl('p', { text: '说明：MD 时间线中的 ## 二级标题始终决定该组事件的年份；### 三级标题只决定月份。历法设置负责月份顺序及其他未明确纪年的日期辅助，不会把二级标题下的九月等事件擅自移到上一年。季节映射仅用于作者自定义季节归属；不进行公历/农历天文换算，也不自动推算闰月。' }).style.cssText = 'font-size:11px;color:var(--text-muted);margin:4px 0 0;';
+
+    var sceneSection = el.createEl('div', { cls: 'rw-settings-scene-section' });
     sceneSection.style.cssText = 'margin-top:16px;padding-top:8px;border-top:2px solid var(--background-modifier-border);';
     sceneSection.createEl('h3', { text: '🎯 使用场景与界面' }).style.cssText = 'margin:0 0 8px;font-size:15px;font-weight:bold;';
     sceneSection.createEl('p', { text: '同一套数据可用于小说、日记、跑团、知识图谱等不同场景。选择场景后会自动隐藏不常用的 Tab。' })
@@ -14071,6 +16673,7 @@ SettingTab.prototype.display = function() {
                     });
             });
     }
+    rwOrganizeSettingsSections(el);
 };
 
 // ========== 扩展默认设置 ==========
@@ -14079,11 +16682,11 @@ var __origLoadSettingsFinal = RelationWeaverPlugin.prototype.loadSettings;
 RelationWeaverPlugin.prototype.loadSettings = async function() {
     var defaults = {
         charFile: '人物索引.md', charFolder: '', timelineFile: '时间线.md', timelineFolder: '',
-        customFields: '', customRelationTypes: '', factionFieldName: '阵营',
+        customFields: '', customRelationTypes: '', deletedRelationTypeValues: [], customRelationCategories: '', relationCategoryConfigs: {}, relationCategoryNames: null, factionFieldName: '阵营',
         deathFieldNames: '死亡,死亡时间', birthFieldNames: '出生,出生时间',
-        firstAppearFieldName: '首次出场', intimateFieldName: '亲密人物',
+        firstAppearFieldName: '正文首次出现', intimateFieldName: '亲密人物',
         preset: 'default', customEventTags: [], customIntimacyLevels: '',
-        currentTimePoint: '', timeFilterEnabled: true, settingCollectionFile: '设定集.md',
+        currentTimePoint: '', timeFilterEnabled: true, settingCollectionFile: '设定集.md', chapterLibrary: { folder: '', chapters: [] },
         useCaseMode: 'novel', hiddenTabs: [], viewTitle: '',
         termLabels: {}, tabLabels: {}, graphNotesFolder: '', worldbuildingFilePath: '', drawPoolFilePath: '', outlineFilePath: '', outlineTemplates: [{id:'general',name:'通用小说',fields:['本章目标','核心冲突','关键转折','出场人物','状态']}], activeOutlineTemplate: 'general', syncGraphOnSave: false, graphAutoSyncExplicitlyEnabled: false,
         graphSyncMode: 'all', graphSyncTypes: [], worldRecords: [], worldCategories: [], worldDataSchemaVersion: 2, worldDataMigrated: false,
@@ -14091,10 +16694,16 @@ RelationWeaverPlugin.prototype.loadSettings = async function() {
         syncFirstAppearOnEvent: true,
         relationMetaFile: '关系与阵营.md', novelTagPreset: 'gudai',
         autoDiscoverFromMd: true, syncRelationsToCharMd: true,
-        timelineFloatChars: true, floatPanelPos: { x: 24, y: 120 }
+        timelineFloatChars: true, floatPanelPos: { x: 24, y: 120 },
+        rwAppFloatingWorkbench: { windows: [], nextId: 1 },
+        calendarMode: 'custom', calendarAssistMode: 'auto', calendarYearStartMonth: 1,
+        calendarRolloverBeforeStart: false,
+        calendarMonthNames: ['正月','二月','三月','四月','五月','六月','七月','八月','九月','十月','十一月','十二月']
     };
     var loaded = await this.loadData() || {};
     this.settings = Object.assign({}, defaults, loaded);
+    ACTIVE_TIMELINE_ERA = this.settings.timelineEra || 'auto';
+    ACTIVE_STORY_CALENDAR = { startMonth: this.settings.calendarYearStartMonth || 1, assistMode: this.settings.calendarAssistMode || 'auto', rolloverBeforeStart: this.settings.calendarRolloverBeforeStart === true, monthNames: Array.isArray(this.settings.calendarMonthNames) ? this.settings.calendarMonthNames : defaults.calendarMonthNames, seasonMonths: this.settings.calendarSeasonMonths || { spring: [1,2,3], summer: [4,5,6], autumn: [7,8,9], winter: [10,11,12] } };
 };
 // ============================================================
 // 🔥 热力图
