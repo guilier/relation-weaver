@@ -1,9 +1,9 @@
 {
   "id": "relation-weaver",
-  "name": "relation-weaver",
-  "version": "3.15.10",
+  "name": "Relation Weaver",
+  "version": "3.48.5",
   "minAppVersion": "1.4.0",
-  "description": "关系图谱采用分层环形布局，优化节点间距与关系标签避让；支持紧凑/舒适布局、节点尺寸调节、自动整理与适应画布；伏笔提醒支持折叠与逐条管理",
+  "description": "A visual story management toolkit for characters, relationships, factions, organizations, timelines, chapters, and worldbuilding, featuring interactive relationship graphs and story consistency checks.",
   "author": "guilier",
   "isDesktopOnly": false
 }
