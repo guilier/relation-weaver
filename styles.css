@@ -4564,3 +4564,242 @@
 .rw-graph-focus-body>.rw-org-network-viewport>svg{max-width:none!important;}
 .rw-graph-overview-button{min-width:30px!important;width:30px;height:28px;padding:0!important;display:inline-flex;align-items:center;justify-content:center;font-size:15px!important;}
 .rw-graph-focus-body{padding-top:4px!important;}
+
+/* Relation Weaver 3.49.0：多世界线与主次标签 */
+.rw-worldline-toolbar{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:8px 0 12px;padding:9px 11px;border:1px solid var(--background-modifier-border);border-radius:12px;background:var(--background-secondary-alt);}
+.rw-worldline-toolbar select{max-width:220px;min-width:130px;}
+.rw-secondary-tag-filter{padding-left:10px;border-left:2px solid var(--interactive-accent);}
+.rw-worldline-compare-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-top:12px;}
+.rw-worldline-compare-card{min-width:0;padding:12px;border:1px solid var(--background-modifier-border);border-radius:12px;background:var(--background-secondary);}
+.rw-worldline-compare-card h4{margin:0 0 4px;}
+.rw-worldline-compare-event{display:flex;gap:8px;padding:7px 0;border-bottom:1px solid var(--background-modifier-border);font-size:12px;line-height:1.5;}
+.rw-worldline-compare-event b{flex:0 0 84px;color:var(--text-muted);}
+.rw-worldline-compare-event span{min-width:0;overflow-wrap:anywhere;}
+@media(max-width:600px){.rw-worldline-toolbar{align-items:stretch}.rw-worldline-toolbar button,.rw-worldline-toolbar select{flex:1;min-width:0}.rw-worldline-compare-grid{grid-template-columns:1fr;}}
+
+
+/* 3.50.1：事件集卡片重构。使用 article + 内部网格，避免主题对 button 的高度/行高规则造成重叠。 */
+.rw-event-set-card {
+  box-sizing: border-box;
+  min-width: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 14px;
+  padding: 14px;
+  margin: 14px 0;
+  background: var(--background-secondary);
+  box-shadow: 0 2px 8px rgba(0,0,0,.045);
+}
+.rw-event-set-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  margin: 0 0 12px;
+  padding: 0 0 10px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.rw-event-set-head strong {
+  min-width: 0;
+  color: var(--text-normal);
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.rw-event-set-head > span {
+  flex: 0 0 auto;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--background-modifier-hover);
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.rw-event-set-list { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.rw-event-set-item {
+  display: block !important;
+  position: relative;
+  box-sizing: border-box !important;
+  width: 100%;
+  height: auto !important;
+  min-height: 0 !important;
+  max-height: none !important;
+  flex: none !important;
+  margin: 0;
+  padding: 12px 14px;
+  overflow: visible !important;
+  white-space: normal !important;
+  text-align: left;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 11px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  cursor: pointer;
+  transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease;
+}
+.rw-event-set-item:hover, .rw-event-set-item:focus-visible {
+  border-color: var(--interactive-accent);
+  box-shadow: 0 3px 12px rgba(0,0,0,.07);
+  outline: none;
+}
+.rw-event-set-item:active { transform: translateY(1px); }
+.rw-event-set-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin: 0 0 8px;
+}
+.rw-event-set-time {
+  display: inline-block;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.rw-event-set-index {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--background-modifier-hover);
+  color: var(--text-faint);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.rw-event-set-content {
+  display: block;
+  min-width: 0;
+  margin: 0;
+  color: var(--text-normal);
+  font-size: 13px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.rw-event-set-tags {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+  margin-top: 9px;
+}
+.rw-event-set-tag {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 2px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 999px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.rw-event-set-tag-plot { color: var(--text-accent); border-color: var(--interactive-accent); }
+.rw-event-set-tag-status { color: var(--text-success); }
+@media (max-width: 600px) {
+  .rw-event-set-card { padding: 10px; }
+  .rw-event-set-item { padding: 10px 11px; }
+  .rw-event-set-content { font-size: 12px; }
+}
+
+
+/* 3.51.0：全局世界线工作上下文 */
+.rw-global-worldline-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 12px;padding:9px 12px;border:1px solid var(--background-modifier-border);border-radius:12px;background:var(--background-secondary);box-shadow:0 2px 10px rgba(0,0,0,.035);}
+.rw-global-worldline-label{font-size:11px;font-weight:650;color:var(--text-muted);white-space:nowrap;}
+.rw-global-worldline-select{min-width:150px;max-width:240px;}
+.rw-global-worldline-time{width:190px;max-width:38vw;min-height:30px;padding:4px 8px;}
+.rw-global-worldline-type{margin-left:auto;padding:3px 8px;border:1px solid var(--background-modifier-border);border-radius:999px;white-space:nowrap;}
+@media(max-width:600px){.rw-global-worldline-bar{gap:6px;padding:8px}.rw-global-worldline-select,.rw-global-worldline-time{flex:1;min-width:0;max-width:none}.rw-global-worldline-type{margin-left:0}}
+
+
+/* Event-set view: use the same compact event-line language as the main timeline. */
+.rw-event-set-sortbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 10px;
+}
+.rw-event-set-sortbar .is-active {
+  color: var(--text-accent);
+  border-color: var(--interactive-accent);
+  background: var(--background-modifier-hover);
+}
+.rw-event-set-move {
+  min-width: 24px;
+  padding: 0 5px !important;
+  margin-left: 2px;
+}
+.rw-event-set-move:disabled {
+  opacity: .28;
+  cursor: default;
+}
+.rw-event-set-timeline-item {
+  padding: 5px 7px 5px 6px;
+  margin: 2px 0;
+  border-radius: 0 5px 5px 0;
+}
+.rw-event-set-timeline-item .my-char-timeline-event-main {
+  align-items: baseline;
+}
+.rw-event-set-date {
+  color: var(--text-muted);
+  background: var(--background-modifier-hover) !important;
+  font-weight: 500;
+}
+.rw-event-set-timeline-item .my-char-timeline-event-text {
+  white-space: pre-wrap;
+}
+
+/* 3.51.2：事件集时间点限制为每行最多约 12 个中文字符，把剩余横向空间交给事件正文。 */
+.rw-event-set-timeline-item .my-char-timeline-event-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  column-gap: 8px;
+  row-gap: 4px;
+  width: 100%;
+  min-width: 0;
+}
+.rw-event-set-timeline-item .rw-event-set-date {
+  display: inline-block;
+  box-sizing: border-box;
+  flex: 0 1 12em;
+  width: fit-content;
+  max-width: 12em;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  line-height: 1.55;
+  padding: 2px 6px;
+}
+.rw-event-set-timeline-item .my-char-timeline-event-text {
+  flex: 1 1 55%;
+  min-width: 12em;
+  max-width: 100%;
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+.rw-event-set-timeline-item .my-char-tag-chip:not(.rw-event-set-date) {
+  flex: 0 1 auto;
+  max-width: 100%;
+}
+@media (max-width: 600px) {
+  .rw-event-set-timeline-item .rw-event-set-date {
+    flex-basis: min(12em, 100%);
+  }
+  .rw-event-set-timeline-item .my-char-timeline-event-text {
+    flex-basis: 100%;
+    min-width: 0;
+  }
+}
