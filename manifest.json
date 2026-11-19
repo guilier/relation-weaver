@@ -1,7 +1,7 @@
 {
   "id": "relation-weaver",
   "name": "Relation Weaver",
-  "version": "3.48.5",
+  "version": "3.51.2",
   "minAppVersion": "1.4.0",
   "description": "A visual story management toolkit for characters, relationships, factions, organizations, timelines, chapters, and worldbuilding, featuring interactive relationship graphs and story consistency checks.",
   "author": "guilier",
