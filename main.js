@@ -257,8 +257,8 @@ function collectStoryLogicIssues(view) {
     collectAgeConsistencyIssues(view).forEach(function(x) { all.push(x); });
     collectRelationTimelineIssues(view).forEach(function(x) { all.push(x); });
     collectTimelineOrderIssues(view).forEach(function(x) { all.push(x); });
-    novelExt.validatePlotLines(view.timeline || []).forEach(function(x) { all.push(p2Issue('伏笔回收检查', x.severity || 'medium', x.message, { event: x.event, plotLine: x.plotLine })); });
-    novelExt.getUnredeemedPlotLines(view.timeline || []).forEach(function(g) {
+    novelExt.validatePlotLines(view.timeline || [], view.plugin.settings).forEach(function(x) { all.push(p2Issue('伏笔回收检查', x.severity || 'medium', x.message, { event: x.event, plotLine: x.plotLine })); });
+    novelExt.getUnredeemedPlotLines(view.timeline || [], view.plugin.settings).forEach(function(g) {
         if (g.latestStatus === '埋设' || !g.latestStatus) all.push(p2Issue('伏笔回收检查', 'info', '伏笔「' + g.plotLine + '」目前只有埋设/未标状态，尚未记录推进或回收节点', { plotLine: g.plotLine }));
     });
     return all;
@@ -278,6 +278,24 @@ var NOVEL_COMPACT_HIDDEN = ['intimacy', 'continuity', 'world', 'chars', 'search'
 var NOVEL_PRIMARY_TAB_IDS = ['desk', 'relations', 'plots', 'outline', 'timeline', 'dashboard', 'chapterStatus'];
 
 var PLOT_STATUSES = ['埋设', '推进', '升级', '假回收', '并入', '回收', '搁置'];
+var PLOT_STATUS_DEFAULTS = { seed: '埋设', progress: '推进', upgrade: '升级', fakeClose: '假回收', merge: '并入', close: '回收', pause: '搁置' };
+function getPlotStatusLabels(settings) {
+    var saved = settings && settings.plotStatusLabels || {};
+    var out = {};
+    Object.keys(PLOT_STATUS_DEFAULTS).forEach(function(k) { out[k] = String(saved[k] || PLOT_STATUS_DEFAULTS[k]).trim() || PLOT_STATUS_DEFAULTS[k]; });
+    return out;
+}
+function getPlotStatusOptions(settings) {
+    var labels = getPlotStatusLabels(settings);
+    var options = Object.keys(labels).map(function(k) { return labels[k]; });
+    var custom = settings && Array.isArray(settings.customPlotStatuses) ? settings.customPlotStatuses : [];
+    custom.forEach(function(v) { v = String(v || '').trim(); if (v && options.indexOf(v) < 0) options.push(v); });
+    return options.filter(function(v, i, a) { return !!v && a.indexOf(v) === i; });
+}
+function isPlotClosedStatus(status, settings) {
+    var labels = getPlotStatusLabels(settings);
+    return status === labels.close || status === labels.merge;
+}
 var PLOT_BEATS = ['激励事件', '第一幕转折', '中点', '第二幕低谷', '高潮', '结局'];
 var PLOT_ACTS = ['第一幕', '第二幕', '第三幕'];
 var PLOT_CLOSED_STATUSES = { '回收': true, '并入': true };
@@ -852,8 +870,12 @@ function parseEventMeta(eventText) {
     var plotAct = '';
     var conflictLevel = '';
     var mergeInto = '';
+    var eventSet = '';
+    var sourceWorldlineId = '';
+    var sourceEventRef = '';
     var storyYear = '';
     var storyDesigns = {};
+    var secondaryTags = [];
     function takeMeta(label) {
         var re = new RegExp('\\|\\s*' + label + '\\s*[:：]\\s*([^|]+)');
         var m = text.match(re);
@@ -874,25 +896,34 @@ function parseEventMeta(eventText) {
     plotAct = takeMeta('幕');
     conflictLevel = takeMeta('冲突');
     mergeInto = takeMeta('并入');
+    eventSet = takeMeta('事件集');
+    sourceWorldlineId = takeMeta('来源世界线');
+    sourceEventRef = takeMeta('来源事件');
     storyYear = takeMeta('纪年');
     var storyDesignRaw = takeMeta('故事设计');
     if (storyDesignRaw) { try { storyDesigns = JSON.parse(decodeURIComponent(storyDesignRaw)); } catch (e) { storyDesigns = {}; } }
+    var secondaryTagsRaw = takeMeta('次标签');
+    if (secondaryTagsRaw) { try { secondaryTags = JSON.parse(decodeURIComponent(secondaryTagsRaw)); } catch (e) { secondaryTags = secondaryTagsRaw.split(/[、，,;；]+/).map(function(x){return x.trim();}).filter(Boolean); } }
     text = text.replace(/\s+\|\s*$/g, '').trim();
     return {
-        event: text.trim(), eventId: eventId, plotLine: plotLine, plotStatus: plotStatus, chapterNote: chapterNote || (chapterNotes.length ? chapterNotes[0] : ''),
+        event: text.trim(), eventId: eventId, secondaryTags: secondaryTags, plotLine: plotLine, plotStatus: plotStatus, chapterNote: chapterNote || (chapterNotes.length ? chapterNotes[0] : ''),
         chapterNotes: chapterNotes.length ? chapterNotes : normalizeChapterNotes(chapterNote),
-        plotBeat: plotBeat, plotAct: plotAct, conflictLevel: conflictLevel, mergeInto: mergeInto, storyYear: storyYear, storyDesigns: storyDesigns
+        plotBeat: plotBeat, plotAct: plotAct, conflictLevel: conflictLevel, mergeInto: mergeInto, eventSet: eventSet, sourceWorldlineId: sourceWorldlineId, sourceEventRef: sourceEventRef, storyYear: storyYear, storyDesigns: storyDesigns
     };
 }
 
 function serializeEventMeta(rec) {
     var parts = [rec.event];
+    if (Array.isArray(rec.secondaryTags) && rec.secondaryTags.length) parts.push('次标签:' + encodeURIComponent(JSON.stringify(rec.secondaryTags)));
     if (rec.plotLine) parts.push('情节线:' + rec.plotLine);
     if (rec.plotStatus) parts.push('状态:' + rec.plotStatus);
     if (rec.plotBeat) parts.push('节拍:' + rec.plotBeat);
     if (rec.plotAct) parts.push('幕:' + rec.plotAct);
     if (rec.conflictLevel) parts.push('冲突:' + rec.conflictLevel);
     if (rec.mergeInto) parts.push('并入:' + rec.mergeInto);
+    if (rec.eventSet) parts.push('事件集:' + rec.eventSet);
+    if (rec.sourceWorldlineId) parts.push('来源世界线:' + rec.sourceWorldlineId);
+    if (rec.sourceEventRef) parts.push('来源事件:' + rec.sourceEventRef);
     if (rec.storyYear) parts.push('纪年:' + rec.storyYear);
     var chapterNotes = normalizeChapterNotes(rec.chapterNotes);
     if (chapterNotes.length) parts.push('章节:' + chapterNotes.join('、'));
@@ -948,6 +979,9 @@ function parseTimelineExtended(content, settings) {
                 raw = raw.substring(tagMatch[0].length);
             }
             var meta = parseEventMeta(raw);
+            // 将预设状态的旧显示词条映射到作者当前自定义名称，保留原有语义与逻辑检查。
+            var currentStatusLabels = getPlotStatusLabels(settings);
+            Object.keys(PLOT_STATUS_DEFAULTS).forEach(function(statusKey) { if (meta.plotStatus === PLOT_STATUS_DEFAULTS[statusKey]) meta.plotStatus = currentStatusLabels[statusKey]; });
             var chapterParsed = parseChapterHeading(currentYear);
             records.push({
                 volume: currentVolume,
@@ -958,6 +992,8 @@ function parseTimelineExtended(content, settings) {
                 event: meta.event,
                 eventId: meta.eventId,
                 tag: tag,
+                primaryTag: tag,
+                secondaryTags: meta.secondaryTags || [],
                 plotLine: meta.plotLine,
                 plotStatus: meta.plotStatus,
                 chapterNote: meta.chapterNote,
@@ -965,7 +1001,10 @@ function parseTimelineExtended(content, settings) {
                 plotBeat: meta.plotBeat,
                 plotAct: meta.plotAct,
                 conflictLevel: meta.conflictLevel,
-                mergeInto: meta.mergeInto || (meta.plotStatus === '并入' ? meta.plotLine : ''),
+                mergeInto: meta.mergeInto || '',
+                eventSet: meta.eventSet || '',
+                sourceWorldlineId: meta.sourceWorldlineId || '',
+                sourceEventRef: meta.sourceEventRef || '',
                 storyYear: meta.storyYear,
                 storyDesigns: meta.storyDesigns || {},
                 chapterIndex: chapterParsed ? chapterParsed.num : null,
@@ -1870,21 +1909,22 @@ function applyNovelTagPreset(plugin, presetKey) {
     plugin.settings.novelTagPreset = presetKey;
 }
 
-function getUnredeemedPlotEvents(timeline) {
-    return getUnredeemedPlotLines(timeline).reduce(function(acc, g) {
-        return acc.concat(g.events.filter(function(e) { return !PLOT_CLOSED_STATUSES[e.plotStatus]; }));
+function getUnredeemedPlotEvents(timeline, settings) {
+    return getUnredeemedPlotLines(timeline, settings).reduce(function(acc, g) {
+        return acc.concat(g.events.filter(function(e) { return !isPlotClosedStatus(e.plotStatus, settings); }));
     }, []);
 }
 
-function latestMeaningfulPlotStatus(events) {
+function latestMeaningfulPlotStatus(events, settings) {
+    var pauseLabel = getPlotStatusLabels(settings).pause;
     for (var i = events.length - 1; i >= 0; i--) {
         var st = events[i].plotStatus;
-        if (st && st !== '搁置') return { status: st, event: events[i], index: i };
+        if (st && st !== pauseLabel) return { status: st, event: events[i], index: i };
     }
     return { status: '', event: null, index: -1 };
 }
 
-function getPlotLineGroups(timeline) {
+function getPlotLineGroups(timeline, settings) {
     var groups = {};
     var ordered = getSortedTimelineEvents(timeline);
     for (var i = 0; i < ordered.length; i++) {
@@ -1907,17 +1947,17 @@ function getPlotLineGroups(timeline) {
     for (var key in groups) {
         if (!groups.hasOwnProperty(key)) continue;
         var g = groups[key];
-        var last = latestMeaningfulPlotStatus(g.events);
+        var last = latestMeaningfulPlotStatus(g.events, settings);
         g.latestStatus = last.status || '';
-        g.isRedeemed = !!(PLOT_CLOSED_STATUSES[last.status]);
+        g.isRedeemed = isPlotClosedStatus(last.status, settings);
         result.push(g);
     }
     result.sort(function(a, b) { return a.plotLine.localeCompare(b.plotLine, 'zh-CN'); });
     return result;
 }
 
-function getUnredeemedPlotLines(timeline) {
-    return getPlotLineGroups(timeline).filter(function(g) { return !g.isRedeemed; });
+function getUnredeemedPlotLines(timeline, settings) {
+    return getPlotLineGroups(timeline, settings).filter(function(g) { return !g.isRedeemed; });
 }
 
 function isSimilarPlotLineName(a, b) {
@@ -1948,10 +1988,11 @@ function isSimilarPlotLineName(a, b) {
     return false;
 }
 
-function validatePlotLines(timeline) {
+function validatePlotLines(timeline, settings) {
     var warnings = [];
-    var groups = getPlotLineGroups(timeline);
-    var statusOrder = { '埋设': 1, '推进': 2, '升级': 3, '假回收': 2, '并入': 4, '回收': 4 };
+    var labels = getPlotStatusLabels(settings);
+    var groups = getPlotLineGroups(timeline, settings);
+    var statusOrder = {}; statusOrder[labels.seed]=1; statusOrder[labels.progress]=2; statusOrder[labels.upgrade]=3; statusOrder[labels.fakeClose]=2; statusOrder[labels.merge]=4; statusOrder[labels.close]=4;
 
     for (var gi = 0; gi < groups.length; gi++) {
         var g = groups[gi];
@@ -1963,19 +2004,19 @@ function validatePlotLines(timeline) {
         for (var i = 0; i < events.length; i++) {
             var st = events[i].plotStatus;
             if (st && firstIdx[st] === undefined) firstIdx[st] = i;
-            if (st === '回收') lastTrueRecycle = i;
-            if (st === '假回收') lastFakeRecycle = i;
-            if (lastTrueRecycle !== -1 && i > lastTrueRecycle && st && st !== '回收' && st !== '搁置') {
+            if (st === labels.close) lastTrueRecycle = i;
+            if (st === labels.fakeClose) lastFakeRecycle = i;
+            if (lastTrueRecycle !== -1 && i > lastTrueRecycle && st && st !== labels.close && st !== labels.pause) {
                 var afterFake = lastFakeRecycle > lastTrueRecycle;
-                if (st === '推进' || st === '升级' || st === '埋设' || st === '假回收') {
+                if (st === labels.progress || st === labels.upgrade || st === labels.seed || st === labels.fakeClose) {
                     warnings.push({
                         type: 'reopen_after_recycle',
                         severity: afterFake ? 'low' : 'info',
                         plotLine: g.plotLine,
-                        message: '「' + g.plotLine + '」在「' + events[lastTrueRecycle].year + '」标记回收后，于「' + events[i].year + '」再次「' + st + '」——若是假回收再爆，请把前一次改成「假回收」',
+                        message: '「' + g.plotLine + '」在「' + events[lastTrueRecycle].year + '」标记' + labels.close + '后，于「' + events[i].year + '」再次「' + st + '」——若是假回收再爆，请把前一次改成「假回收」',
                         event: events[i]
                     });
-                } else if (st !== '并入') {
+                } else if (st !== labels.merge) {
                     warnings.push({
                         type: 'after_recycle',
                         severity: 'medium',
@@ -1987,31 +2028,31 @@ function validatePlotLines(timeline) {
             }
         }
 
-        if (firstIdx['回收'] !== undefined && firstIdx['埋设'] !== undefined && firstIdx['回收'] < firstIdx['埋设']) {
+        if (firstIdx[labels.close] !== undefined && firstIdx[labels.seed] !== undefined && firstIdx[labels.close] < firstIdx[labels.seed]) {
             warnings.push({
                 type: 'recycle_before_plant',
                 severity: 'high',
                 plotLine: g.plotLine,
                 message: '「' + g.plotLine + '」的「回收」出现在「埋设」之前',
-                event: events[firstIdx['回收']]
+                event: events[firstIdx[labels.close]]
             });
         }
-        if (firstIdx['推进'] !== undefined && firstIdx['埋设'] !== undefined && firstIdx['推进'] < firstIdx['埋设']) {
+        if (firstIdx[labels.progress] !== undefined && firstIdx[labels.seed] !== undefined && firstIdx[labels.progress] < firstIdx[labels.seed]) {
             warnings.push({
                 type: 'advance_before_plant',
                 severity: 'low',
                 plotLine: g.plotLine,
                 message: '「' + g.plotLine + '」的「推进」出现在「埋设」之前（可能是中途接入）',
-                event: events[firstIdx['推进']]
+                event: events[firstIdx[labels.progress]]
             });
         }
 
         for (var j = 1; j < events.length; j++) {
             var prevSt = events[j - 1].plotStatus;
             var curSt = events[j].plotStatus;
-            if (!prevSt || !curSt || prevSt === '搁置' || curSt === '搁置') continue;
-            if (prevSt === '假回收' && (curSt === '推进' || curSt === '升级' || curSt === '埋设')) continue;
-            if (prevSt === '回收' && (curSt === '推进' || curSt === '升级' || curSt === '假回收' || curSt === '埋设')) continue;
+            if (!prevSt || !curSt || prevSt === labels.pause || curSt === labels.pause) continue;
+            if (prevSt === labels.fakeClose && (curSt === labels.progress || curSt === labels.upgrade || curSt === labels.seed)) continue;
+            if (prevSt === labels.close && (curSt === labels.progress || curSt === labels.upgrade || curSt === labels.fakeClose || curSt === labels.seed)) continue;
             if (statusOrder[prevSt] && statusOrder[curSt] && statusOrder[curSt] < statusOrder[prevSt]) {
                 warnings.push({
                     type: 'status_regress',
@@ -2136,6 +2177,7 @@ function buildEventMdLine(evt) {
     var tagPart = evt.tag ? '[' + evt.tag + '] ' : '';
     return '- ' + tagPart + serializeEventMeta({
         event: evt.event,
+        secondaryTags: evt.secondaryTags || [],
         chapterNotes: evt.chapterNotes || (evt.chapterNote ? [evt.chapterNote] : []),
         plotLine: evt.plotLine || '',
         plotStatus: evt.plotStatus || '',
@@ -2143,6 +2185,9 @@ function buildEventMdLine(evt) {
         plotAct: evt.plotAct || '',
         conflictLevel: evt.conflictLevel || '',
         mergeInto: evt.mergeInto || '',
+        eventSet: evt.eventSet || '',
+        sourceWorldlineId: evt.sourceWorldlineId || '',
+        sourceEventRef: evt.sourceEventRef || '',
         storyYear: evt.storyYear || '',
         chapterNote: evt.chapterNote || '',
     });
@@ -2150,25 +2195,70 @@ function buildEventMdLine(evt) {
 
 async function deleteEventFromMd(app, plugin, eventOrLineIndex) {
     var fullPath = getTimelineFullPathForExt(plugin);
+    var evt = (typeof eventOrLineIndex === 'object' && eventOrLineIndex) ? eventOrLineIndex : null;
+    var lineIndex = evt ? evt._lineIndex : eventOrLineIndex;
     var file = app.vault.getAbstractFileByPath(fullPath);
-    var lineIndex = typeof eventOrLineIndex === 'object' && eventOrLineIndex ? eventOrLineIndex._lineIndex : eventOrLineIndex;
-    if (!file || lineIndex == null || lineIndex < 0) return false;
+    var activeView = plugin._rwActiveView;
+    // 作者的明确删除操作拥有最高优先级。MD 原文不存在时，只清理插件孤立记录。
+    function purgePluginRecord() {
+        var registry = rwGetEventRegistry(plugin);
+        var entries = Array.isArray(registry[fullPath]) ? registry[fullPath] : [];
+        var id = evt && evt.eventId;
+        var fp = evt ? rwEventFingerprint(evt, fullPath) : '';
+        // eventId 与 fingerprint 任一匹配即可清除；旧版本/迁移数据可能只有其中一项。
+        registry[fullPath] = entries.filter(function(entry) {
+            if (id && entry.id === id) return false;
+            if (fp && entry.fingerprint === fp) return false;
+            return true;
+        });
+        if (activeView && activeView.plugin === plugin && evt) {
+            activeView.timeline = (activeView.timeline || []).filter(function(item) {
+                if (id && item.eventId === id) return false;
+                return !(fp && rwEventFingerprint(item, fullPath) === fp);
+            });
+        }
+    }
+    if (!file) {
+        purgePluginRecord();
+        await rwSaveEventRegistry(plugin);
+        if (activeView && activeView.plugin === plugin) activeView._lastTimelineMd = '';
+        new obsidian.Notice('原文文件已不存在，已清除插件中的孤立事件记录。');
+        return true;
+    }
     var content = await app.vault.read(file);
     var lines = content.split('\n');
-    if (lineIndex >= lines.length) return false;
-    // 若行索引已因其他编辑而过期，不删除当前行，避免误删另一条事件。
-    if (typeof eventOrLineIndex === 'object' && eventOrLineIndex) {
-        var expected = String(eventOrLineIndex.event || '').trim();
-        var actual = String(lines[lineIndex] || '');
+    if (evt) {
+        var expected = String(evt.event || '').trim();
+        var actual = (lineIndex != null && lineIndex >= 0) ? String(lines[lineIndex] || '') : '';
         if (!expected || actual.indexOf(expected) === -1) {
-            new obsidian.Notice('⚠️ 事件位置已变化，未执行删除。请刷新时间线后重试。', 7000);
-            return false;
+            var matches = [];
+            for (var li = 0; li < lines.length; li++) {
+                if (expected && String(lines[li] || '').indexOf(expected) >= 0 && /^\s*[-*]\s+/.test(lines[li])) matches.push(li);
+            }
+            if (matches.length) {
+                var origin = lineIndex == null ? 0 : lineIndex;
+                matches.sort(function(a,b) { return Math.abs(a-origin)-Math.abs(b-origin); });
+                lineIndex = matches[0];
+            } else {
+                purgePluginRecord();
+                await rwSaveEventRegistry(plugin);
+                if (activeView && activeView.plugin === plugin) activeView._lastTimelineMd = content;
+                new obsidian.Notice('原文中已找不到该事件，已清除插件残留记录；未修改其他 Markdown 内容。');
+                return true;
+            }
         }
+    }
+    if (lineIndex == null || lineIndex < 0 || lineIndex >= lines.length) {
+        purgePluginRecord();
+        await rwSaveEventRegistry(plugin);
+        new obsidian.Notice('事件原文不存在，已清除插件残留记录。');
+        return true;
     }
     lines.splice(lineIndex, 1);
     var nextContent = lines.join('\n');
     await app.vault.modify(file, nextContent);
-    var activeView = plugin._rwActiveView;
+    purgePluginRecord();
+    await rwSaveEventRegistry(plugin);
     if (activeView && activeView.plugin === plugin) activeView._lastTimelineMd = nextContent;
     return true;
 }
@@ -2185,8 +2275,22 @@ async function updateEventInMd(app, plugin, originalEvt, newEvt) {
         new obsidian.Notice('⚠️ 事件位置已变化，未执行修改。请刷新时间线后重试。', 7000);
         return false;
     }
-    lines.splice(originalEvt._lineIndex, 1);
-    var nextContent = rwInsertTimelineEventByCalendarOrder(lines.join('\n'), newEvt);
+    // 仅当纪年/月份/卷章分组没有变化时原位替换。调整情节线、标签、状态等
+    // 元数据不得改变同年事件顺序；作者主动修改时间或分组时，才重新定位事件。
+    var replacement = buildEventMdLine(newEvt);
+    if (!replacement || replacement === '- ') return false;
+    var samePlacement = String(originalEvt.year || '') === String(newEvt.year || '') &&
+        String(originalEvt.month || '') === String(newEvt.month || '') &&
+        String(originalEvt.volume || '') === String(newEvt.volume || '') &&
+        String(originalEvt.storyYear || '') === String(newEvt.storyYear || '');
+    var nextContent;
+    if (samePlacement) {
+        lines[originalEvt._lineIndex] = replacement;
+        nextContent = lines.join('\n');
+    } else {
+        lines.splice(originalEvt._lineIndex, 1);
+        nextContent = rwInsertTimelineEventByCalendarOrder(lines.join('\n'), newEvt);
+    }
     await app.vault.modify(file, nextContent);
     var activeView = plugin._rwActiveView;
     if (activeView && activeView.plugin === plugin) activeView._lastTimelineMd = nextContent;
@@ -2194,8 +2298,8 @@ async function updateEventInMd(app, plugin, originalEvt, newEvt) {
     return true;
 }
 
-function getPlotLineGroup(timeline, plotLineName) {
-    var groups = getPlotLineGroups(timeline);
+function getPlotLineGroup(timeline, plotLineName, settings) {
+    var groups = getPlotLineGroups(timeline, settings);
     for (var i = 0; i < groups.length; i++) {
         if (groups[i].plotLine === plotLineName) return groups[i];
     }
@@ -2214,6 +2318,16 @@ function buildCharMdBlock(name, fields, relations, intimacyHistory) {
 }
 
 async function appendCharToMd(app, plugin, name, fields) {
+    var activeWl = plugin && plugin.settings && Array.isArray(plugin.settings.timelineWorldlines) ? plugin.settings.timelineWorldlines.find(function(w){return w.id === plugin.settings.activeTimelineWorldlineId;}) : null;
+    if (activeWl && activeWl.id !== 'worldline-original') {
+        var dynamicFields=['阵营','身份','职位','组织','出生','出生时间','死亡','死亡时间','正文首次出现','首次出场'];
+        var copied=Object.assign({},fields||{});
+        if(!plugin.settings.worldlineCharacterOverrides)plugin.settings.worldlineCharacterOverrides={};
+        if(!plugin.settings.worldlineCharacterOverrides[activeWl.id])plugin.settings.worldlineCharacterOverrides[activeWl.id]={};
+        plugin.settings.worldlineCharacterOverrides[activeWl.id][name]={};
+        dynamicFields.forEach(function(k){if(Object.prototype.hasOwnProperty.call(copied,k)){plugin.settings.worldlineCharacterOverrides[activeWl.id][name][k]=String(copied[k]||'');delete copied[k];}});
+        fields=copied; await plugin.saveSettings();
+    }
     var path = plugin.settings.charFile ? resolveCharPathForExt(plugin) : '人物索引.md';
     var fullPath = getCharFullPathForExt(plugin);
     var block = buildCharMdBlock(name, fields);
@@ -2231,7 +2345,81 @@ async function appendCharToMd(app, plugin, name, fields) {
     }
 }
 
+async function deleteCharacterAndLinkedEvents(app, plugin, view, name, deleteLinkedEvents) {
+    var charPath = getCharFullPathForExt(plugin);
+    var charFile = app.vault.getAbstractFileByPath(charPath);
+    if (!charFile) throw new Error('人物索引文件不存在');
+    var charText = await app.vault.read(charFile);
+    var lines = charText.split('\n'), out = [], inTarget = false, found = false;
+    for (var i = 0; i < lines.length; i++) {
+        var t = String(lines[i] || '').trim();
+        if (t.indexOf('## ') === 0 && t.indexOf('### ') !== 0) {
+            if (inTarget) inTarget = false;
+            if (t === '## ' + name) { inTarget = true; found = true; continue; }
+        }
+        if (!inTarget) out.push(lines[i]);
+    }
+    if (!found) throw new Error('没有找到人物「' + name + '」的档案标题');
+    var timelineDeleted = 0;
+    if (deleteLinkedEvents) {
+        // 人物档案是跨世界线共享的基础资料，因此删除人物时逐条检查所有世界线，
+        // 清理事件行，避免切换到另一条世界线后仍残留已删除人物的事件。
+        var worlds = rwGetWorldlines(plugin).slice();
+        var activeId = plugin.settings.activeTimelineWorldlineId;
+        var visitedPaths = {};
+        try {
+            for (var wi = 0; wi < worlds.length; wi++) {
+                plugin.settings.activeTimelineWorldlineId = worlds[wi].id;
+                var timelinePath = getTimelineFullPathForExt(plugin);
+                if (visitedPaths[timelinePath]) continue;
+                visitedPaths[timelinePath] = true;
+                var timelineFile = app.vault.getAbstractFileByPath(timelinePath);
+                if (!timelineFile) continue;
+                var timelineText = await app.vault.read(timelineFile);
+                var tlines = timelineText.split('\n');
+                // 同步清理事件注册表中的身份/故事设计记录，避免已删除事件留下孤立元数据。
+                var parsedBeforeDelete = parseTimelineExtended(timelineText, plugin.settings);
+                var removedIds = [];
+                parsedBeforeDelete.forEach(function(evt) { if (String(evt.event || '').indexOf(name) >= 0 && evt.eventId) removedIds.push(evt.eventId); });
+                // 仅删除事件正文中明确出现该人物姓名的事件行；标题和月份结构保留。
+                var removedHere = 0;
+                var nextLines = tlines.filter(function(line) {
+                    var isEvent = /^\s*-\s+/.test(line);
+                    var contains = isEvent && String(line).indexOf(name) >= 0;
+                    if (contains) removedHere++;
+                    return !contains;
+                });
+                if (removedHere) {
+                    await app.vault.modify(timelineFile, nextLines.join('\n'));
+                    timelineDeleted += removedHere;
+                    if (view && worlds[wi].id === activeId) view._lastTimelineMd = nextLines.join('\n');
+                    var registry = rwGetEventRegistry(plugin);
+                    if (Array.isArray(registry[timelinePath])) registry[timelinePath] = registry[timelinePath].filter(function(entry) { return removedIds.indexOf(entry.id) < 0; });
+                }
+            }
+        } finally {
+            plugin.settings.activeTimelineWorldlineId = activeId;
+        }
+    }
+    await app.vault.modify(charFile, out.join('\n'));
+    if (plugin.settings.worldlineCharacterOverrides) Object.keys(plugin.settings.worldlineCharacterOverrides).forEach(function(wid) { delete plugin.settings.worldlineCharacterOverrides[wid][name]; });
+    if (Array.isArray(plugin.settings.orgMemberships)) plugin.settings.orgMemberships = plugin.settings.orgMemberships.filter(function(r) { return r.character !== name; });
+    await rwSaveEventRegistry(plugin);
+    await plugin.saveSettings();
+    if (view) { view._lastCharMd = out.join('\n'); await view.loadAllData({ silent: true }); }
+    return { timelineDeleted: timelineDeleted };
+}
+
 async function updateCharInMd(app, plugin, name, fields) {
+    var activeWl = plugin && plugin.settings && Array.isArray(plugin.settings.timelineWorldlines) ? plugin.settings.timelineWorldlines.find(function(w){return w.id === plugin.settings.activeTimelineWorldlineId;}) : null;
+    var dynamicFields = ['阵营','身份','职位','组织','出生','出生时间','死亡','死亡时间','正文首次出现','首次出场'];
+    if (activeWl && activeWl.id !== 'worldline-original') {
+        if (!plugin.settings.worldlineCharacterOverrides) plugin.settings.worldlineCharacterOverrides = {};
+        if (!plugin.settings.worldlineCharacterOverrides[activeWl.id]) plugin.settings.worldlineCharacterOverrides[activeWl.id] = {};
+        if (!plugin.settings.worldlineCharacterOverrides[activeWl.id][name]) plugin.settings.worldlineCharacterOverrides[activeWl.id][name] = {};
+        dynamicFields.forEach(function(k){if(Object.prototype.hasOwnProperty.call(fields,k)) plugin.settings.worldlineCharacterOverrides[activeWl.id][name][k]=String(fields[k]||'');});
+        await plugin.saveSettings();
+    }
     var fullPath = getCharFullPathForExt(plugin);
     var file = app.vault.getAbstractFileByPath(fullPath);
     if (!file) return false;
@@ -2252,7 +2440,7 @@ async function updateCharInMd(app, plugin, name, fields) {
                 inTarget = true;
                 out.push(line);
                 for (var k2 in fields) {
-                    if (fields.hasOwnProperty(k2) && fields[k2]) out.push('- ' + k2 + '：' + fields[k2]);
+                    if (fields.hasOwnProperty(k2) && fields[k2] && !(activeWl && activeWl.id !== 'worldline-original' && dynamicFields.indexOf(k2) >= 0)) out.push('- ' + k2 + '：' + fields[k2]);
                 }
                 replaced = true;
                 continue;
@@ -2270,7 +2458,14 @@ async function updateCharInMd(app, plugin, name, fields) {
                 out.push(line);
                 continue;
             }
-            if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) continue;
+            if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+                if (activeWl && activeWl.id !== 'worldline-original') {
+                    var oldFieldLine=trimmed.replace(/^[-*]\s*/,''), oldSep=oldFieldLine.indexOf('：'); if(oldSep<0) oldSep=oldFieldLine.indexOf(':');
+                    var oldKey=oldSep>=0?oldFieldLine.substring(0,oldSep).trim():'';
+                    if(dynamicFields.indexOf(oldKey)>=0) out.push(line);
+                }
+                continue;
+            }
             out.push(line);
             continue;
         }
@@ -2303,7 +2498,138 @@ function getCharFullPathForExt(plugin) {
     return folder ? folder + '/' + fname : fname;
 }
 
+// ========== 多世界线时间管理（3.49.0）==========
+function rwGetWorldlines(plugin) {
+    if (!plugin.settings.timelineWorldlines || !Array.isArray(plugin.settings.timelineWorldlines)) plugin.settings.timelineWorldlines = [];
+    return plugin.settings.timelineWorldlines;
+}
+function rwGetActiveWorldline(plugin) {
+    var list = rwGetWorldlines(plugin);
+    var id = plugin.settings.activeTimelineWorldlineId;
+    var found = list.find(function(w){ return w.id === id; });
+    if (!found && list.length) { found = list[0]; plugin.settings.activeTimelineWorldlineId = found.id; }
+    return found || null;
+}
+function rwEnsureWorldlineSettings(plugin) {
+    var list = rwGetWorldlines(plugin);
+    if (!list.length) {
+        var legacyPath = resolveDataFilePath(plugin, 'timelineFolder', 'timelineFile', '时间线.md');
+        list.push({ id:'worldline-original', name:'原始世界线', type:'independent', color:'#4a90e2', timelinePath:legacyPath, currentTimePoint:String(plugin.settings.currentTimePoint || ''), isDefault:true, createdAt:Date.now() });
+        plugin.settings.activeTimelineWorldlineId = 'worldline-original';
+    }
+    var active = rwGetActiveWorldline(plugin);
+    if (active && !active.timelinePath) active.timelinePath = resolveDataFilePath(plugin, 'timelineFolder', 'timelineFile', '时间线.md');
+    return active;
+}
+function rwGetTimelinePath(plugin) {
+    var active = rwEnsureWorldlineSettings(plugin);
+    return active && active.timelinePath ? normalizeVaultPath(active.timelinePath) : resolveDataFilePath(plugin, 'timelineFolder', 'timelineFile', '时间线.md');
+}
+function rwCaptureWorldlineChapterTimes(plugin, worldlineId) {
+    var lib=plugin.settings && plugin.settings.chapterLibrary;
+    if(!lib || !Array.isArray(lib.chapters)) return;
+    if(!plugin.settings.worldlineChapterTimes) plugin.settings.worldlineChapterTimes={};
+    var map={}; lib.chapters.forEach(function(ch){if(ch && ch.path) map[ch.path]=String(ch.storyTime||'');});
+    plugin.settings.worldlineChapterTimes[worldlineId || plugin.settings.activeTimelineWorldlineId]=map;
+}
+function rwApplyWorldlineChapterTimes(plugin, worldlineId) {
+    var lib=plugin.settings && plugin.settings.chapterLibrary;
+    if(!lib || !Array.isArray(lib.chapters)) return;
+    var map=plugin.settings.worldlineChapterTimes && plugin.settings.worldlineChapterTimes[worldlineId];
+    if(!map) return;
+    lib.chapters.forEach(function(ch){if(ch && ch.path && Object.prototype.hasOwnProperty.call(map,ch.path)) ch.storyTime=map[ch.path];});
+}
+
+async function rwSwitchWorldline(view, id) {
+    var plugin = view.plugin, list = rwGetWorldlines(plugin), next = list.find(function(w){return w.id === id;});
+    if (!next || next.id === plugin.settings.activeTimelineWorldlineId) return;
+    var current = rwGetActiveWorldline(plugin);
+    if (current) { rwCaptureWorldlineChapterTimes(plugin,current.id); current.currentTimePoint = String(plugin.settings.currentTimePoint || ''); }
+    plugin.settings.activeTimelineWorldlineId = next.id;
+    rwApplyWorldlineChapterTimes(plugin,next.id);
+    plugin.settings.currentTimePoint = String(next.currentTimePoint || '');
+    view.selectedTag=''; view._secondaryTagFilter=''; view._plotLineFilter=''; view._yearSearchText='';
+    await plugin.saveSettings();
+    await view.loadAllData({silent:true});
+    view.render();
+    new obsidian.Notice('已切换至「' + next.name + '」');
+}
+async function rwCreateWorldline(view, mode) {
+    var plugin = view.plugin, list = rwGetWorldlines(plugin);
+    var name = (prompt('请输入新世界线名称：', mode === 'branch' ? '分支世界线' : '新世界线') || '').trim();
+    if (!name) return;
+    if (list.some(function(w){return w.name === name;})) { new obsidian.Notice('世界线名称已存在'); return; }
+    var id = 'worldline-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,7);
+    var base = rwGetActiveWorldline(plugin);
+    var basePath = rwGetTimelinePath(plugin);
+    var folder = basePath.indexOf('/') >= 0 ? basePath.substring(0, basePath.lastIndexOf('/') + 1) : '';
+    var safeName = name.replace(/[\\/:*?"<>|]/g, '-');
+    var path = folder + safeName + '.md';
+    if (view.app.vault.getAbstractFileByPath(path)) { new obsidian.Notice('目标文件已存在，为避免覆盖已取消创建'); return; }
+    var initial = '# ' + name + '\n';
+    if (mode === 'branch') {
+        var source = view.app.vault.getAbstractFileByPath(basePath);
+        if (source) initial = await view.app.vault.read(source);
+    }
+    var dir = path.includes('/') ? path.substring(0,path.lastIndexOf('/')) : '';
+    if (dir && !await view.app.vault.adapter.exists(dir)) await view.app.vault.createFolder(dir).catch(function(){});
+    await view.app.vault.create(path, initial);
+    if (mode === 'branch') {
+        try {
+            var safeId=id.replace(/[^a-zA-Z0-9_-]/g,'_');
+            var srcRel=getDataPath(plugin), dstRel=plugin.app.vault.configDir+'/plugins/'+plugin.manifest.id+'/relations-data.'+safeId+'.json';
+            if(await plugin.app.vault.adapter.exists(srcRel)) await plugin.app.vault.adapter.write(dstRel,await plugin.app.vault.adapter.read(srcRel));
+            var srcHistory=rwGetIntimacyHistoryPath(plugin), dstHistory=plugin.app.vault.configDir+'/plugins/'+plugin.manifest.id+'/intimacy_history.'+safeId+'.json';
+            if(await plugin.app.vault.adapter.exists(srcHistory)) await plugin.app.vault.adapter.write(dstHistory,await plugin.app.vault.adapter.read(srcHistory));
+            if(plugin.settings.timelineEventRegistry && Array.isArray(plugin.settings.timelineEventRegistry[basePath])) plugin.settings.timelineEventRegistry[path]=JSON.parse(JSON.stringify(plugin.settings.timelineEventRegistry[basePath]));
+        } catch(copyErr){console.warn('[Relation Weaver] 分支历史快照复制失败',copyErr);}
+    }
+    var rec = { id:id, name:name, type:mode === 'branch' ? 'branch' : 'independent', color:['#4a90e2','#2eaa78','#a477d5','#d18a42','#d66a83'][list.length % 5], timelinePath:path, currentTimePoint: mode === 'branch' ? String(plugin.settings.currentTimePoint || '') : '', parentWorldlineId: mode === 'branch' && base ? base.id : '', branchPoint: mode === 'branch' ? String(plugin.settings.currentTimePoint || '') : '', createdAt:Date.now(), isDefault:false };
+    if (mode === 'branch' && plugin.settings.worldlineCharacterOverrides && base && plugin.settings.worldlineCharacterOverrides[base.id]) {
+        if (!plugin.settings.worldlineCharacterOverrides[id]) plugin.settings.worldlineCharacterOverrides[id] = JSON.parse(JSON.stringify(plugin.settings.worldlineCharacterOverrides[base.id]));
+        var branchSeedFields=['阵营','身份','职位','组织','出生','出生时间','死亡','死亡时间','正文首次出现','首次出场'];
+        (view.chars||[]).forEach(function(ch){if(!plugin.settings.worldlineCharacterOverrides[id][ch.name]){var f={};branchSeedFields.forEach(function(k){if(ch.fields&&Object.prototype.hasOwnProperty.call(ch.fields,k))f[k]=String(ch.fields[k]||'');});plugin.settings.worldlineCharacterOverrides[id][ch.name]=f;}});
+    } else {
+        // 新世界线以创建时的人物状态作为初始快照，后续修改只写入该世界线覆盖层。
+        if (!plugin.settings.worldlineCharacterOverrides) plugin.settings.worldlineCharacterOverrides = {};
+        var seedFields=['阵营','身份','职位','组织','出生','出生时间','死亡','死亡时间','正文首次出现','首次出场'];
+        var seed={}; (view.chars||[]).forEach(function(ch){var fields={};seedFields.forEach(function(k){if(ch.fields && Object.prototype.hasOwnProperty.call(ch.fields,k)) fields[k]=String(ch.fields[k]||'');});seed[ch.name]=fields;});
+        plugin.settings.worldlineCharacterOverrides[id]=seed;
+    }
+    if(!plugin.settings.worldlineChapterTimes) plugin.settings.worldlineChapterTimes={};
+    rwCaptureWorldlineChapterTimes(plugin,base ? base.id : plugin.settings.activeTimelineWorldlineId);
+    plugin.settings.worldlineChapterTimes[id]=JSON.parse(JSON.stringify(plugin.settings.worldlineChapterTimes[base ? base.id : plugin.settings.activeTimelineWorldlineId] || {}));
+    list.push(rec);
+    await plugin.saveSettings();
+    await rwSwitchWorldline(view,id);
+}
+function rwRenderWorldlineCompare(view, container) {
+    var list = rwGetWorldlines(view.plugin);
+    var panel = container.createEl('div',{cls:'rw-worldline-compare'});
+    panel.createEl('h3',{text:'多世界线事件对照'});
+    var desc = panel.createEl('p',{text:'各世界线独立存储；此处按时间标题汇总事件，便于观察历史差异。',cls:'my-char-muted'});
+    var grid = panel.createEl('div',{cls:'rw-worldline-compare-grid'});
+    list.forEach(function(w){
+        var card = grid.createEl('section',{cls:'rw-worldline-compare-card'});
+        card.createEl('h4',{text:w.name});
+        card.createEl('small',{text:w.type === 'branch' ? '分支世界线' : '独立世界线'});
+        var file = view.app.vault.getAbstractFileByPath(w.timelinePath);
+        if (!file) { card.createEl('p',{text:'暂无时间线文件'}); return; }
+        // Current loaded timeline is reused for active line; other files are loaded asynchronously below.
+        if (w.id === view.plugin.settings.activeTimelineWorldlineId) {
+            (view.timeline || []).slice(0,30).forEach(function(e){ var row=card.createEl('div',{cls:'rw-worldline-compare-event'}); row.createEl('b',{text:e.year || '未标注'}); row.createEl('span',{text:e.event || ''}); });
+        } else {
+            view.app.vault.read(file).then(function(content){
+                var events = parseTimelineExtended(content, view.plugin.settings);
+                events.slice(0,30).forEach(function(e){ var row=card.createEl('div',{cls:'rw-worldline-compare-event'}); row.createEl('b',{text:e.year || '未标注'}); row.createEl('span',{text:e.event || ''}); });
+                if (!events.length) card.createEl('p',{text:'暂无事件',cls:'my-char-muted'});
+            });
+        }
+    });
+}
+
 function getTimelineFullPathForExt(plugin) {
+    if (plugin && plugin.settings && plugin.settings.timelineWorldlines) return rwGetTimelinePath(plugin);
     var folder = (plugin.settings.timelineFolder || plugin.settings.charFolder || '').trim();
     if (!folder) {
         var f = plugin.app.workspace.getActiveFile();
@@ -2464,7 +2790,7 @@ function performGlobalSearch(view, query, moduleFilter) {
     var timeline = view.timeline.filter(function(e) {
         return [e.event, e.year, e.month, e.plotLine, e.tag, e.volume, e.chapterNote, (e.chapterNotes || []).join(' ')].some(function(v) { return rwSearchText(v).indexOf(q) !== -1; });
     });
-    var plotLines = getPlotLineGroups(view.timeline).filter(function(g) {
+    var plotLines = getPlotLineGroups(view.timeline, view.plugin.settings).filter(function(g) {
         return rwSearchText(g.plotLine).indexOf(q) !== -1 || g.events.some(function(e) { return rwSearchText(e.event).indexOf(q) !== -1; });
     });
     var factions = (view.factions || []).filter(function(f) { return rwSearchText((f.name || '') + ' ' + (f.desc || '')).indexOf(q) !== -1; });
@@ -2644,6 +2970,17 @@ function auditFirstAppearSync(view) {
 }
 
 async function setCharFieldInMd(app, plugin, charName, fieldName, fieldValue) {
+    // 非原始世界线的动态人物字段写入世界线覆盖层，避免重生线改写原始人物档案。
+    var activeWl = plugin && plugin.settings && Array.isArray(plugin.settings.timelineWorldlines) ? plugin.settings.timelineWorldlines.find(function(w){return w.id === plugin.settings.activeTimelineWorldlineId;}) : null;
+    var dynamicFields = ['阵营','身份','职位','组织','出生','出生时间','死亡','死亡时间','正文首次出现','首次出场'];
+    if (activeWl && activeWl.id !== 'worldline-original' && dynamicFields.indexOf(String(fieldName || '').trim()) >= 0) {
+        if (!plugin.settings.worldlineCharacterOverrides) plugin.settings.worldlineCharacterOverrides = {};
+        if (!plugin.settings.worldlineCharacterOverrides[activeWl.id]) plugin.settings.worldlineCharacterOverrides[activeWl.id] = {};
+        if (!plugin.settings.worldlineCharacterOverrides[activeWl.id][charName]) plugin.settings.worldlineCharacterOverrides[activeWl.id][charName] = {};
+        plugin.settings.worldlineCharacterOverrides[activeWl.id][charName][fieldName] = String(fieldValue || '');
+        await plugin.saveSettings();
+        return true;
+    }
     var fullPath = getCharFullPathForExt(plugin);
     var file = app.vault.getAbstractFileByPath(fullPath);
     if (!file) return false;
@@ -2814,6 +3151,7 @@ var novelExt = {
     buildEventMdLine: buildEventMdLine,
     appendCharToMd: appendCharToMd,
     updateCharInMd: updateCharInMd,
+        deleteCharacterAndLinkedEvents: deleteCharacterAndLinkedEvents,
     appendEventToMd: appendEventToMd,
     updateEventInMd: updateEventInMd,
     deleteEventFromMd: deleteEventFromMd,
@@ -3201,6 +3539,42 @@ function getEventTags(plugin) {
     return result;
 }
 
+function getSecondaryEventTags(plugin) {
+    var defaults = [
+        {value:'人物出场',label:'人物出场',color:'#3b82f6'},
+        {value:'人物死亡',label:'人物死亡',color:'#64748b'},
+        {value:'身份揭露',label:'身份揭露',color:'#a855f7'},
+        {value:'权力争斗',label:'权力争斗',color:'#dc6b55'},
+        {value:'结盟',label:'结盟',color:'#2eaa78'},
+        {value:'背叛',label:'背叛',color:'#d18a42'},
+        {value:'感情发展',label:'感情发展',color:'#d66a83'},
+        {value:'伏笔埋设',label:'伏笔埋设',color:'#8b7cc8'},
+        {value:'伏笔回收',label:'伏笔回收',color:'#569b88'},
+        {value:'主线推进',label:'主线推进',color:'#4a90e2'}
+    ];
+    var saved = plugin.settings.customEventSecondaryTags;
+    if (!Array.isArray(saved)) return defaults;
+    return saved.map(function(t){return normalizeEventTag(t);}).filter(Boolean);
+}
+function rwOpenSecondaryTagManager(plugin, onSave) {
+    var modal = new obsidian.Modal(plugin.app);
+    modal.onOpen = function(){
+        var el=this.contentEl; el.empty(); el.createEl('h3',{text:'管理次标签'});
+        el.createEl('p',{text:'次标签用于细分事件，可与主标签独立维护。多个标签用逗号分隔。',cls:'my-char-muted'});
+        var input=el.createEl('textarea',{cls:'my-char-form-input'}); input.rows=5; input.style.width='100%';
+        input.value=getSecondaryEventTags(plugin).map(function(t){return t.value;}).join('，');
+        var actions=el.createEl('div',{cls:'my-char-form-actions'});
+        var save=actions.createEl('button',{text:'保存次标签',cls:'my-char-view-btn'});
+        save.addEventListener('click',async function(){
+            var names=Array.from(new Set(input.value.split(/[、，,;；\n]+/).map(function(x){return x.trim();}).filter(Boolean)));
+            plugin.settings.customEventSecondaryTags=names.map(function(n,i){return {value:n,label:n,color:['#3b82f6','#2eaa78','#a855f7','#d18a42','#d66a83','#64748b'][i%6]};});
+            await plugin.saveSettings(); if(onSave) onSave(); modal.close(); new obsidian.Notice('次标签已保存，共 '+names.length+' 个');
+        });
+        actions.createEl('button',{text:'取消'}).addEventListener('click',function(){modal.close();});
+    };
+    modal.onClose=function(){this.contentEl.empty();}; modal.open();
+}
+
 function getTagMap(plugin) {
     if (!plugin._tagMapCache) {
         var map = {};
@@ -3318,10 +3692,19 @@ function chooseTimelineEvents(app, events, selectedIds) {
     });
 }
 
+function rwGetIntimacyHistoryPath(plugin) {
+    var dir=plugin.app.vault.configDir + '/plugins/' + plugin.manifest.id;
+    var active=plugin.settings && Array.isArray(plugin.settings.timelineWorldlines) ? plugin.settings.timelineWorldlines.find(function(w){return w.id===plugin.settings.activeTimelineWorldlineId;}) : null;
+    var suffix=active && active.id && active.id!=='worldline-original' ? '.'+String(active.id).replace(/[^a-zA-Z0-9_-]/g,'_') : '';
+    return dir + '/intimacy_history' + suffix + '.json';
+}
+
 function getDataPath(plugin) {
-    // Obsidian Plugin.loadData/saveData 使用插件目录下的 data.json 保存 settings。
-    // 关系/阵营数据必须独立存放，避免两套数据互相覆盖。
-    return plugin.app.vault.configDir + '/plugins/' + plugin.manifest.id + '/relations-data.json';
+    // 原始世界线沿用旧文件，保证升级无损；新增世界线使用独立关系数据文件。
+    var base = plugin.app.vault.configDir + '/plugins/' + plugin.manifest.id + '/relations-data';
+    var active = plugin.settings && Array.isArray(plugin.settings.timelineWorldlines) ? plugin.settings.timelineWorldlines.find(function(w){return w.id === plugin.settings.activeTimelineWorldlineId;}) : null;
+    var suffix = active && active.id && active.id !== 'worldline-original' ? '.' + String(active.id).replace(/[^a-zA-Z0-9_-]/g,'_') : '';
+    return base + suffix + '.json';
 }
 
 async function loadSavedData(plugin) {
@@ -3526,6 +3909,7 @@ function parseCharsFromContent(content) {
 }
 
 function getTimelineFullPath(plugin) {
+    if (plugin && plugin.settings && plugin.settings.timelineWorldlines) return rwGetTimelinePath(plugin);
     return resolveDataFilePath(plugin, 'timelineFolder', 'timelineFile', '时间线.md');
 }
 
@@ -5557,6 +5941,32 @@ var MyView = /** @class */ (function (_super) {
             self.loadAllData({ silent: true }).then(function () { self.render(); }).catch(function (e) { showUserError('刷新数据失败', e); }).finally(function () { refreshBtn.disabled = false; });
         });
 
+        // 全局世界线工作栏：位于所有模块之上，避免世界线选择只存在于时间线 Tab。
+        rwEnsureWorldlineSettings(this.plugin);
+        var globalWl = rwGetActiveWorldline(this.plugin);
+        var globalWlBar = container.createEl('div', { cls: 'rw-global-worldline-bar' });
+        globalWlBar.createEl('span', { text: '当前工作世界线', cls: 'rw-global-worldline-label' });
+        var globalWlSelect = globalWlBar.createEl('select', { cls: 'my-char-select rw-global-worldline-select' });
+        rwGetWorldlines(this.plugin).forEach(function(w) {
+            var op = globalWlSelect.createEl('option', { text: w.name + (w.type === 'branch' ? ' · 分支' : ''), value: w.id });
+            if (globalWl && w.id === globalWl.id) op.selected = true;
+        });
+        globalWlSelect.addEventListener('change', function() { rwSwitchWorldline(self, globalWlSelect.value); });
+        globalWlBar.createEl('span', { text: '当前时间点', cls: 'rw-global-worldline-label' });
+        var globalTimeInput = globalWlBar.createEl('input', { type: 'text', cls: 'my-char-form-input rw-global-worldline-time', attr: { placeholder: '设置当前故事时间' } });
+        globalTimeInput.value = String(this.plugin.settings.currentTimePoint || '');
+        var globalTimeSave = globalWlBar.createEl('button', { text: '设为当前时间', cls: 'my-char-btn-ghost my-char-btn-sm' });
+        globalTimeSave.addEventListener('click', async function() {
+            var active = rwGetActiveWorldline(self.plugin);
+            var value = globalTimeInput.value.trim();
+            self.plugin.settings.currentTimePoint = value;
+            if (active) active.currentTimePoint = value;
+            await self.plugin.saveSettings();
+            self.render();
+            new obsidian.Notice('当前工作世界线时间已更新');
+        });
+        if (globalWl) globalWlBar.createEl('small', { text: globalWl.type === 'branch' ? '分支世界线' : '独立世界线', cls: 'my-char-muted rw-global-worldline-type' });
+
         var content = container.createEl('div', { cls: this._workspaceSplit ? 'my-char-view-content rw-workspace-split' : 'my-char-view-content' });
         if (this._workspaceSplit && !needsEmptyStateGuide(this)) {
             content.classList.add('rw-workspace-layout-' + (this._workspaceLayoutMode || 'fixed'));
@@ -6008,6 +6418,7 @@ var MyView = /** @class */ (function (_super) {
     MyView.prototype.loadAllData = async function (options) {
         options = options || {};
         var silent = !!options.silent;
+        rwEnsureWorldlineSettings(this.plugin);
         
         if (this.plugin.settings.charFile) {
             var fullCharPath = getCharFullPath(this.plugin);
@@ -6016,6 +6427,9 @@ var MyView = /** @class */ (function (_super) {
                 var charContent = await this.app.vault.read(charFile);
                 this._lastCharMd = charContent;
                 this.chars = this.parseChars(charContent);
+                var activeWlForChars=rwGetActiveWorldline(this.plugin);
+                var charOverrides=this.plugin.settings.worldlineCharacterOverrides && activeWlForChars ? this.plugin.settings.worldlineCharacterOverrides[activeWlForChars.id] : null;
+                if(charOverrides){this.chars.forEach(function(ch){var ov=charOverrides[ch.name];if(ov){if(!ch.fields)ch.fields={};Object.keys(ov).forEach(function(k){ch.fields[k]=ov[k];});}});}
             } else if (!silent) {
                 console.log('人物文件未找到:', fullCharPath);
                 new obsidian.Notice('未找到人物文件: ' + fullCharPath);
@@ -6032,16 +6446,21 @@ var MyView = /** @class */ (function (_super) {
                 rwApplyChapterStoryTimes(this);
                 await rwReconcileTimelineEventRegistry(this, fullTimelinePath);
                 await rwStripLegacyEventIdentityMetadata(this, timelineFile, timelineContent);
-            } else if (!silent) {
-                console.log('时间线文件未找到:', fullTimelinePath);
-                new obsidian.Notice('未找到时间线文件: ' + fullTimelinePath);
+            } else {
+                // 原文文件被作者删除/移动时，不能继续显示上一次加载的内存事件。
+                this.timeline = [];
+                this._lastTimelineMd = '';
+                if (!silent) {
+                    console.log('时间线文件未找到:', fullTimelinePath);
+                    new obsidian.Notice('未找到时间线文件: ' + fullTimelinePath);
+                }
             }
         }
 
         var savedData = await loadSavedData(this.plugin);
         // 亲密度变化历史：优先人物 MD，其次 JSON 备份
         try {
-            var historyPath = this.plugin.app.vault.configDir + '/plugins/' + this.plugin.manifest.id + '/intimacy_history.json';
+            var historyPath = rwGetIntimacyHistoryPath(this.plugin);
             if (await this.plugin.app.vault.adapter.exists(historyPath)) {
                 var histContent = await this.plugin.app.vault.adapter.read(historyPath);
                 this.plugin._intimacyHistory = JSON.parse(histContent);
@@ -6278,7 +6697,8 @@ var MyView = /** @class */ (function (_super) {
         var currentTimeStr = settings.currentTimePoint || '';
         var filterOn = settings.timeFilterEnabled !== false;
         var bar = container.createEl('div', { cls: 'my-char-global-time-bar' });
-        bar.createEl('span', { text: '⏱️ 故事进度：', cls: 'my-char-time-label' });
+        var activeWorldlineForBar = rwGetActiveWorldline(this.plugin);
+        bar.createEl('span', { text: '🌐 ' + (activeWorldlineForBar ? activeWorldlineForBar.name : '当前世界线') + ' · ⏱️ 故事进度：', cls: 'my-char-time-label' });
         var valueSpan = bar.createEl('span', {
             text: currentTimeStr || '（未设置 — 在下方选择或输入）',
             cls: 'my-char-time-value' + (currentTimeStr ? ' is-set' : '')
@@ -6292,6 +6712,7 @@ var MyView = /** @class */ (function (_super) {
         }
         select.addEventListener('change', async function() {
             settings.currentTimePoint = select.value;
+            var activeWl = rwGetActiveWorldline(self.plugin); if (activeWl) activeWl.currentTimePoint = settings.currentTimePoint;
             await self.plugin.saveSettings();
             self.render();
         });
@@ -6302,6 +6723,7 @@ var MyView = /** @class */ (function (_super) {
         input.addEventListener('keydown', async function(e) {
             if (e.key === 'Enter') {
                 settings.currentTimePoint = input.value.trim();
+                var activeWl = rwGetActiveWorldline(self.plugin); if (activeWl) activeWl.currentTimePoint = settings.currentTimePoint;
                 await self.plugin.saveSettings();
                 self.render();
             }
@@ -6310,6 +6732,7 @@ var MyView = /** @class */ (function (_super) {
         nextBtn.addEventListener('click', async function() {
             var next = novelExt.getNextTimePoint(self.timeline, currentTimeStr);
             settings.currentTimePoint = next;
+            var activeWl = rwGetActiveWorldline(self.plugin); if (activeWl) activeWl.currentTimePoint = next;
             await self.plugin.saveSettings();
             new obsidian.Notice('时间点 → ' + next);
             self.render();
@@ -8081,7 +8504,7 @@ var MyView = /** @class */ (function (_super) {
         }
         lines.push('');
 
-        var unredeemed = novelExt.getUnredeemedPlotLines(this.timeline);
+        var unredeemed = novelExt.getUnredeemedPlotLines(this.timeline, this.plugin.settings);
         lines.push('## 🧵 未回收伏笔 / 情节线');
         lines.push('');
         if (unredeemed.length === 0) {
@@ -8094,7 +8517,7 @@ var MyView = /** @class */ (function (_super) {
         }
         lines.push('');
 
-        var warnings = novelExt.validatePlotLines(this.timeline);
+        var warnings = novelExt.validatePlotLines(this.timeline, this.plugin.settings);
         if (warnings.length > 0) {
             lines.push('## ⚠️ 伏笔逻辑提醒');
             lines.push('');
@@ -8176,7 +8599,7 @@ var MyView = /** @class */ (function (_super) {
         }
         parts.push('</ul>');
 
-        var unredeemed = novelExt.getUnredeemedPlotLines(this.timeline);
+        var unredeemed = novelExt.getUnredeemedPlotLines(this.timeline, this.plugin.settings);
         parts.push('<h2>🧵 未回收伏笔</h2><ul>');
         if (unredeemed.length === 0) {
             parts.push('<li>✅ 暂无</li>');
@@ -8787,11 +9210,25 @@ MyView.prototype.renderTimeline = function (container) {
     container.classList.add('my-char-scroll-section');
 
     var timelineModes = container.createEl('div', { cls: 'my-char-lifecycle-toolbar rw-timeline-modebar' });
-    [['events','事件时间线'],['chapters','章节库与故事时间']].forEach(function(pair) {
+    [['events','按时间排列'],['eventSets','按事件集排列'],['chapters','章节库与故事时间']].forEach(function(pair) {
         var modeBtn = timelineModes.createEl('button', { text: pair[1], cls: 'my-char-btn-ghost my-char-btn-sm' });
         if ((self._timelineSubMode || 'events') === pair[0]) modeBtn.addClass('is-active');
         modeBtn.addEventListener('click', function() { self._timelineSubMode = pair[0]; self.renderTimeline(container); });
     });
+    var worldlineBar = container.createEl('div',{cls:'rw-worldline-toolbar'});
+    var worldlines = rwGetWorldlines(this.plugin), activeWorldline = rwGetActiveWorldline(this.plugin);
+    worldlineBar.createEl('span',{text:'管理世界线：' + (activeWorldline ? activeWorldline.name : '未选择'),cls:'my-char-filter-label'});
+    var addWorldlineBtn=worldlineBar.createEl('button',{text:'+ 独立世界线',cls:'my-char-btn-ghost my-char-btn-sm'});
+    addWorldlineBtn.addEventListener('click',function(){rwCreateWorldline(self,'independent');});
+    var branchWorldlineBtn=worldlineBar.createEl('button',{text:'+ 分支世界线',cls:'my-char-btn-ghost my-char-btn-sm'});
+    branchWorldlineBtn.addEventListener('click',function(){rwCreateWorldline(self,'branch');});
+    var compareBtn=worldlineBar.createEl('button',{text:'时间线对照',cls:'my-char-btn-ghost my-char-btn-sm'});
+    compareBtn.addEventListener('click',function(){ self._timelineSubMode = self._timelineSubMode === 'compare' ? 'events' : 'compare'; self.renderTimeline(container); });
+    if ((self._timelineSubMode || 'events') === 'compare') { rwRenderWorldlineCompare(self,container); return; }
+    var renameWorldlineBtn=worldlineBar.createEl('button',{text:'重命名',cls:'my-char-btn-ghost my-char-btn-sm'});
+    renameWorldlineBtn.addEventListener('click',async function(){var w=rwGetActiveWorldline(self.plugin);if(!w)return;var n=(prompt('修改世界线名称：',w.name)||'').trim();if(n){w.name=n;await self.plugin.saveSettings();self.renderTimeline(container);}});
+    var deleteWorldlineBtn=worldlineBar.createEl('button',{text:'删除世界线',cls:'my-char-btn-ghost my-char-btn-sm'});
+    deleteWorldlineBtn.addEventListener('click',async function(){var w=rwGetActiveWorldline(self.plugin);if(!w)return;if(worldlines.length<=1 || w.isDefault){new obsidian.Notice(w.isDefault?'原始世界线是兼容基线，不能删除':'至少保留一条世界线');return;}if(!confirm('确定删除世界线配置「'+w.name+'」？对应 Markdown 与关系数据文件不会自动删除。建议先备份。'))return;var idx=worldlines.findIndex(function(x){return x.id===w.id;});worldlines.splice(idx,1);var next=worldlines[0];self.plugin.settings.activeTimelineWorldlineId=next.id;self.plugin.settings.currentTimePoint=next.currentTimePoint||'';await self.plugin.saveSettings();await self.loadAllData({silent:true});self.render();});
     if ((self._timelineSubMode || 'events') === 'chapters') { renderChapterLibraryManager(self, container); return; }
 
     // ===== 年份搜索框 =====
@@ -8842,6 +9279,8 @@ MyView.prototype.renderTimeline = function (container) {
         });
         modal.open();
     });
+    var secondaryManageBtn=tagToolbar.createEl('button',{text:'管理次标签',cls:'my-char-btn-ghost my-char-btn-sm'});
+    secondaryManageBtn.addEventListener('click',function(){rwOpenSecondaryTagManager(self.plugin,function(){self.renderTimeline(container);});});
 
     tagToolbar.createEl('button', { text: '+ 快速添加事件', cls: 'my-char-view-btn my-char-btn-sm' })
         .addEventListener('click', function() { self.showQuickAddEvent(); });
@@ -8858,7 +9297,7 @@ MyView.prototype.renderTimeline = function (container) {
     var allBtn = filterBar.createEl('button', { text: '全部' });
     setFilterChip(allBtn, this.selectedTag === '', '#4a90e2');
     allBtn.addEventListener('click', function() {
-        self.selectedTag = '';
+        self.selectedTag = ''; self._secondaryTagFilter = '';
         self.renderTimeline(container);
     });
     for (var i = 0; i < currentTags.length; i++) {
@@ -8877,6 +9316,16 @@ MyView.prototype.renderTimeline = function (container) {
             });
         })(currentTags[i]);
     }
+
+    var secondaryTagFilterBar=container.createEl('div',{cls:'my-char-filter-bar rw-secondary-tag-filter'});
+    secondaryTagFilterBar.createEl('span',{text:'次标签：',cls:'my-char-filter-label'});
+    var secondaryAll=secondaryTagFilterBar.createEl('button',{text:'全部'});
+    setFilterChip(secondaryAll,!this._secondaryTagFilter,'#64748b');
+    secondaryAll.addEventListener('click',function(){self._secondaryTagFilter='';self.renderTimeline(container);});
+    getSecondaryEventTags(this.plugin).forEach(function(tag){
+        var b=secondaryTagFilterBar.createEl('button',{text:tag.label}); setFilterChip(b,self._secondaryTagFilter===tag.value,tag.color);
+        b.addEventListener('click',function(){self._secondaryTagFilter=self._secondaryTagFilter===tag.value?'':tag.value;self.renderTimeline(container);});
+    });
 
     var plotLines = {};
     for (var pli = 0; pli < this.timeline.length; pli++) {
@@ -8902,7 +9351,7 @@ MyView.prototype.renderTimeline = function (container) {
                 });
             })(plotKeys[pk]);
         }
-        var unredeemedLines = novelExt.getUnredeemedPlotLines(this.timeline);
+        var unredeemedLines = novelExt.getUnredeemedPlotLines(this.timeline, this.plugin.settings);
         if (unredeemedLines.length > 0) {
             plotBar.createEl('span', {
                 text: '⚠ ' + unredeemedLines.length + ' 条未回收线',
@@ -8930,6 +9379,9 @@ MyView.prototype.renderTimeline = function (container) {
         filteredTimeline = filteredTimeline.filter(function(e) {
             return e.tag === self.selectedTag;
         });
+    }
+    if (this._secondaryTagFilter) {
+        filteredTimeline = filteredTimeline.filter(function(e) { return Array.isArray(e.secondaryTags) && e.secondaryTags.indexOf(self._secondaryTagFilter) >= 0; });
     }
 
     // ===== 当前时间点：隐藏「未来」事件 =====
@@ -8980,7 +9432,7 @@ MyView.prototype.renderTimeline = function (container) {
 
     if (filteredTimeline.length === 0) {
         var emptyMsg = '暂无时间线事件';
-        if (this.selectedTag) emptyMsg = '没有匹配标签的事件';
+        if (this.selectedTag || this._secondaryTagFilter) emptyMsg = '没有匹配标签的事件';
         if (this._yearSearchText) emptyMsg = '没有匹配 "' + this._yearSearchText + '" 的事件';
         if (isTimeFilterActive(this.plugin)) emptyMsg = '当前时间点之前暂无事件（可关闭顶栏「时间过滤」查看全部）';
         container.createEl('p', { text: emptyMsg, cls: 'my-char-view-empty' });
@@ -8993,6 +9445,138 @@ MyView.prototype.renderTimeline = function (container) {
             self._pendingHighlightLineIndex = null;
             self._pendingFocusEvent = null;
         }
+        return;
+    }
+
+    if ((self._timelineSubMode || 'events') === 'eventSets') {
+        var eventSetGroups = Object.create(null);
+        filteredTimeline.forEach(function(evt) {
+            var setName = String(evt.eventSet || '').trim() || '未归入事件集';
+            if (!eventSetGroups[setName]) eventSetGroups[setName] = [];
+            eventSetGroups[setName].push(evt);
+        });
+        var eventSetOrder = Array.isArray(self.plugin.settings.timelineEventSetOrder)
+            ? self.plugin.settings.timelineEventSetOrder.slice() : [];
+        var eventSetSortMode = self.plugin.settings.timelineEventSetSortMode || 'time';
+        function firstTime(name) {
+            var values = eventSetGroups[name].map(function(e) {
+                return getTimeSortValue(e.storyYear || e.year || e.month);
+            }).filter(function(v) { return v != null; });
+            return values.length ? Math.min.apply(Math, values) : null;
+        }
+        var autoEventSetNames = Object.keys(eventSetGroups).sort(function(a, b) {
+            if (a === '未归入事件集') return 1;
+            if (b === '未归入事件集') return -1;
+            var av = firstTime(a), bv = firstTime(b);
+            if (av != null && bv != null && av !== bv) return av - bv;
+            if (av != null && bv == null) return -1;
+            if (bv != null && av == null) return 1;
+            return a.localeCompare(b, 'zh-CN');
+        });
+        // Keep the saved manual order, append newly-created event sets in chronological order.
+        eventSetOrder = eventSetOrder.filter(function(name, index, arr) {
+            return Object.prototype.hasOwnProperty.call(eventSetGroups, name) && arr.indexOf(name) === index;
+        });
+        autoEventSetNames.forEach(function(name) {
+            if (eventSetOrder.indexOf(name) < 0) eventSetOrder.push(name);
+        });
+        if (eventSetSortMode === 'manual') {
+            self.plugin.settings.timelineEventSetOrder = eventSetOrder;
+        }
+        var setSortBar = container.createEl('div', { cls: 'rw-event-set-sortbar' });
+        setSortBar.createEl('span', { text: '事件集顺序', cls: 'my-char-filter-label' });
+        var timeSortBtn = setSortBar.createEl('button', {
+            text: '按最早时间',
+            cls: 'my-char-btn-ghost my-char-btn-sm' + (eventSetSortMode === 'time' ? ' is-active' : '')
+        });
+        timeSortBtn.addEventListener('click', function() {
+            self.plugin.settings.timelineEventSetSortMode = 'time';
+            self.plugin.saveSettings();
+            self.renderTimeline(container);
+        });
+        var manualSortBtn = setSortBar.createEl('button', {
+            text: '手动排序',
+            cls: 'my-char-btn-ghost my-char-btn-sm' + (eventSetSortMode === 'manual' ? ' is-active' : '')
+        });
+        manualSortBtn.addEventListener('click', function() {
+            self.plugin.settings.timelineEventSetSortMode = 'manual';
+            self.plugin.settings.timelineEventSetOrder = eventSetOrder.slice();
+            self.plugin.saveSettings();
+            self.renderTimeline(container);
+        });
+        if (eventSetSortMode === 'manual') {
+            setSortBar.createEl('span', { text: '使用上下箭头调整事件集位置', cls: 'my-char-muted' });
+        }
+        var eventSetNames = eventSetSortMode === 'manual' ? eventSetOrder.slice() : autoEventSetNames.slice();
+        eventSetNames.forEach(function(setName) {
+            var events = eventSetGroups[setName].slice().sort(function(a,b) {
+                var av = getTimeSortValue(a.storyYear || a.year || a.month), bv = getTimeSortValue(b.storyYear || b.year || b.month);
+                if (av != null && bv != null && av !== bv) return av - bv;
+                if (av != null && bv == null) return -1; if (bv != null && av == null) return 1;
+                return Number(a._lineIndex || 0) - Number(b._lineIndex || 0);
+            });
+            var groupCard = container.createEl('section', { cls: 'rw-event-set-card' });
+            var groupHead = groupCard.createEl('div', { cls: 'rw-event-set-head' });
+            groupHead.createEl('strong', { text: setName === '未归入事件集' ? '独立事件' : setName });
+            groupHead.createEl('span', { text: events.length + ' 个子事件', cls: 'my-char-muted' });
+            if (eventSetSortMode === 'manual' && setName !== '未归入事件集') {
+                var orderIndex = eventSetNames.indexOf(setName);
+                var moveUp = groupHead.createEl('button', { text: '↑', cls: 'my-char-btn-ghost my-char-btn-xs rw-event-set-move', attr: { title: '上移事件集', 'aria-label': '上移事件集' } });
+                moveUp.disabled = orderIndex <= 0;
+                moveUp.addEventListener('click', function(ev) {
+                    ev.stopPropagation();
+                    if (orderIndex <= 0) return;
+                    var next = eventSetNames.slice();
+                    var swap = next[orderIndex - 1]; next[orderIndex - 1] = next[orderIndex]; next[orderIndex] = swap;
+                    self.plugin.settings.timelineEventSetOrder = next;
+                    self.plugin.saveSettings();
+                    self.renderTimeline(container);
+                });
+                var moveDown = groupHead.createEl('button', { text: '↓', cls: 'my-char-btn-ghost my-char-btn-xs rw-event-set-move', attr: { title: '下移事件集', 'aria-label': '下移事件集' } });
+                moveDown.disabled = orderIndex >= eventSetNames.length - 1;
+                moveDown.addEventListener('click', function(ev) {
+                    ev.stopPropagation();
+                    if (orderIndex >= eventSetNames.length - 1) return;
+                    var next = eventSetNames.slice();
+                    var swap = next[orderIndex + 1]; next[orderIndex + 1] = next[orderIndex]; next[orderIndex] = swap;
+                    self.plugin.settings.timelineEventSetOrder = next;
+                    self.plugin.saveSettings();
+                    self.renderTimeline(container);
+                });
+            }
+            var eventList = groupCard.createEl('div', { cls: 'rw-event-set-list' });
+            events.forEach(function(evt, eventIndex) {
+                var tagColor = evt.tag ? getTagColor(self.plugin, evt.tag) : 'var(--char-accent)';
+                var row = eventList.createEl('div', { cls: 'my-char-timeline-event my-char-timeline-event-editable rw-event-set-timeline-item' });
+                row.title = '点击编辑';
+                if (evt._lineIndex != null) row.setAttribute('data-line-index', String(evt._lineIndex));
+                row.style.setProperty('--event-accent', tagColor);
+                row.style.borderLeftColor = tagColor;
+                var mainCol = row.createEl('div', { cls: 'my-char-timeline-event-main' });
+                var dateLabel = String(evt.storyYear || evt.year || '时间未标注') +
+                    (evt.month && evt.month !== '未标注' ? ' · ' + evt.month : '');
+                var dateChip = mainCol.createEl('span', { text: dateLabel, cls: 'my-char-tag-chip my-char-tag-chip-inline rw-event-set-date' });
+                dateChip.style.background = 'var(--background-modifier-hover)';
+                if (evt.tag) {
+                    var tagSpan = mainCol.createEl('span', { text: getTagLabel(self.plugin, evt.tag), cls: 'my-char-tag-chip my-char-tag-chip-inline' });
+                    tagSpan.style.background = tagColor;
+                }
+                (evt.secondaryTags || []).forEach(function(st) {
+                    var info = getSecondaryEventTags(self.plugin).find(function(t) { return t.value === st; });
+                    var chip = mainCol.createEl('span', { text: info ? info.label : st, cls: 'my-char-tag-chip my-char-tag-chip-inline rw-secondary-tag-chip' });
+                    chip.style.background = info ? info.color : 'var(--background-modifier-border)';
+                });
+                var eventBody = mainCol.createEl('span', { text: evt.event || '', cls: 'my-char-timeline-event-text' });
+                var meta = row.createEl('div', { cls: 'my-char-timeline-event-meta' });
+                if (evt.plotLine) meta.createEl('span', { text: '情节线 · ' + evt.plotLine, cls: 'my-char-plot-chip-inline' });
+                if (evt.plotStatus) meta.createEl('span', { text: evt.plotStatus, cls: 'my-char-plot-chip-inline' });
+                if (!meta.childElementCount) meta.remove();
+                var open = function() { self.showEditEvent(evt); };
+                row.addEventListener('click', open);
+                row.addEventListener('keydown', function(ev) { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); open(); } });
+            });
+        });
+        if (!eventSetNames.length) container.createEl('p', { text: '暂无事件集。编辑事件并填写「所属大事件 / 事件集」即可建立分组。', cls: 'my-char-view-empty' });
         return;
     }
 
@@ -9097,6 +9681,7 @@ MyView.prototype.renderTimeline = function (container) {
                     var tagSpan = mainCol.createEl('span', { text: getTagLabel(self.plugin, eventData.tag), cls: 'my-char-tag-chip my-char-tag-chip-inline' });
                     tagSpan.style.background = tagColor;
                 }
+                (eventData.secondaryTags || []).forEach(function(st){var info=getSecondaryEventTags(self.plugin).find(function(t){return t.value===st;});var chip=mainCol.createEl('span',{text:info?info.label:st,cls:'my-char-tag-chip my-char-tag-chip-inline rw-secondary-tag-chip'});chip.style.background=info?info.color:'var(--background-modifier-border)';});
 
                 var eventBody = mainCol.createEl('span', { cls: 'my-char-timeline-event-text' });
                 var eventText = String(eventData.event == null ? '' : eventData.event);
@@ -9378,7 +9963,18 @@ function renderCharacterLifeCinema(view, container) {
                 if (time) events.push({ time: time, title: e.event || e.title || e.name || '重要事件' });
             });
             if (life.death) events.push({ time: life.death, title: '死亡' });
-            events.sort(function(a,b) { var pa=parseHistoricalDate(a.time), pb=parseHistoricalDate(b.time); if(pa&&pb&&pa.sortValue!=null&&pb.sortValue!=null)return pa.sortValue-pb.sortValue; return String(a.time).localeCompare(String(b.time),'zh-CN'); });
+            // 公元前使用负数纪年：前300年(-300)早于前200年(-200)，
+            // 再早于公元1年(+1)。无法识别的年号不参与字符串倒序，保持原始采集顺序。
+            // 同一时间点也稳定保留人物生平/时间线中的原始顺序。
+            events.sort(function(a,b) {
+                var pa=parseHistoricalDate(a.time), pb=parseHistoricalDate(b.time);
+                var av=pa && Number.isFinite(pa.sortValue) ? pa.sortValue : null;
+                var bv=pb && Number.isFinite(pb.sortValue) ? pb.sortValue : null;
+                if (av !== null && bv !== null) return av-bv;
+                if (av !== null) return -1;
+                if (bv !== null) return 1;
+                return 0;
+            });
             // 合并完全相同年份与标题的重复节点，保留不同事件。
             var card = stage.createEl('section', { cls: 'rw-life-cinema-person' });
             var head = card.createEl('header', { cls: 'rw-life-cinema-person-head' });
@@ -10007,10 +10603,7 @@ function renderCharacterLifeCinema(view, container) {
 
     MyView.prototype.showEditEvent = function (existingEvent) {
         var self = this;
-        if (existingEvent._lineIndex == null) {
-            new obsidian.Notice('无法定位该事件，请刷新数据后重试');
-            return;
-        }
+        // 即使事件已从 Markdown 删除、定位索引丢失，也允许作者清理插件残留记录。
         var modal = new QuickAddEventModal(this.app, this.plugin, this, function(newEvt) {
             pushUndoSnapshot(self, '编辑时间线事件');
             novelExt.updateEventInMd(self.app, self.plugin, existingEvent, newEvt).then(function(updated) {
@@ -10038,7 +10631,7 @@ function renderCharacterLifeCinema(view, container) {
                 if (result && result.notice) new obsidian.Notice(result.notice, result.duration);
             }).catch(function(err) {
                 console.error('[人物关系谱系] 更新时间线事件失败：', err);
-                new obsidian.Notice('❌ 事件修改失败：' + (err.message || err), 8000);
+                new obsidian.Notice('❌ 事件修改失败：原文可能已被删除或移动。若要清除残留记录，请使用编辑窗口底部的「删除」按钮。' + (err.message ? '（' + err.message + '）' : ''), 9000);
             });
         }, existingEvent, function(evt) {
             pushUndoSnapshot(self, '删除时间线事件');
@@ -10102,12 +10695,12 @@ function renderCharacterLifeCinema(view, container) {
 
     MyView.prototype.renderPlotLineTrack = function (container, plotLineName) {
         var self = this;
-        var group = novelExt.getPlotLineGroup(this.timeline, plotLineName);
+        var group = novelExt.getPlotLineGroup(this.timeline, plotLineName, this.plugin.settings);
         if (!group || group.events.length === 0) return;
 
         var trackPanel = container.createEl('div', { cls: 'my-char-plot-track-panel' });
         trackPanel.createEl('div', {
-            text: '🧵 情节线：' + plotLineName + (group.isRedeemed ? '（已回收 ✓）' : '（进行中 · ' + (group.latestStatus || '未标注') + '）'),
+            text: '🧵 情节线：' + plotLineName + (group.isRedeemed ? '（已结束 ✓）' : '（进行中 · ' + (group.latestStatus || '未标注') + '）'),
             cls: 'my-char-plot-track-title'
         });
 
@@ -10118,9 +10711,10 @@ function renderCharacterLifeCinema(view, container) {
                     track.createEl('div', { cls: 'my-char-plot-track-line' });
                 }
                 var node = track.createEl('div', { cls: 'my-char-plot-track-node' });
-                if (evt.plotStatus === '回收') node.classList.add('is-done');
-                else if (evt.plotStatus === '推进') node.classList.add('is-active');
-                else if (evt.plotStatus === '埋设') node.classList.add('is-seed');
+                var statusLabels = getPlotStatusLabels(self.plugin.settings);
+                if (evt.plotStatus === statusLabels.close || evt.plotStatus === statusLabels.merge) node.classList.add('is-done');
+                else if (evt.plotStatus === statusLabels.progress) node.classList.add('is-active');
+                else if (evt.plotStatus === statusLabels.seed) node.classList.add('is-seed');
                 else node.classList.add('is-plain');
                 var loc = evt.year + (evt.month && evt.month !== '未标注' ? '·' + evt.month : '');
                 node.createEl('div', { text: loc, cls: 'my-char-plot-track-loc' });
@@ -10136,7 +10730,7 @@ function renderCharacterLifeCinema(view, container) {
 
     MyView.prototype.renderPlotWarnings = function (container, plotLineFilter) {
         var self = this;
-        var allWarnings = novelExt.validatePlotLines(this.timeline);
+        var allWarnings = novelExt.validatePlotLines(this.timeline, this.plugin.settings);
         var warnings = plotLineFilter
             ? allWarnings.filter(function(w) { return w.plotLine === plotLineFilter; })
             : allWarnings;
@@ -10901,14 +11495,21 @@ var QuickAddEventModal = /** @class */ (function (_super) {
         storyTimeInput.placeholder = '如：公元前300年、夏末、第三日；不确定可留空';
         if (isEdit && evt.storyYear) storyTimeInput.value = evt.storyYear;
         var tagRow = el.createEl('div', { cls: 'my-char-form-row' });
-        tagRow.createEl('label', { text: '标签', cls: 'my-char-form-label' });
+        tagRow.createEl('label', { text: '主标签', cls: 'my-char-form-label' });
         var tagSelect = tagRow.createEl('select', { cls: 'my-char-select' });
         tagSelect.createEl('option', { text: '（无）', value: '' });
         var tags = getEventTags(this.plugin);
         for (var ti = 0; ti < tags.length; ti++) {
             var topt = tagSelect.createEl('option', { text: tags[ti].label, value: tags[ti].value });
-            if (isEdit && evt.tag === tags[ti].value) topt.selected = true;
+            if (isEdit && (evt.primaryTag || evt.tag) === tags[ti].value) topt.selected = true;
         }
+        var secondaryRow = el.createEl('div', { cls: 'my-char-form-row' });
+        secondaryRow.createEl('label', { text: '次标签（可多选）', cls: 'my-char-form-label' });
+        var secondarySelect = secondaryRow.createEl('select', { cls: 'my-char-select' });
+        secondarySelect.multiple = true; secondarySelect.size = Math.min(5, Math.max(3, tags.length)); secondarySelect.style.minHeight='76px';
+        var secondaryTagsAvailable=getSecondaryEventTags(this.plugin);
+        secondaryTagsAvailable.forEach(function(t){ var op=secondarySelect.createEl('option',{text:t.label,value:t.value}); if(isEdit && (evt.secondaryTags||[]).indexOf(t.value)>=0) op.selected=true; });
+        var secondaryHint=secondaryRow.createEl('div',{text:'按住 Ctrl（Mac：⌘）可多选；次标签用于进一步细分事件。',cls:'my-char-muted'});
         var appearHint = tagRow.createEl('div', { cls: 'my-char-muted' });
         appearHint.style.cssText = 'font-size:12px;margin-top:4px;display:none;';
         var fieldLabel = this.plugin.settings.firstAppearFieldName || '正文首次出现';
@@ -10928,6 +11529,26 @@ var QuickAddEventModal = /** @class */ (function (_super) {
         eventInput.rows = 3;
         if (isEdit) eventInput.value = evt.event || '';
         else if (this.prefillText) eventInput.value = this.prefillText;
+        var eventSetRow = el.createEl('div', { cls: 'my-char-form-row' });
+        eventSetRow.createEl('label', { text: '所属大事件 / 事件集', cls: 'my-char-form-label' });
+        var eventSetInput = eventSetRow.createEl('input', { type: 'text', cls: 'my-char-form-input', attr: { placeholder: '例如：皇位争夺（留空表示独立事件）' } });
+        if (isEdit && evt.eventSet) eventSetInput.value = evt.eventSet;
+        var knownEventSets = Array.from(new Set((this.view.timeline || []).map(function(e){return String(e.eventSet || '').trim();}).filter(Boolean)));
+        if (knownEventSets.length) {
+            var eventSetHint = eventSetRow.createEl('small', { text: '已有事件集：' + knownEventSets.join('、'), cls: 'my-char-muted' });
+        }
+        var sourceWorldlineRow = el.createEl('div', { cls: 'my-char-form-row' });
+        sourceWorldlineRow.createEl('label', { text: '跨世界线来源（可选）', cls: 'my-char-form-label' });
+        var sourceWorldlineSelect = sourceWorldlineRow.createEl('select', { cls: 'my-char-select' });
+        sourceWorldlineSelect.createEl('option', { text: '（无跨世界线来源）', value: '' });
+        rwGetWorldlines(this.plugin).filter(function(w){ return w.id !== self.plugin.settings.activeTimelineWorldlineId; }).forEach(function(w) {
+            var op = sourceWorldlineSelect.createEl('option', { text: w.name, value: w.id });
+            if (isEdit && evt.sourceWorldlineId === w.id) op.selected = true;
+        });
+        var sourceEventInput = sourceWorldlineRow.createEl('input', { type: 'text', cls: 'my-char-form-input', attr: { placeholder: '来源事件名称或事件ID' } });
+        if (isEdit && evt.sourceEventRef) sourceEventInput.value = evt.sourceEventRef;
+        sourceEventInput.disabled = !sourceWorldlineSelect.value;
+        sourceWorldlineSelect.addEventListener('change', function(){ sourceEventInput.disabled = !sourceWorldlineSelect.value; if (!sourceWorldlineSelect.value) sourceEventInput.value = ''; });
         var plotRow = el.createEl('div', { cls: 'my-char-form-row' });
         plotRow.createEl('label', { text: '情节线', cls: 'my-char-form-label' });
         var plotInput = plotRow.createEl('input', { type: 'text', cls: 'my-char-form-input' });
@@ -10937,10 +11558,25 @@ var QuickAddEventModal = /** @class */ (function (_super) {
         statusRow.createEl('label', { text: '伏笔状态', cls: 'my-char-form-label' });
         var statusSelect = statusRow.createEl('select', { cls: 'my-char-select' });
         statusSelect.createEl('option', { text: '（无）', value: '' });
-        for (var si = 0; si < novelExt.PLOT_STATUSES.length; si++) {
-            var sopt = statusSelect.createEl('option', { text: novelExt.PLOT_STATUSES[si], value: novelExt.PLOT_STATUSES[si] });
-            if (isEdit && evt.plotStatus === novelExt.PLOT_STATUSES[si]) sopt.selected = true;
+        var plotStatusOptions = getPlotStatusOptions(this.plugin.settings);
+        if (isEdit && evt.plotStatus && plotStatusOptions.indexOf(evt.plotStatus) < 0) plotStatusOptions.push(evt.plotStatus);
+        for (var si = 0; si < plotStatusOptions.length; si++) {
+            var sopt = statusSelect.createEl('option', { text: plotStatusOptions[si], value: plotStatusOptions[si] });
+            if (isEdit && evt.plotStatus === plotStatusOptions[si]) sopt.selected = true;
         }
+        var mergeRow = el.createEl('div', { cls: 'my-char-form-row' });
+        mergeRow.createEl('label', { text: '并入目标情节线', cls: 'my-char-form-label' });
+        var mergeSelect = mergeRow.createEl('select', { cls: 'my-char-select' });
+        mergeSelect.createEl('option', { text: '（选择要并入的情节线）', value: '' });
+        var knownPlotLines = getPlotLineGroups(this.view.timeline || [], this.plugin.settings).map(function(g) { return g.plotLine; }).filter(function(n) { return n && (!isEdit || n !== evt.plotLine); });
+        knownPlotLines.forEach(function(n) { var op = mergeSelect.createEl('option', { text: n, value: n }); if (isEdit && evt.mergeInto === n) op.selected = true; });
+        var customMergeInput = mergeRow.createEl('input', { type: 'text', cls: 'my-char-form-input', attr: { placeholder: '也可输入尚未建立的目标情节线名称' } });
+        if (isEdit && evt.mergeInto && knownPlotLines.indexOf(evt.mergeInto) < 0) customMergeInput.value = evt.mergeInto;
+        mergeSelect.addEventListener('change', function() { if (mergeSelect.value) customMergeInput.value = ''; });
+        customMergeInput.addEventListener('input', function() { if (customMergeInput.value.trim()) mergeSelect.value = ''; });
+        function syncMergeRow() { mergeRow.style.display = (statusSelect.value === getPlotStatusLabels(self.plugin.settings).merge || (isEdit && !!evt.mergeInto)) ? '' : 'none'; }
+        statusSelect.addEventListener('change', syncMergeRow); syncMergeRow();
+
         var noteRow = el.createEl('div', { cls: 'my-char-form-row' });
         noteRow.createEl('label', { text: '关联章节（可多选）', cls: 'my-char-form-label' });
         var noteInput = noteRow.createEl('input', { type: 'text', cls: 'my-char-form-input' });
@@ -11003,17 +11639,30 @@ var QuickAddEventModal = /** @class */ (function (_super) {
                 new obsidian.Notice('请填写事件内容');
                 return;
             }
+            var mergeStatusLabel = getPlotStatusLabels(self.plugin.settings).merge;
+            var mergeTarget = mergeSelect.value || customMergeInput.value.trim();
+            if (statusSelect.value === mergeStatusLabel) {
+                if (!plotInput.value.trim()) { new obsidian.Notice('并入操作需要先填写当前情节线名称'); return; }
+                if (!mergeTarget) { new obsidian.Notice('请选择或填写并入目标情节线'); mergeSelect.focus(); return; }
+                if (mergeTarget === plotInput.value.trim()) { new obsidian.Notice('不能将情节线并入自身'); return; }
+            }
             self.onSubmit({
                 volume: volumeInput ? volumeInput.value.trim() : '',
                 year: yearInput.value.trim() || UNLOCATED_CHAPTER_GROUP,
                 storyYear: storyTimeInput.value.trim(),
                 month: monthInput.value.trim() || '未标注',
                 tag: tagSelect.value,
+                primaryTag: tagSelect.value,
+                secondaryTags: Array.from(secondarySelect.selectedOptions).map(function(op){return op.value;}).filter(Boolean),
                 event: eventInput.value.trim(),
                 eventId: (isEdit && evt.eventId) ? evt.eventId : createTimelineEventId(),
                 chapterNotes: normalizeChapterNotes(noteInput.value),
                 plotLine: plotInput.value.trim(),
                 plotStatus: statusSelect.value,
+                mergeInto: statusSelect.value === mergeStatusLabel ? mergeTarget : '',
+                eventSet: eventSetInput.value.trim(),
+                sourceWorldlineId: sourceWorldlineSelect.value,
+                sourceEventRef: sourceWorldlineSelect.value ? sourceEventInput.value.trim() : '',
                 chapterNote: normalizeChapterNotes(noteInput.value)[0] || '',
                 storyDesigns: (isEdit && evt.storyDesigns) ? evt.storyDesigns : {}
             });
@@ -11022,7 +11671,7 @@ var QuickAddEventModal = /** @class */ (function (_super) {
         if (isEdit && this.onDelete) {
             var deleteBtn = btnRow.createEl('button', { text: '🗑 删除', cls: 'my-char-btn-danger my-char-btn-sm' });
             deleteBtn.addEventListener('click', function() {
-                if (confirmDestructiveAction('删除这条时间线事件？', '时间线 Markdown 中对应事件行将被删除。')) {
+                if (confirmDestructiveAction('删除这条时间线事件？', '如果原文仍存在，将删除对应事件行；如果原文已被作者删除、移动或无法定位，则只清理插件中的残留记录，不会阻止删除。')) {
                     self.onDelete(self.existingEvent);
                     self.close();
                 }
@@ -12782,6 +13431,20 @@ var DetailModal = /** @class */ (function (_super) {
         var newKeyInput = addRow.createEl('input', { type: 'text', cls: 'my-char-form-input', placeholder: '如：外貌、性格' });
         var newValInput = addRow.createEl('input', { type: 'text', cls: 'my-char-form-input', placeholder: '字段值' });
         var saveBtn = el.createEl('button', { text: '💾 保存到人物索引', cls: 'my-char-view-btn my-char-btn-block' });
+        var deleteCharBtn = el.createEl('button', { text: '🗑 删除人物档案', cls: 'my-char-btn-danger my-char-btn-block' });
+        deleteCharBtn.style.marginTop = '8px';
+        deleteCharBtn.addEventListener('click', async function() {
+            var name = self.charData.name;
+            var removeEvents = confirm('删除人物「' + name + '」时，是否同时删除当前世界线时间线中事件正文明确包含该人物姓名的事件？\n\n选择“确定”：人物档案与这些事件一并删除。\n选择“取消”：继续询问是否只删除人物档案。');
+            if (!removeEvents && !confirm('仅删除人物档案「' + name + '」，保留时间线事件？')) return;
+            if (!confirm('此操作会删除人物档案' + (removeEvents ? '及相关时间线事件' : '') + '，建议先创建快照。确定继续？')) return;
+            try {
+                pushUndoSnapshot(self.view, '删除人物档案：' + name);
+                var result = await novelExt.deleteCharacterAndLinkedEvents(self.app, self.view.plugin, self.view, name, removeEvents);
+                self.close(); self.view.render();
+                new obsidian.Notice('已删除人物档案' + (removeEvents ? '，并删除 ' + result.timelineDeleted + ' 条相关时间线事件' : '；时间线事件已保留'));
+            } catch (err) { showUserError('删除人物失败', err); }
+        });
         saveBtn.addEventListener('click', async function () {
             var out = {};
             var factionKey = self.view.plugin.settings.factionFieldName || '阵营';
@@ -13729,6 +14392,50 @@ el.createEl('p', {
                 }.bind(this));
             }.bind(this));
 
+        el.createEl('h3', { text: '🧵 情节线状态词条自定义' }).style.cssText = 'margin-top:20px;font-size:14px;font-weight:bold;';
+        el.createEl('p', { text: '这些状态不是必须逐项完成的固定流程，作者可以只使用其中几种，也可以按自己的叙事顺序记录。可自定义每个语义对应的显示词条；选择「并入」时会提供目标情节线选择。' }).style.cssText = 'font-size:12px;color:var(--text-muted);';
+        var statusLabels = getPlotStatusLabels(this.plugin.settings);
+        var statusFields = [ ['seed','埋设 / 起始'], ['progress','推进'], ['upgrade','升级 / 转折'], ['fakeClose','假回收'], ['merge','并入'], ['close','回收 / 终结'], ['pause','搁置'] ];
+        statusFields.forEach(function(pair) {
+            var st = new obsidian.Setting(el).setName(pair[1]).addText(function(t) {
+                t.setValue(statusLabels[pair[0]]).onChange(async function(value) {
+                    var clean = String(value || '').trim(); if (!clean) return;
+                    var current = getPlotStatusLabels(self.plugin.settings);
+                    var duplicate = Object.keys(current).some(function(k) { return k !== pair[0] && current[k] === clean; });
+                    if (duplicate) { new obsidian.Notice('不同状态词条不能使用相同名称'); return; }
+                    if (!self.plugin.settings.plotStatusLabels) self.plugin.settings.plotStatusLabels = {};
+                    self.plugin.settings.plotStatusLabels[pair[0]] = clean;
+                    await self.plugin.saveSettings();
+                });
+            });
+        }.bind(this));
+        el.createEl('p', { text: '提示：更改状态名称不会批量改写旧 Markdown 中的状态值。若要统一旧事件，请先备份，再用 Obsidian 全局查找替换旧词条。' }).style.cssText = 'font-size:11px;color:var(--text-muted);';
+        var resetPlotStatusBtn = el.createEl('button', { text: '恢复默认状态词条' });
+        resetPlotStatusBtn.addEventListener('click', async function() { self.plugin.settings.plotStatusLabels = {}; await self.plugin.saveSettings(); new obsidian.Notice('已恢复默认情节线状态词条，请重新打开设置页查看'); });
+        el.createEl('h4', { text: '自定义附加状态' }).style.cssText = 'margin-top:14px;font-size:13px;';
+        var customStatusRow = el.createEl('div', { cls: 'my-char-form-row' });
+        var customStatusInput = customStatusRow.createEl('input', { type: 'text', cls: 'my-char-form-input', attr: { placeholder: '输入自定义状态名称，例如：反转、揭露、转场' } });
+        var addCustomStatusBtn = customStatusRow.createEl('button', { text: '添加状态', cls: 'my-char-btn-ghost my-char-btn-sm' });
+        var customStatusList = el.createEl('div', { cls: 'my-char-chip-list' });
+        function renderCustomStatusList() {
+            customStatusList.empty();
+            var values = Array.isArray(self.plugin.settings.customPlotStatuses) ? self.plugin.settings.customPlotStatuses : [];
+            if (!values.length) customStatusList.createEl('small', { text: '尚无自定义状态', cls: 'my-char-muted' });
+            values.forEach(function(value, index) {
+                var chip = customStatusList.createEl('span', { cls: 'my-char-tag-chip' }); chip.createEl('span', { text: value });
+                var rename = chip.createEl('button', { text: '改名', attr: { type: 'button', title: '重命名状态' } });
+                rename.addEventListener('click', async function() { var next = String(prompt('修改状态名称：', value) || '').trim(); if (!next || next === value) return; if (getPlotStatusOptions(self.plugin.settings).indexOf(next) >= 0) { new obsidian.Notice('该状态词条已存在'); return; } self.plugin.settings.customPlotStatuses[index] = next; await self.plugin.saveSettings(); renderCustomStatusList(); });
+                var up = chip.createEl('button', { text: '↑', attr: { type: 'button', title: '上移' } }); up.disabled = index === 0;
+                up.addEventListener('click', async function() { var a = self.plugin.settings.customPlotStatuses; var v = a[index - 1]; a[index - 1] = a[index]; a[index] = v; await self.plugin.saveSettings(); renderCustomStatusList(); });
+                var down = chip.createEl('button', { text: '↓', attr: { type: 'button', title: '下移' } }); down.disabled = index === values.length - 1;
+                down.addEventListener('click', async function() { var a = self.plugin.settings.customPlotStatuses; var v = a[index + 1]; a[index + 1] = a[index]; a[index] = v; await self.plugin.saveSettings(); renderCustomStatusList(); });
+                var remove = chip.createEl('button', { text: '×', attr: { type: 'button', title: '移除状态' } });
+                remove.addEventListener('click', async function() { if (!confirm('移除自定义状态「' + value + '」？已写入旧事件的状态不会被删除。')) return; self.plugin.settings.customPlotStatuses.splice(index, 1); await self.plugin.saveSettings(); renderCustomStatusList(); });
+            });
+        }
+        addCustomStatusBtn.addEventListener('click', async function() { var value = String(customStatusInput.value || '').trim(); if (!value) return; if (getPlotStatusOptions(self.plugin.settings).indexOf(value) >= 0) { new obsidian.Notice('该状态词条已存在'); return; } if (!Array.isArray(self.plugin.settings.customPlotStatuses)) self.plugin.settings.customPlotStatuses = []; self.plugin.settings.customPlotStatuses.push(value); customStatusInput.value = ''; await self.plugin.saveSettings(); renderCustomStatusList(); });
+        renderCustomStatusList();
+
         var testBtn = el.createEl('button', { text: '🔍 测试文件路径' });
         testBtn.style.cssText = 'margin-top:15px;padding:8px 16px;background:#4a90e2;color:white;border:none;border-radius:4px;cursor:pointer;width:100%;';
         testBtn.addEventListener('click', async function() {
@@ -13747,33 +14454,21 @@ el.createEl('p', {
             new obsidian.Notice(msg, 8000);
         }.bind(this));
 
-        el.createEl('h3', { text: '📖 文件格式示例' }).style.cssText = 'margin-top:20px;font-size:14px;font-weight:bold;';
-        
-        var formatNote = el.createEl('pre');
-        formatNote.style.cssText = 'background:#f5f5f5;padding:10px;border-radius:6px;font-size:12px;overflow-x:auto;';
-        formatNote.textContent = '## 张三\n' +
-            '- 身份：皇帝\n' +
-            '- 阵营：北境王国\n' +
-            '- 首次出场：公元前300年\n' +
-            '- 出生：公元前280年\n' +
-            '- 死亡：前200年\n' +
-            '- 亲密人物：李四\n' +
-            '- 自定义字段：任意值\n\n' +
-            '## 李四\n' +
-            '- 身份：将军\n' +
-            '- 阵营：北境王国\n' +
-            '- 出生：290年\n\n' +
-            '💡 时间支持：公元前280年、前100年、280年、公元100年';
-
-        var timelineNote = el.createEl('pre');
-        timelineNote.style.cssText = 'background:#f5f5f5;padding:10px;border-radius:6px;font-size:12px;overflow-x:auto;margin-top:10px;';
-        timelineNote.textContent = '## 300年\n' +
-            '### 春季：\n' +
-            '- [战争] 张三率军出征\n' +
-            '- [政治] 李四受封将军\n\n' +
-            '### 秋季：\n' +
-            '- [婚恋] 张三与某公主成婚\n\n' +
-            '💡 标签使用 [标签名] 格式，标签名可在上方自定义';
+        el.createEl('h3', { text: '📖 文件格式与新手使用说明' }).style.cssText = 'margin-top:20px;font-size:14px;font-weight:bold;';
+        el.createEl('p', { text: 'Relation Weaver 的人物、时间线、章节与情节线资料都可以直接用 Obsidian Markdown 编辑。请保留标题层级和字段冒号；不熟悉格式时可先复制下面的示例，再替换内容。' }).style.cssText = 'font-size:12px;color:var(--text-muted);';
+        function addFormatExample(title, desc, code) {
+            el.createEl('h4', { text: title }).style.cssText = 'margin:12px 0 4px;font-size:13px;';
+            el.createEl('p', { text: desc }).style.cssText = 'font-size:12px;color:var(--text-muted);margin:0 0 6px;';
+            var pre = el.createEl('pre'); pre.style.cssText = 'background:var(--background-secondary);color:var(--text-normal);padding:10px;border-radius:6px;font-size:12px;overflow-x:auto;white-space:pre-wrap;'; pre.textContent = code;
+        }
+        addFormatExample('1. 人物索引.md', '每个人物使用一个二级标题；字段采用「- 字段名：内容」。出生、出场、死亡时间支持公元前与公元格式。', '## 张三\n- 身份：皇帝\n- 阵营：北境王国\n- 出生：公元前280年\n- 首次出场：公元前260年\n- 死亡：公元前200年\n- 亲密人物：李四\n\n## 李四\n- 身份：将军\n- 出生：公元前290年');
+        addFormatExample('2. 时间线.md：年份、月份与事件', '二级标题表示故事年份，三级标题表示月份/季节；每条事件以「- 」开头。公元前300年早于公元前200年，之后才是公元年份。', '## 公元前300年\n### 春季：\n- [战争] 张三率军出征\n- [政治] 李四受封将军\n### 秋季：\n- [婚恋] 张三与公主成婚\n\n## 公元前200年\n- [人物] 李四去世\n\n## 公元100年\n- [朝堂] 新帝登基');
+        addFormatExample('3. 事件主标签、次标签与情节线', '方括号内是主标签；次标签支持多个；情节线、状态、并入目标和章节等信息使用竖线分隔。标签名称可在「事件标签配置」中管理。', '- [朝堂政治] 丞相密谋逼宫 | 次标签:%5B%22权力争斗%22%2C%22身份揭露%22%5D | 情节线:夺嫡主线 | 状态:推进\n- [人物关系] 女主与旧友重逢 | 情节线:旧友支线 | 状态:埋设\n- [朝堂政治] 夺嫡支线并入主线 | 情节线:夺嫡支线 | 状态:并入 | 并入:皇位争夺主线');
+        addFormatExample('4. 章节库与故事时间', '章节库扫描后会把章节标题、文件路径和故事时间关联起来；章节引用可以使用 Obsidian 双链。', '## 第一章 初入宫门\n- 文件：[[正文/第一章]]\n- 故事时间：公元前280年春\n\n## 第二章 风起\n- 文件：[[正文/第二章]]\n- 故事时间：公元前279年');
+        addFormatExample('5. 多世界线', '世界线在插件界面中创建和切换，插件会为各世界线管理独立时间线数据。不要手动把不同世界线的事件混写到同一个时间线文件。', '原始世界线：时间线/时间线.md\n重生世界线：由插件创建独立数据文件\n分支世界线：创建时复制分叉点之前的历史快照；分叉后各自编辑');
+        addFormatExample('6. 关系与阵营.md', '文件分为「# 阵营」和「# 关系」两个区块。阵营使用二级标题；人物关系标题写两个人名，中间用「·」连接。字段名必须保持一致。', '# 关系与阵营\n\n# 阵营\n## 北境王国\n- 颜色：#4a90e2\n- 上级组织：大周\n- 描述：北方诸州组成的王国\n\n# 关系\n## 张三 · 李四\n- 类型：师徒\n- 亲密度：80\n- 描述：张三曾教导李四\n- 开始：公元前280年\n- 结束：公元前260年');
+        addFormatExample('7. 世界观资料 Markdown 导入', '世界观资料库支持批量导入：二级标题为分类，三级标题为条目名称，条目下用「- 字段：内容」补充属性。导入前先点「解析预览」，确认后才写入插件资料库。', '# 功法\n\n### 火眼金睛\n- 详情：能看穿妖魔伪装\n- 使用者：孙悟空\n- 品质：神通\n\n# 地点与区域\n\n### 花果山\n- 类型：山脉\n- 位置：东胜神洲');
+        el.createEl('p', { text: '说明：组织任职履历、组织关系、领地变迁等结构化记录由插件界面管理并保存在插件数据中，不建议自行编造 Markdown 字段；请使用对应管理页面新增、编辑和删除。' }).style.cssText = 'font-size:11px;color:var(--text-muted);margin-top:10px;';
 
         el.createEl('p', {
             text: '💾 阵营和关系数据保存在 .obsidian/plugins/' + this.plugin.manifest.id + '/data.json'
@@ -13934,7 +14629,7 @@ var RelationWeaverPlugin = /** @class */ (function (_super) {
         // 加载亲密度变化历史
         this._intimacyHistory = [];
         try {
-            var historyPath = this.app.vault.configDir + '/plugins/' + this.manifest.id + '/intimacy_history.json';
+            var historyPath = rwGetIntimacyHistoryPath(this);
             if (await this.app.vault.adapter.exists(historyPath)) {
                 var content = await this.app.vault.adapter.read(historyPath);
                 this._intimacyHistory = JSON.parse(content);
@@ -13951,7 +14646,7 @@ var RelationWeaverPlugin = /** @class */ (function (_super) {
                 if (!await this.app.vault.adapter.exists(dir)) {
                     await this.app.vault.adapter.mkdir(dir);
                 }
-                var path = dir + '/intimacy_history.json';
+                var path = rwGetIntimacyHistoryPath(this);
                 await this.app.vault.adapter.write(path, JSON.stringify(this._intimacyHistory || [], null, 2));
             } catch(e) {
                 console.log('保存变化历史失败:', e);
@@ -14020,6 +14715,7 @@ var RelationWeaverPlugin = /** @class */ (function (_super) {
     };
 
     RelationWeaverPlugin.prototype.saveSettings = async function () {
+        try { var wl = this.settings && Array.isArray(this.settings.timelineWorldlines) ? this.settings.timelineWorldlines.find(function(w){return w.id === this.settings.activeTimelineWorldlineId;}, this) : null; if (wl) wl.currentTimePoint = String(this.settings.currentTimePoint || ''); if(wl) rwCaptureWorldlineChapterTimes(this,wl.id); } catch(e) {}
         await this.saveData(this.settings);
     };
 
@@ -15210,8 +15906,8 @@ MyView.prototype.renderPlotsTab = function(container) {
     container.classList.add('my-char-scroll-section', 'rw-plots-view');
     container.createEl('h3', { text: '伏笔管理', cls: 'my-char-section-title' });
     container.createEl('p', { text: '伏笔节点直接来自时间线事件：在事件中填写相同的情节线名称，即可汇总埋设、推进与回收。时间线是事实来源，伏笔页负责聚合与追踪。', cls: 'my-char-muted' });
-    var groups = novelExt.getPlotLineGroups(this.timeline || []);
-    var warnings = novelExt.validatePlotLines(this.timeline || []);
+    var groups = novelExt.getPlotLineGroups(this.timeline || [], this.plugin.settings);
+    var warnings = novelExt.validatePlotLines(this.timeline || [], this.plugin.settings);
     var filter = container.createEl('select', { cls: 'my-char-select' });
     [['all', '全部情节线'], ['open', '未回收'], ['closed', '已回收']].forEach(function (x) {
         filter.createEl('option', { text: x[1], attr: { value: x[0] } });
@@ -15226,7 +15922,7 @@ MyView.prototype.renderPlotsTab = function(container) {
             var haystack = (g.plotLine + ' ' + g.events.map(function (e) { return e.event || ''; }).join(' ')).toLowerCase();
             return (filter.value === 'all' || (filter.value === 'open' && !g.isRedeemed) || (filter.value === 'closed' && g.isRedeemed)) && (!q || haystack.indexOf(q) !== -1);
         });
-        list.createEl('div', { text: '情节线 ' + groups.length + ' 条 · 未回收 ' + novelExt.getUnredeemedPlotLines(self.timeline || []).length + ' 条 · 逻辑提醒 ' + warnings.length + ' 条', cls: 'rw-plot-summary' });
+        list.createEl('div', { text: '情节线 ' + groups.length + ' 条 · 未回收 ' + novelExt.getUnredeemedPlotLines(self.timeline || [], self.plugin.settings).length + ' 条 · 逻辑提醒 ' + warnings.length + ' 条', cls: 'rw-plot-summary' });
         shown.forEach(function (g) {
             var card = list.createEl('section', { cls: 'rw-plot-card' });
             var head = card.createEl('div', { cls: 'rw-plot-card-head' });
@@ -16011,7 +16707,7 @@ MyView.prototype.renderDashboard = function(container) {
         }
     }
 
-    var unredeemedLines = novelExt.getUnredeemedPlotLines(this.timeline);
+    var unredeemedLines = novelExt.getUnredeemedPlotLines(this.timeline, this.plugin.settings);
     if (unredeemedLines.length > 0) {
         var plotSection = container.createEl('div', { cls: 'my-char-todo-panel' });
         plotSection.style.borderLeftColor = 'var(--char-purple)';
@@ -16035,7 +16731,7 @@ MyView.prototype.renderDashboard = function(container) {
         }
     }
 
-    var plotWarnings = novelExt.validatePlotLines(this.timeline);
+    var plotWarnings = novelExt.validatePlotLines(this.timeline, this.plugin.settings);
     if (plotWarnings.length > 0) {
         var warnSection = container.createEl('div', { cls: 'my-char-todo-panel' });
         warnSection.style.borderLeftColor = 'var(--color-orange, #e67e22)';
@@ -16686,7 +17382,7 @@ RelationWeaverPlugin.prototype.loadSettings = async function() {
         deathFieldNames: '死亡,死亡时间', birthFieldNames: '出生,出生时间',
         firstAppearFieldName: '正文首次出现', intimateFieldName: '亲密人物',
         preset: 'default', customEventTags: [], customIntimacyLevels: '',
-        currentTimePoint: '', timeFilterEnabled: true, settingCollectionFile: '设定集.md', chapterLibrary: { folder: '', chapters: [] },
+        currentTimePoint: '', timeFilterEnabled: true, timelineWorldlines: [], activeTimelineWorldlineId: '', worldlineCharacterOverrides: {}, worldlineChapterTimes: {}, customPlotStatuses: [], customEventPrimaryTags: null, customEventSecondaryTags: null, settingCollectionFile: '设定集.md', chapterLibrary: { folder: '', chapters: [] },
         useCaseMode: 'novel', hiddenTabs: [], viewTitle: '',
         termLabels: {}, tabLabels: {}, graphNotesFolder: '', worldbuildingFilePath: '', drawPoolFilePath: '', outlineFilePath: '', outlineTemplates: [{id:'general',name:'通用小说',fields:['本章目标','核心冲突','关键转折','出场人物','状态']}], activeOutlineTemplate: 'general', syncGraphOnSave: false, graphAutoSyncExplicitlyEnabled: false,
         graphSyncMode: 'all', graphSyncTypes: [], worldRecords: [], worldCategories: [], worldDataSchemaVersion: 2, worldDataMigrated: false,
@@ -16702,6 +17398,7 @@ RelationWeaverPlugin.prototype.loadSettings = async function() {
     };
     var loaded = await this.loadData() || {};
     this.settings = Object.assign({}, defaults, loaded);
+    rwEnsureWorldlineSettings(this);
     ACTIVE_TIMELINE_ERA = this.settings.timelineEra || 'auto';
     ACTIVE_STORY_CALENDAR = { startMonth: this.settings.calendarYearStartMonth || 1, assistMode: this.settings.calendarAssistMode || 'auto', rolloverBeforeStart: this.settings.calendarRolloverBeforeStart === true, monthNames: Array.isArray(this.settings.calendarMonthNames) ? this.settings.calendarMonthNames : defaults.calendarMonthNames, seasonMonths: this.settings.calendarSeasonMonths || { spring: [1,2,3], summer: [4,5,6], autumn: [7,8,9], winter: [10,11,12] } };
 };
