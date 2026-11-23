@@ -4,6 +4,56 @@ function __extends(d, b) {
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
 }var obsidian = require('obsidian');
 
+// 人物档案字段别名统一器。放在模块顶层，确保 DetailModal 展示/编辑均可访问。
+// 同一语义只生成一个界面字段；优先采用规范字段的非空值，否则采用别名的非空值。
+function rwGetCharacterFieldAliasState(fields) {
+    fields = fields || {};
+    var groups = [
+        ['出生时间', '出生', '出生日期'],
+        ['死亡时间', '死亡', '死亡日期'],
+        ['正文首次出现', '首次出场'],
+        ['阵营', '所属组织', '势力', '所属势力', '组织']
+    ];
+    var normalized = Object.assign({}, fields);
+    var hidden = {}, membersByPrimary = {}, canonicalByKey = {};
+    groups.forEach(function(group) {
+        group.forEach(function(k) { canonicalByKey[k] = group[0]; });
+        var present = group.filter(function(k) { return Object.prototype.hasOwnProperty.call(fields, k); });
+        if (!present.length) return;
+        var primary = group[0];
+        var chosen = '';
+        // 先取规范字段，再按别名顺序取第一个非空值；不因空白默认值遮蔽继承值。
+        if (primary === '阵营') {
+            var organizationValues = [];
+            group.forEach(function(k) {
+                var raw = fields[k];
+                if (raw === undefined || raw === null || String(raw).trim() === '') return;
+                String(raw).split(/[,，、;；|/]/).forEach(function(part) {
+                    var value = String(part || '').trim();
+                    if (value && organizationValues.indexOf(value) < 0) organizationValues.push(value);
+                });
+            });
+            chosen = organizationValues.join('、');
+        } else {
+            for (var i = 0; i < group.length; i++) {
+                var value = fields[group[i]];
+                if (value !== undefined && value !== null && String(value).trim() !== '') { chosen = value; break; }
+            }
+        }
+        present.forEach(function(k) { if (k !== primary) hidden[k] = true; });
+        membersByPrimary[primary] = present.slice();
+        group.forEach(function(k) { if (k !== primary) delete normalized[k]; });
+        normalized[primary] = chosen;
+    });
+    return { hidden: hidden, membersByPrimary: membersByPrimary, canonicalByKey: canonicalByKey, fields: normalized };
+}
+
+// 职位只属于组织任职履历；旧人物 MD 中若仍有职位字段，仅保留原值，不再作为基础档案项目展示或新增。
+function rwIsLegacyCharacterPositionField(key) {
+    return /^(职位|当前职位|现任职位|组织职位|任职职位)$/.test(String(key || '').trim());
+}
+
+
 // Unified character mention highlighter: every rendered text surface points to the
 // same character detail modal. Longest names win to avoid partial-name collisions.
 function rwHighlightCharacterMentions(root, view) {
@@ -397,8 +447,8 @@ function rwResolveChapterRecord(settings, reference) {
     }
     return null;
 }
-// 章节时间允许填写区间（如「公元前177年3月-9月」）。
-// 区间本身保留作章节展示；需要给人物首次出现/事件默认时间时，取区间结束月份。
+// 章节时间允许填写一个连续区间，也允许用分号填写多个独立时间段。
+// 单一区间可用结束月份作为默认时间；多段章节不返回唯一默认时间，具体事件需明确填写时间。
 function rwParseChapterTimeRange(raw) {
     var value = String(raw == null ? '' : raw).trim();
     if (!value) return null;
@@ -409,8 +459,14 @@ function rwParseChapterTimeRange(raw) {
     var end = prefix + parseInt(m[4], 10) + '月';
     return { start: start, end: end, display: value };
 }
+function rwSplitChapterStoryTimes(raw) {
+    return String(raw == null ? '' : raw).split(/[；;\n]+/).map(function(x) { return x.trim(); }).filter(Boolean);
+}
 function rwGetChapterDefaultStoryTime(raw) {
-    var value = String(raw == null ? '' : raw).trim();
+    var segments = rwSplitChapterStoryTimes(raw);
+    // 一个章节可跨多个故事时间段；没有事件级明确时间时，绝不擅自选其中一个作为唯一时间。
+    if (segments.length > 1) return '';
+    var value = segments.length ? segments[0] : '';
     var range = rwParseChapterTimeRange(value);
     return range ? range.end : value;
 }
@@ -497,7 +553,9 @@ function getRelationCategoryConfig(plugin, category) {
     var saved = plugin && plugin.settings && plugin.settings.relationCategoryConfigs;
     var base = DEFAULT_RELATION_CATEGORY_CONFIGS[category] || { color: '#7f8c8d', types: [] };
     var item = saved && saved[category] ? saved[category] : {};
-    return { color: item.color || base.color, types: Array.isArray(item.types) ? item.types.slice() : base.types.slice() };
+    var deleted = plugin && plugin.settings && Array.isArray(plugin.settings.deletedRelationTypeValues) ? plugin.settings.deletedRelationTypeValues : [];
+    var types = Array.isArray(item.types) ? item.types.slice() : base.types.slice();
+    return { color: item.color || base.color, types: types.filter(function(type) { return deleted.indexOf(String(type || '').trim()) < 0; }) };
 }
 function getRelationCategoryColor(plugin, category) {
     return getRelationCategoryConfig(plugin, category).color || '#7f8c8d';
@@ -861,6 +919,12 @@ function rwChapterPickerValue(chapter) { return chapter && chapter.path ? '[[' +
 
 function parseEventMeta(eventText) {
     var text = eventText;
+    var hiddenSourceWorldlineId = '', hiddenSourceEventRef = '';
+    var hiddenSource = text.match(/\s*<!--\s*RW_EVENT_SOURCE:([^|>]*)\|([^>]*)-->\s*/);
+    if (hiddenSource) {
+        try { hiddenSourceWorldlineId = decodeURIComponent(hiddenSource[1]); hiddenSourceEventRef = decodeURIComponent(hiddenSource[2]); } catch (_) {}
+        text = text.replace(hiddenSource[0], ' ');
+    }
     var plotLine = '';
     var plotStatus = '';
     var chapterNote = '';
@@ -897,8 +961,8 @@ function parseEventMeta(eventText) {
     conflictLevel = takeMeta('冲突');
     mergeInto = takeMeta('并入');
     eventSet = takeMeta('事件集');
-    sourceWorldlineId = takeMeta('来源世界线');
-    sourceEventRef = takeMeta('来源事件');
+    sourceWorldlineId = hiddenSourceWorldlineId || takeMeta('来源世界线');
+    sourceEventRef = hiddenSourceEventRef || takeMeta('来源事件');
     storyYear = takeMeta('纪年');
     var storyDesignRaw = takeMeta('故事设计');
     if (storyDesignRaw) { try { storyDesigns = JSON.parse(decodeURIComponent(storyDesignRaw)); } catch (e) { storyDesigns = {}; } }
@@ -914,7 +978,7 @@ function parseEventMeta(eventText) {
 
 function serializeEventMeta(rec) {
     var parts = [rec.event];
-    if (Array.isArray(rec.secondaryTags) && rec.secondaryTags.length) parts.push('次标签:' + encodeURIComponent(JSON.stringify(rec.secondaryTags)));
+    if (Array.isArray(rec.secondaryTags) && rec.secondaryTags.length) parts.push('次标签:' + rec.secondaryTags.map(function(tag){ return String(tag || '').trim(); }).filter(Boolean).join('、'));
     if (rec.plotLine) parts.push('情节线:' + rec.plotLine);
     if (rec.plotStatus) parts.push('状态:' + rec.plotStatus);
     if (rec.plotBeat) parts.push('节拍:' + rec.plotBeat);
@@ -922,8 +986,6 @@ function serializeEventMeta(rec) {
     if (rec.conflictLevel) parts.push('冲突:' + rec.conflictLevel);
     if (rec.mergeInto) parts.push('并入:' + rec.mergeInto);
     if (rec.eventSet) parts.push('事件集:' + rec.eventSet);
-    if (rec.sourceWorldlineId) parts.push('来源世界线:' + rec.sourceWorldlineId);
-    if (rec.sourceEventRef) parts.push('来源事件:' + rec.sourceEventRef);
     if (rec.storyYear) parts.push('纪年:' + rec.storyYear);
     var chapterNotes = normalizeChapterNotes(rec.chapterNotes);
     if (chapterNotes.length) parts.push('章节:' + chapterNotes.join('、'));
@@ -1015,33 +1077,54 @@ function parseTimelineExtended(content, settings) {
     return records;
 }
 
-function getRelationMetaPath(plugin) {
-    var folder = (plugin.settings.charFolder || '').trim();
-    if (!folder) {
+function getRelationMetaPath(plugin, worldlineId) {
+    // 关系阵营文件有独立的项目级路径；未单独配置时兼容沿用人物资料目录。
+    var settings = plugin && plugin.settings || {};
+    var folder = String(settings.relationMetaFolder || '').trim();
+    if (!folder) folder = String(settings.charFolder || '').trim();
+
+    // 仅旧版默认项目允许沿用活动笔记目录；新建项目绝不跟随编辑器焦点。
+    if (!folder && rwGetProjectId(plugin) === 'project-default') {
         var active = plugin.app.workspace.getActiveFile();
         if (active && active.parent) folder = active.parent.path;
     }
-    var fname = (plugin.settings.relationMetaFile || '关系与阵营.md').trim();
+    if (!folder && rwGetProjectId(plugin) !== 'project-default') {
+        var projectRecord = rwGetActiveProjectRecord(plugin);
+        folder = rwProjectFolderName(projectRecord && projectRecord.name || '小说项目', rwGetProjectId(plugin));
+    }
+    var fname = String(settings.relationMetaFile || '关系与阵营.md').trim() || '关系与阵营.md';
     return normalizeVaultPath(folder ? folder + '/' + fname : fname);
+}
+
+function rwIsRelationMetaSectionHeading(line, sectionName) {
+    // 只识别独立章节标题；不能把文档总标题「关系与阵营」误判为「关系」章节。
+    // 同时兼容 #关系、# 关系、##关系、## 关系等常见 Markdown 写法。
+    var text = String(line || '').trim();
+    var escaped = String(sectionName || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp('^#{1,2}\\s*' + escaped + '\\s*$').test(text);
 }
 
 function parseFactionsFromMd(content) {
     var factions = [];
-    var lines = content.split('\n');
+    var lines = String(content || '').split(/\r?\n/);
     var current = null;
     var inFactionSection = false;
 
     for (var i = 0; i < lines.length; i++) {
         var t = lines[i].trim();
-        if (t === '# 阵营' || t === '## 阵营') { inFactionSection = true; continue; }
-        if (t.startsWith('# 关系') || t === '## 关系') { inFactionSection = false; if (current) { factions.push(current); current = null; } continue; }
+        if (rwIsRelationMetaSectionHeading(t, '阵营')) { inFactionSection = true; continue; }
+        if (rwIsRelationMetaSectionHeading(t, '关系')) {
+            inFactionSection = false;
+            if (current) { factions.push(current); current = null; }
+            continue;
+        }
         if (!inFactionSection) continue;
         if (t.startsWith('## ')) {
             if (current) factions.push(current);
             current = { name: t.substring(3).trim(), color: '#4a90e2', desc: '' };
             continue;
         }
-        if (current && t.startsWith('- ')) {
+        if (current && (t.startsWith('- ') || t.startsWith('* '))) {
             var body = t.substring(2);
             var sep = body.indexOf('：') !== -1 ? body.indexOf('：') : body.indexOf(':');
             if (sep !== -1) {
@@ -1049,8 +1132,7 @@ function parseFactionsFromMd(content) {
                 var v = body.substring(sep + 1).trim();
                 if (k === '颜色') current.color = v;
                 if (k === '描述') current.desc = v;
-                // 组织上级关系必须写入关系与阵营 Markdown，避免加载时被 MD 数据覆盖后丢失。
-                if (k === '上级组织' || k === '上级') current.parentOrganization = v === '无' || v === '无' ? '' : v;
+                if (k === '上级组织' || k === '上级') current.parentOrganization = v === '无' ? '' : v;
             }
         }
     }
@@ -1060,14 +1142,19 @@ function parseFactionsFromMd(content) {
 
 function parseRelationsFromMd(content) {
     var relations = [];
-    var lines = content.split('\n');
+    var lines = String(content || '').split(/\r?\n/);
     var current = null;
     var inRelSection = false;
 
     for (var i = 0; i < lines.length; i++) {
         var t = lines[i].trim();
-        if (t.startsWith('# 关系') || t === '## 关系') { inRelSection = true; continue; }
-        if (inRelSection && (t === '# 阵营' || t === '## 阵营')) break;
+        // 只在独立的「关系」章节开始解析，忽略文档总标题「关系与阵营」。
+        if (rwIsRelationMetaSectionHeading(t, '关系')) { inRelSection = true; continue; }
+        if (inRelSection && rwIsRelationMetaSectionHeading(t, '阵营')) {
+            if (current && current.charA && current.charB) relations.push(current);
+            current = null;
+            break;
+        }
         if (!inRelSection) continue;
         if (t.startsWith('## ')) {
             if (current && current.charA && current.charB) relations.push(current);
@@ -1084,14 +1171,18 @@ function parseRelationsFromMd(content) {
             };
             continue;
         }
-        if (current && t.startsWith('- ')) {
+        if (current && (t.startsWith('- ') || t.startsWith('* '))) {
             var body = t.substring(2);
             var sep = body.indexOf('：') !== -1 ? body.indexOf('：') : body.indexOf(':');
             if (sep !== -1) {
                 var k = body.substring(0, sep).trim();
                 var v = body.substring(sep + 1).trim();
-                if (k === '类型') current.type = v;
-                else if (k === '亲密度') current.intimacy = parseInt(v, 10) || 0;
+                if (k === '上属分类' || k === '上属类型' || k === '关系分类' || k === '分类') current.category = v;
+                else if (k === '类型' || k === '关系类型') current.type = v;
+                else if (k === '亲密度') {
+                    var intimacyValue = parseInt(v, 10);
+                    current.intimacy = isNaN(intimacyValue) ? 0 : intimacyValue;
+                }
                 else if (k === '描述') current.desc = v;
                 else if (k === '开始' || k === '开始时间') current.startTime = v;
                 else if (k === '结束' || k === '结束时间') current.endTime = v;
@@ -1100,6 +1191,52 @@ function parseRelationsFromMd(content) {
     }
     if (current && current.charA && current.charB) relations.push(current);
     return relations;
+}
+
+// Markdown 与世界线仓库双向合并：
+// - MD 明确写出的分类始终优先，允许作者直接在 MD 修改分类；
+// - 旧 MD 没有分类字段时，若关系本身未变则继承仓库中的分类，避免刷新丢失；
+// - 作者在 MD 修改了具体关系类型但未填写分类时，按新类型重新推断；
+// - 保留 MD 未承载的内部元数据（如稳定 ID），避免一次解析就把它们清空。
+function rwMergeRelationCategoriesFromStore(markdownRelations, storedRelations) {
+    var incoming = Array.isArray(markdownRelations) ? markdownRelations : [];
+    var stored = Array.isArray(storedRelations) ? storedRelations : [];
+    var used = Object.create(null);
+    function pairKey(r) {
+        return [String(r && r.charA || '').trim(), String(r && r.charB || '').trim()].sort().join('\u0000');
+    }
+    function sameType(a, b) {
+        return String(a && a.type || '') === String(b && b.type || '');
+    }
+    function sameOptionalTime(a, b, key) {
+        return String(a && a[key] || '') === String(b && b[key] || '');
+    }
+    return incoming.map(function(md) {
+        var pair = pairKey(md);
+        var candidates = [];
+        for (var i = 0; i < stored.length; i++) {
+            if (!used[i] && pairKey(stored[i]) === pair) candidates.push(i);
+        }
+        var match = -1;
+        for (var c = 0; c < candidates.length; c++) {
+            var idx = candidates[c], old = stored[idx];
+            if (sameType(old, md) && sameOptionalTime(old, md, 'startTime') && sameOptionalTime(old, md, 'endTime')) {
+                match = idx; break;
+            }
+        }
+        if (match < 0) {
+            var sameTypeCandidates = candidates.filter(function(idx) { return sameType(stored[idx], md); });
+            if (sameTypeCandidates.length === 1) match = sameTypeCandidates[0];
+        }
+        if (match < 0 && candidates.length === 1) match = candidates[0];
+        var merged = match >= 0 ? Object.assign({}, stored[match], md) : Object.assign({}, md);
+        var explicitCategory = Object.prototype.hasOwnProperty.call(md, 'category') && String(md.category || '').trim();
+        if (explicitCategory) merged.category = String(md.category).trim();
+        else if (match >= 0 && sameType(stored[match], md) && String(stored[match].category || '').trim()) merged.category = stored[match].category;
+        else merged.category = inferRelationCategory(md.type);
+        if (match >= 0) used[match] = true;
+        return merged;
+    });
 }
 
 function serializeRelationMetaMd(factions, relations) {
@@ -1124,6 +1261,8 @@ function serializeRelationMetaMd(factions, relations) {
         for (var ri = 0; ri < relations.length; ri++) {
             var r = relations[ri];
             lines.push('## ' + r.charA + ' · ' + r.charB);
+            // 上属分类与具体关系分别持久化，避免筛选分类只存在于插件内存中。
+            lines.push('- 上属分类：' + (String(r.category || '').trim() || inferRelationCategory(r.type || '其他')));
             lines.push('- 类型：' + (r.type || '其他'));
             lines.push('- 亲密度：' + (r.intimacy || 0));
             if (r.desc) lines.push('- 描述：' + r.desc);
@@ -1135,40 +1274,344 @@ function serializeRelationMetaMd(factions, relations) {
     return lines.join('\n');
 }
 
+var RW_RELATION_WORLDLINE_STORE_KEY = 'RW_RELATION_WORLDLINE_STORE_V1';
+var RW_RELATION_WORLDLINE_DATA_FILE = 'relation-worldlines.json';
+function rwGetRelationWorldlineStore(content) {
+    var source = String(content || '');
+    var marker = new RegExp('<!--\\s*' + RW_RELATION_WORLDLINE_STORE_KEY + '\\b');
+    var hasStoreBlock = marker.test(source);
+    var parsed = rwReadHiddenStore(source, RW_RELATION_WORLDLINE_STORE_KEY);
+    if (hasStoreBlock && !parsed) throw new Error('关系阵营旧隐藏数据块不完整或无法解析；已进入只读保护，原文件不会被修改。');
+    return parsed || { version: 1, worlds: {} };
+}
+function rwGetProjectId(plugin) {
+    return plugin && plugin._rwProjectSystem && plugin._rwProjectSystem.activeProjectId || 'project-default';
+}
+function rwGetProjectStorageDir(plugin) {
+    var base = plugin.app.vault.configDir + '/plugins/' + plugin.manifest.id;
+    var id = rwGetProjectId(plugin);
+    // 旧数据所属的默认项目继续使用 3.64.0 原路径，避免首次升级时搬动或覆盖旧文件。
+    return id === 'project-default' ? base : base + '/projects/' + String(id).replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+function rwRelationWorldlineDataPath(plugin) {
+    return rwGetProjectStorageDir(plugin) + '/' + RW_RELATION_WORLDLINE_DATA_FILE;
+}
+// 外置仓库写入先落临时文件并回读校验；成功后才清理 MD 中的旧隐藏块。
+async function rwSaveRelationWorldlineStore(plugin, content, store) {
+    var adapter = plugin.app.vault.adapter, path = rwRelationWorldlineDataPath(plugin);
+    var dir = path.substring(0, path.lastIndexOf('/'));
+    if (!await adapter.exists(dir)) await rwEnsureVaultFolder(adapter, dir);
+    var payload = JSON.stringify(store || { version: 1, worlds: {} }, null, 2);
+    var temp = path + '.tmp', backup = path + '.bak';
+    await adapter.write(temp, payload);
+    var check = JSON.parse(await adapter.read(temp));
+    if (!check || typeof check !== 'object' || !check.worlds || typeof check.worlds !== 'object') throw new Error('关系世界线外置数据校验失败，原 MD 数据保留。');
+    var hadOld = await adapter.exists(path);
+    if (hadOld) {
+        var oldText = await adapter.read(path);
+        JSON.parse(oldText);
+        await adapter.write(backup, oldText);
+    }
+    try {
+        if (hadOld) await adapter.remove(path);
+        await adapter.rename(temp, path);
+        JSON.parse(await adapter.read(path));
+    } catch (e) {
+        try { if (await adapter.exists(path)) await adapter.remove(path); } catch (_) {}
+        try { if (hadOld && await adapter.exists(backup)) await adapter.copy(backup, path); } catch (_) {}
+        throw e;
+    }
+    return rwRemoveHiddenStore(content, RW_RELATION_WORLDLINE_STORE_KEY);
+}
+async function rwLoadRelationWorldlineStore(plugin, content) {
+    var projectIdAtStart = rwGetProjectId(plugin);
+    var mdPathAtStart = getRelationMetaPath(plugin);
+    var adapter = plugin.app.vault.adapter, path = rwRelationWorldlineDataPath(plugin);
+    if (await adapter.exists(path)) {
+        var external = JSON.parse(await adapter.read(path));
+        if (!external || typeof external !== 'object' || !external.worlds || typeof external.worlds !== 'object') throw new Error('插件目录中的关系世界线数据结构无效；为保护数据已停止读取。');
+        // 上次迁移若在外置文件落盘后、清理 MD 前中断，本次只清理旧副本，不再导入或覆盖外置数据。
+        if (rwGetProjectId(plugin) === projectIdAtStart && String(content || '').indexOf('<!-- ' + RW_RELATION_WORLDLINE_STORE_KEY) >= 0) {
+            var cleanExisting = rwRemoveHiddenStore(content, RW_RELATION_WORLDLINE_STORE_KEY);
+            var mdFile = plugin.app.vault.getAbstractFileByPath(mdPathAtStart);
+            if (mdFile && cleanExisting !== content) await plugin.app.vault.modify(mdFile, cleanExisting);
+        }
+        return external;
+    }
+    // 首次迁移：必须先解析旧块并成功写入、回读外置文件，才允许删除 MD 中的旧块。
+    if (rwGetProjectId(plugin) !== projectIdAtStart) throw new Error('小说项目已切换，已取消旧项目关系数据迁移。');
+    var legacy = rwGetRelationWorldlineStore(content);
+    var hasLegacy = String(content || '').indexOf('<!-- ' + RW_RELATION_WORLDLINE_STORE_KEY) >= 0;
+    if (hasLegacy) {
+        var clean = await rwSaveRelationWorldlineStore(plugin, content, legacy);
+        if (rwGetProjectId(plugin) !== projectIdAtStart) return legacy;
+        var file = plugin.app.vault.getAbstractFileByPath(mdPathAtStart);
+        if (file && clean !== content) await plugin.app.vault.modify(file, clean);
+    }
+    return legacy;
+}
+
+function rwRelationRecordKey(key, item, index) {
+    if (!item || typeof item !== 'object') return 'index:' + index;
+    if (key === 'factions') return 'name:' + String(item.name || '');
+    if (key === 'relations') return 'id:' + String(item.id || [item.charA,item.charB,item.type].join('|'));
+    return 'id:' + String(item.id || [item.from,item.to,item.character,item.organization,item.name,item.territory].join('|'));
+}
+function rwBuildRelationDelta(key, before, after) {
+    var beforeMap = Object.create(null), afterMap = Object.create(null), upsert = [], patches = [], remove = [];
+    (before || []).forEach(function(item,i){beforeMap[rwRelationRecordKey(key,item,i)] = item;});
+    (after || []).forEach(function(item,i){
+        var k=rwRelationRecordKey(key,item,i), old=beforeMap[k]; afterMap[k]=item;
+        if (!old) { upsert.push(deepCloneJson(item)); return; }
+        if (JSON.stringify(old) === JSON.stringify(item)) return;
+        var fields = {}, allKeys = Object.create(null);
+        Object.keys(old).forEach(function(f){allKeys[f]=true;}); Object.keys(item).forEach(function(f){allKeys[f]=true;});
+        Object.keys(allKeys).forEach(function(f){
+            if (JSON.stringify(old[f]) === JSON.stringify(item[f]) && Object.prototype.hasOwnProperty.call(old,f) === Object.prototype.hasOwnProperty.call(item,f)) return;
+            fields[f] = Object.prototype.hasOwnProperty.call(item,f) ? deepCloneJson(item[f]) : { __rwDeleteField: true };
+        });
+        patches.push({ key: k, fields: fields });
+    });
+    Object.keys(beforeMap).forEach(function(k){if(!Object.prototype.hasOwnProperty.call(afterMap,k))remove.push(k);});
+    return { upsert: upsert, patches: patches, remove: remove };
+}
+function rwApplyRelationDelta(key, current, delta) {
+    var map = Object.create(null), order = [];
+    (current || []).forEach(function(item,i){var k=rwRelationRecordKey(key,item,i);map[k]=deepCloneJson(item);order.push(k);});
+    (delta && delta.remove || []).forEach(function(k){delete map[k];});
+    (delta && delta.upsert || []).forEach(function(item,i){var k=rwRelationRecordKey(key,item,i);if(!Object.prototype.hasOwnProperty.call(map,k))order.push(k);map[k]=deepCloneJson(item);});
+    (delta && delta.patches || []).forEach(function(patch){
+        if (!patch || !map[patch.key]) return;
+        Object.keys(patch.fields || {}).forEach(function(field){var value=patch.fields[field];if(value && value.__rwDeleteField)delete map[patch.key][field];else map[patch.key][field]=deepCloneJson(value);});
+    });
+    return order.filter(function(k,i){return Object.prototype.hasOwnProperty.call(map,k)&&order.indexOf(k)===i;}).map(function(k){return map[k];});
+}
+
+function rwAppendRelationStoreChange(store, worldlineId, key, beforeValue, afterValue, storyTime, baseline) {
+    if (!Array.isArray(store.changeHistory)) store.changeHistory = [];
+    var before = deepCloneJson(Array.isArray(beforeValue) ? beforeValue : []), after = deepCloneJson(Array.isArray(afterValue) ? afterValue : []);
+    if (!baseline && JSON.stringify(before) === JSON.stringify(after)) return;
+    var delta = baseline ? null : rwBuildRelationDelta(key, before, after);
+    store.changeHistory.push({ id: 'rwh_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,9), worldlineId: worldlineId, entityType: key, time: String(storyTime || ''), before: baseline ? before : undefined, after: baseline ? after : undefined, delta: delta, baseline: !!baseline, createdAt: Date.now() });
+}
+function rwGetEffectiveRelationStoreState(plugin, store, worldlineId, currentTime) {
+    var lineage = rwGetWorldlineLineage(plugin, worldlineId, currentTime), state = Object.create(null);
+    var keys = ['factions','relations','orgRelations','orgMemberships','orgPositionDefs','orgTerritoryChanges'];
+    lineage.forEach(function(item, index) {
+        var data = store && store.worlds && store.worlds[item.id]; if (!data) return;
+        keys.forEach(function(key) {
+            var records = (store.changeHistory || []).filter(function(r) { return r && r.worldlineId === item.id && r.entityType === key && rwTimeIsAtOrBefore(r.time, item.maxTime); });
+            records.sort(function(a,b) { return rwCompareStoryTime(a.time,b.time) || Number(a.createdAt||0)-Number(b.createdAt||0); });
+            if (records.length) {
+                if (!Object.prototype.hasOwnProperty.call(state,key)) {
+                    var firstApplicableBaseline = records.find(function(r) { return r.baseline && rwTimeIsAtOrBefore(r.time, currentTime); });
+                    var firstChange = records.find(function(r) { return !r.baseline; });
+                    if (firstApplicableBaseline) state[key] = deepCloneJson(firstApplicableBaseline.after || []);
+                    else if (firstChange) state[key] = deepCloneJson(firstChange.before || []);
+                }
+                records.forEach(function(r) {
+                    if (!rwTimeIsAtOrBefore(r.time, currentTime)) return;
+                    if (r.baseline || !r.delta) state[key] = deepCloneJson(r.after || []);
+                    else state[key] = rwApplyRelationDelta(key, state[key] || [], r.delta);
+                });
+            } else if (!Object.prototype.hasOwnProperty.call(state,key) && Array.isArray(data[key])) {
+                state[key] = deepCloneJson(data[key]);
+            } else if (index > 0 && Array.isArray(data[key]) && data.branchPoint && rwTimeIsAtOrBefore(data.branchPoint, currentTime)) {
+                // Legacy branch snapshot without a ledger: use it from its fork point onward.
+                state[key] = deepCloneJson(data[key]);
+            }
+        });
+    });
+    return state;
+}
+
 async function loadRelationsFromMd(plugin) {
+    var projectIdAtStart = rwGetProjectId(plugin);
     var path = getRelationMetaPath(plugin);
     try {
         if (!await plugin.app.vault.adapter.exists(path)) return null;
+        if (rwGetProjectId(plugin) !== projectIdAtStart) return null;
         var content = await plugin.app.vault.adapter.read(path);
+        if (rwGetProjectId(plugin) !== projectIdAtStart) return null;
         if (!content || content.indexOf('# 关系') === -1) return null;
-        return {
-            factions: parseFactionsFromMd(content),
-            relations: parseRelationsFromMd(content)
-        };
+        var store = await rwLoadRelationWorldlineStore(plugin, content);
+        if (rwGetProjectId(plugin) !== projectIdAtStart) return null;
+        var active = rwGetActiveWorldline(plugin);
+        // 迁移 3.49–3.54 期间曾生成的「关系与阵营.世界线-ID.md」文件；
+        // 迁移只复制可解析的数据到唯一共享文件，不删除任何旧文件，确保可回滚。
+        var migratedLegacy = false;
+        if (!store.worlds || typeof store.worlds !== 'object') store.worlds = {};
+        var worldsForMigration = rwGetWorldlines(plugin);
+        for (var wmi = 0; wmi < worldsForMigration.length; wmi++) {
+            var legacyWorld = worldsForMigration[wmi];
+            if (!legacyWorld || !legacyWorld.id || store.worlds[legacyWorld.id]) continue;
+            if (legacyWorld.id === 'worldline-original') continue;
+            var legacyBase = (plugin.settings.relationMetaFile || '关系与阵营.md').trim();
+            var legacyDot = legacyBase.lastIndexOf('.');
+            var legacySuffix = '.世界线-' + String(legacyWorld.id).replace(/[^a-zA-Z0-9_-]/g, '_');
+            var legacyName = legacyDot > 0 ? legacyBase.substring(0, legacyDot) + legacySuffix + legacyBase.substring(legacyDot) : legacyBase + legacySuffix;
+            var legacyFolder = String(plugin.settings.relationMetaFolder || plugin.settings.charFolder || '').trim();
+            if (!legacyFolder && rwGetProjectId(plugin) === 'project-default') { var activeFileForLegacy = plugin.app.workspace.getActiveFile(); if (activeFileForLegacy && activeFileForLegacy.parent) legacyFolder = activeFileForLegacy.parent.path; }
+            if (!legacyFolder && rwGetProjectId(plugin) !== 'project-default') { var legacyProject = rwGetActiveProjectRecord(plugin); legacyFolder = rwProjectFolderName(legacyProject && legacyProject.name || '小说项目', rwGetProjectId(plugin)); }
+            var legacyPath = normalizeVaultPath(legacyFolder ? legacyFolder + '/' + legacyName : legacyName);
+            var legacyExists = await plugin.app.vault.adapter.exists(legacyPath);
+            if (rwGetProjectId(plugin) !== projectIdAtStart) return null;
+            if (!legacyExists) continue;
+            var legacyContent = await plugin.app.vault.adapter.read(legacyPath);
+            if (rwGetProjectId(plugin) !== projectIdAtStart) return null;
+            if (legacyContent.indexOf('# 关系') < 0) continue;
+            var migratedFactions = parseFactionsFromMd(legacyContent), migratedRelations = rwMergeRelationCategoriesFromStore(parseRelationsFromMd(legacyContent), []);
+            store.worlds[legacyWorld.id] = { factions: migratedFactions, relations: migratedRelations, parentWorldlineId: legacyWorld.parentWorldlineId || '', branchPoint: legacyWorld.branchPoint || '', migratedFrom: legacyPath, updatedAt: Date.now() };
+            var migrationBaselineTime = legacyWorld.id === 'worldline-original' ? '' : String(legacyWorld.branchPoint || '');
+            rwAppendRelationStoreChange(store, legacyWorld.id, 'factions', [], migratedFactions, migrationBaselineTime, true);
+            rwAppendRelationStoreChange(store, legacyWorld.id, 'relations', [], migratedRelations, migrationBaselineTime, true);
+            migratedLegacy = true;
+        }
+        if (migratedLegacy) {
+            var visibleLegacy = serializeRelationMetaMd(parseFactionsFromMd(content), parseRelationsFromMd(content));
+            content = await rwSaveRelationWorldlineStore(plugin, visibleLegacy, store);
+            if (rwGetProjectId(plugin) !== projectIdAtStart) return null;
+            var commonFile = plugin.app.vault.getAbstractFileByPath(path);
+            if (commonFile) await plugin.app.vault.modify(commonFile, content);
+        }
+        var worldData = active && store.worlds && store.worlds[active.id];
+        var effectiveStoreState = active ? rwGetEffectiveRelationStoreState(plugin, store, active.id, plugin.settings.currentTimePoint || '') : null;
+        // 新世界线尚未发生首次编辑时，也直接从父线分叉点读取继承状态。
+        // 这样作者刚创建世界线后回拨故事时间，不会误显示复制时的最新 JSON 快照。
+        if (active && active.id !== 'worldline-original' && !worldData && active.parentWorldlineId && store.worlds && store.worlds[active.parentWorldlineId]) {
+            var inheritedParentData = store.worlds[active.parentWorldlineId] || {};
+            var inheritedResult = {
+                factions: Array.isArray(effectiveStoreState && effectiveStoreState.factions) ? effectiveStoreState.factions : (inheritedParentData.factions || []),
+                relations: Array.isArray(effectiveStoreState && effectiveStoreState.relations) ? effectiveStoreState.relations : (inheritedParentData.relations || []),
+                fromWorldlineStore: true
+            };
+            ['orgRelations','orgMemberships','orgPositionDefs','orgTerritoryChanges'].forEach(function(key) {
+                var hasInheritedRecords = (store.changeHistory || []).some(function(r) {
+                    return r && r.entityType === key && rwGetWorldlineLineage(plugin, active.id, plugin.settings.currentTimePoint || '').some(function(lineageItem) { return lineageItem.id === r.worldlineId; });
+                });
+                if (Object.prototype.hasOwnProperty.call(inheritedParentData, key) || hasInheritedRecords) {
+                    inheritedResult[key] = Array.isArray(effectiveStoreState && effectiveStoreState[key]) ? effectiveStoreState[key] : (inheritedParentData[key] || []);
+                }
+            });
+            if (Array.isArray(inheritedParentData.intimacyHistory)) {
+                inheritedResult.intimacyHistory = rwFilterTimedRecordsAt(inheritedParentData.intimacyHistory, String(active.branchPoint || plugin.settings.currentTimePoint || ''), 'intimacy');
+            }
+            return inheritedResult;
+        }
+        if (worldData && typeof worldData === 'object') {
+            var storedFactions = effectiveStoreState.factions || [];
+            var storedRelations = effectiveStoreState.relations || [];
+            var activeStoryTime = String(plugin.settings.currentTimePoint || '');
+            if (store.visibleWorldlineId !== active.id || String(store.visibleTimePoint || '') !== activeStoryTime) {
+                // 可见正文属于上一条线时，先切换为当前线正文，绝不把上一线内容导入当前线。
+                store.visibleWorldlineId = active.id; store.visibleTimePoint = activeStoryTime;
+                content = await rwSaveRelationWorldlineStore(plugin, serializeRelationMetaMd(storedFactions, storedRelations), store);
+                var visibleFile = plugin.app.vault.getAbstractFileByPath(path);
+                if (visibleFile) await plugin.app.vault.modify(visibleFile, content);
+            } else {
+                var visibleFactions = parseFactionsFromMd(content), visibleRelations = rwMergeRelationCategoriesFromStore(parseRelationsFromMd(content), storedRelations);
+                // 可见 Markdown 正文仍允许作者直接编辑；若与当前线隐藏快照不同，
+                // 将正文视为作者最新修改并回写当前线隐藏区，不影响其他世界线。
+                if (JSON.stringify(visibleFactions) !== JSON.stringify(storedFactions) || JSON.stringify(visibleRelations) !== JSON.stringify(storedRelations)) {
+                    rwAppendRelationStoreChange(store, active.id, 'factions', storedFactions, visibleFactions, plugin.settings.currentTimePoint || '', false);
+                    rwAppendRelationStoreChange(store, active.id, 'relations', storedRelations, visibleRelations, plugin.settings.currentTimePoint || '', false);
+                    worldData.factions = visibleFactions; worldData.relations = visibleRelations; worldData.updatedAt = Date.now();
+                    store.visibleTimePoint = activeStoryTime;
+                    await plugin.app.vault.modify(plugin.app.vault.getAbstractFileByPath(path), await rwSaveRelationWorldlineStore(plugin, content, store));
+                    storedFactions = visibleFactions; storedRelations = visibleRelations;
+                }
+            }
+            return {
+                factions: storedFactions,
+                relations: storedRelations,
+                orgRelations: (Object.prototype.hasOwnProperty.call(worldData, 'orgRelations') || (store.changeHistory || []).some(function(r){return r.worldlineId === active.id && r.entityType === 'orgRelations';})) ? effectiveStoreState.orgRelations : undefined,
+                orgMemberships: (Object.prototype.hasOwnProperty.call(worldData, 'orgMemberships') || (store.changeHistory || []).some(function(r){return r.worldlineId === active.id && r.entityType === 'orgMemberships';})) ? effectiveStoreState.orgMemberships : undefined,
+                orgPositionDefs: (Object.prototype.hasOwnProperty.call(worldData, 'orgPositionDefs') || (store.changeHistory || []).some(function(r){return r.worldlineId === active.id && r.entityType === 'orgPositionDefs';})) ? effectiveStoreState.orgPositionDefs : undefined,
+                orgTerritoryChanges: (Object.prototype.hasOwnProperty.call(worldData, 'orgTerritoryChanges') || (store.changeHistory || []).some(function(r){return r.worldlineId === active.id && r.entityType === 'orgTerritoryChanges';})) ? effectiveStoreState.orgTerritoryChanges : undefined,
+                intimacyHistory: Array.isArray(worldData.intimacyHistory) ? rwFilterTimedRecordsAt(worldData.intimacyHistory, plugin.settings.currentTimePoint || '', 'intimacy') : undefined,
+                fromWorldlineStore: true
+            };
+        }
+        // 仅原始基线线可把旧版可见正文视为自身数据；新线没有隐藏快照时，
+        // 必须让 JSON 兼容层提供该线数据，不能误读主线正文造成串线。
+        if (active && active.id !== 'worldline-original') return null;
+        return { factions: parseFactionsFromMd(content), relations: rwMergeRelationCategoriesFromStore(parseRelationsFromMd(content), []) };
     } catch (e) {
+        if (String(e && e.message || e).indexOf('只读保护') !== -1) plugin._rwRelationStoreUnsafe = true;
         showUserError('读取关系与阵营文件失败', e);
         return null;
     }
 }
 
-async function saveRelationsToMd(plugin, factions, relations) {
+async function saveRelationsToMd(plugin, factions, relations, extendedState) {
+    var projectIdAtStart = rwGetProjectId(plugin);
     if (plugin.settings.syncRelationsToMd === false) return;
-    var path = getRelationMetaPath(plugin);
-    var content = serializeRelationMetaMd(factions, relations);
+    if (plugin._rwRelationStoreUnsafe) {
+        new obsidian.Notice('⚠️ 关系阵营数据文件解析异常，已阻止自动写入，原文件保持不变。请先恢复备份。', 10000);
+        return;
+    }
+    var path = getRelationMetaPath(plugin), content = '';
     try {
         var existing = plugin.app.vault.getAbstractFileByPath(path);
-        if (existing) {
-            await plugin.app.vault.modify(existing, content);
-        } else {
+        if (existing) content = await plugin.app.vault.read(existing);
+        if (rwGetProjectId(plugin) !== projectIdAtStart) return;
+        var store = await rwLoadRelationWorldlineStore(plugin, content);
+        if (rwGetProjectId(plugin) !== projectIdAtStart) return;
+        if (!store.worlds || typeof store.worlds !== 'object') store.worlds = {};
+        var active = rwGetActiveWorldline(plugin), worldlineId = active && active.id ? active.id : 'worldline-original';
+        // 写入当前世界线的完整关系/阵营快照，不触碰其他世界线的隐藏记录。
+        var previousWorldData = store.worlds[worldlineId] && typeof store.worlds[worldlineId] === 'object' ? store.worlds[worldlineId] : {};
+        var isBaseline = !store.worlds[worldlineId];
+        var storyTime = String(plugin.settings.currentTimePoint || (active && active.currentTimePoint) || '');
+        var nextWorldData = Object.assign({}, previousWorldData, {
+            factions: deepCloneJson(factions || []), relations: deepCloneJson(relations || []),
+            parentWorldlineId: active && active.parentWorldlineId || '', branchPoint: active && active.branchPoint || '', updatedAt: Date.now()
+        });
+        if (extendedState && typeof extendedState === 'object') {
+            ['orgRelations','orgMemberships','orgPositionDefs','orgTerritoryChanges','intimacyHistory'].forEach(function(key) {
+                if (Array.isArray(extendedState[key])) nextWorldData[key] = deepCloneJson(extendedState[key]);
+            });
+        }
+        ['factions','relations','orgRelations','orgMemberships','orgPositionDefs','orgTerritoryChanges'].forEach(function(key) {
+            var before = Array.isArray(previousWorldData[key]) ? previousWorldData[key] : [];
+            var after = Array.isArray(nextWorldData[key]) ? nextWorldData[key] : [];
+            var keyBaseline = isBaseline || !Object.prototype.hasOwnProperty.call(previousWorldData, key);
+            var baselineTime = keyBaseline && active && active.parentWorldlineId ? String(active.branchPoint || storyTime) : '';
+            rwAppendRelationStoreChange(store, worldlineId, key, before, after, keyBaseline ? baselineTime : storyTime, keyBaseline);
+        });
+        store.worlds[worldlineId] = nextWorldData;
+        store.visibleWorldlineId = worldlineId;
+        store.visibleTimePoint = String(plugin.settings.currentTimePoint || (active && active.currentTimePoint) || '');
+        var visible = serializeRelationMetaMd(factions, relations);
+        var nextContent = await rwSaveRelationWorldlineStore(plugin, visible, store);
+        if (rwGetProjectId(plugin) !== projectIdAtStart) return;
+        if (existing) await plugin.app.vault.modify(existing, nextContent);
+        else {
             var folder = path.substring(0, path.lastIndexOf('/'));
-            if (folder && !await plugin.app.vault.adapter.exists(folder)) {
-                await plugin.app.vault.adapter.mkdir(folder);
-            }
-            await plugin.app.vault.create(path, content);
+            if (folder && !await plugin.app.vault.adapter.exists(folder)) await plugin.app.vault.adapter.mkdir(folder);
+            await plugin.app.vault.create(path, nextContent);
+        }
+        if (rwGetProjectId(plugin) !== projectIdAtStart) return;
+        if (!plugin._rwSuppressWorldlineChangeLog) {
+            try { await rwRefreshWorldlineChangeLog(plugin, worldlineId); } catch (logError) { console.error('[Relation Weaver] 更新世界线变更记录失败：', logError); }
         }
     } catch (e) {
         showUserError('写入关系与阵营文件失败', e);
     }
+}
+
+async function rwPersistIntimacyHistoryToRelationMd(plugin) {
+    try {
+        var path = getRelationMetaPath(plugin), file = plugin.app.vault.getAbstractFileByPath(path);
+        if (!file) return;
+        var content = await plugin.app.vault.read(file), store = await rwLoadRelationWorldlineStore(plugin, content), active = rwGetActiveWorldline(plugin);
+        if (!active) return;
+        if (!store.worlds) store.worlds = {};
+        if (!store.worlds[active.id]) store.worlds[active.id] = { factions: [], relations: [] };
+        store.worlds[active.id].intimacyHistory = deepCloneJson(plugin._intimacyHistory || []);
+        store.worlds[active.id].updatedAt = Date.now();
+        await plugin.app.vault.modify(file, await rwSaveRelationWorldlineStore(plugin, content, store));
+    } catch (e) { console.error('[Relation Weaver] 亲密度历史写入共享关系阵营 MD 失败：', e); }
 }
 
 function stripWikiName(name) {
@@ -1616,6 +2059,10 @@ function appendCharRelationSections(outLines, charName, relations, intimacyHisto
 
 async function syncRelationsIntoCharMd(app, plugin, relations, intimacyHistory) {
     if (plugin.settings.syncRelationsToCharMd === false) return;
+    // 人物索引是跨事件线共享档案。关系与亲密度历史属于事件线动态状态，
+    // 只允许原始事件线继续使用旧版嵌入式存储；分支/独立线写入各自的数据文件。
+    var activeWorldline = rwGetActiveWorldline(plugin);
+    if (activeWorldline && activeWorldline.id !== 'worldline-original') return;
     // 与加载路径一致，避免写入/读取落到不同文件
     var fullPath = getCharFullPath(plugin);
     var file = app.vault.getAbstractFileByPath(fullPath);
@@ -1768,7 +2215,7 @@ function syncSettingsFromParsedData(plugin, chars, relations, timeline) {
     var builtInFields = {
         '身份': 1, '阵营': 1, '首次出场': 1, '死亡': 1, '死亡时间': 1,
         '出生': 1, '出生时间': 1, '年龄': 1, '性别': 1, '种族': 1,
-        '职业': 1, '居住地': 1, '别名': 1, '亲密人物': 1, '类型': 1, '章节笔记': 1
+        '职业': 1, '职位': 1, '当前职位': 1, '现任职位': 1, '组织职位': 1, '任职职位': 1, '所属组织': 1, '所属势力': 1, '势力': 1, '组织': 1, '居住地': 1, '别名': 1, '亲密人物': 1, '类型': 1, '章节笔记': 1
     };
     var fieldKeys = [];
     for (var i = 0; i < (chars || []).length; i++) {
@@ -2132,7 +2579,7 @@ async function rwStripLegacyEventIdentityMetadata(view, timelineFile, content) {
         var i = evt._lineIndex;
         if (i == null || i < 0 || i >= lines.length) return;
         var line = lines[i];
-        if (!/\|\s*(?:事件ID|故事设计)\s*[:：]/.test(line)) return;
+        if (!/\|\s*(?:事件ID|故事设计|来源世界线|来源事件)\s*[:：]/.test(line)) return;
         var prefix = (line.match(/^(\s*(?:[-*]\s*))/) || [''])[0];
         lines[i] = prefix + buildEventMdLine(evt).replace(/^-\s*/, '');
         changed = true;
@@ -2175,7 +2622,7 @@ async function rwUpdateEventRegistryAfterEdit(plugin, originalEvt, newEvt) {
 
 function buildEventMdLine(evt) {
     var tagPart = evt.tag ? '[' + evt.tag + '] ' : '';
-    return '- ' + tagPart + serializeEventMeta({
+    var line = '- ' + tagPart + serializeEventMeta({
         event: evt.event,
         secondaryTags: evt.secondaryTags || [],
         chapterNotes: evt.chapterNotes || (evt.chapterNote ? [evt.chapterNote] : []),
@@ -2191,6 +2638,10 @@ function buildEventMdLine(evt) {
         storyYear: evt.storyYear || '',
         chapterNote: evt.chapterNote || '',
     });
+    if (evt.sourceWorldlineId || evt.sourceEventRef) {
+        line += ' <!-- RW_EVENT_SOURCE:' + encodeURIComponent(String(evt.sourceWorldlineId || '')) + '|' + encodeURIComponent(String(evt.sourceEventRef || '')) + ' -->';
+    }
+    return line;
 }
 
 async function deleteEventFromMd(app, plugin, eventOrLineIndex) {
@@ -2319,29 +2770,61 @@ function buildCharMdBlock(name, fields, relations, intimacyHistory) {
 
 async function appendCharToMd(app, plugin, name, fields) {
     var activeWl = plugin && plugin.settings && Array.isArray(plugin.settings.timelineWorldlines) ? plugin.settings.timelineWorldlines.find(function(w){return w.id === plugin.settings.activeTimelineWorldlineId;}) : null;
+    var worldlineScopedFields = Object.keys(fields || {});
+    var dynamicValues = {};
+    var existingPath = getCharFullPathForExt(plugin);
+    var existingFile = app.vault.getAbstractFileByPath(existingPath);
+    var alreadyExists = false;
+    if (existingFile) { var existingText = await app.vault.read(existingFile); alreadyExists = existingText.indexOf('## ' + name) !== -1; }
     if (activeWl && activeWl.id !== 'worldline-original') {
-        var dynamicFields=['阵营','身份','职位','组织','出生','出生时间','死亡','死亡时间','正文首次出现','首次出场'];
-        var copied=Object.assign({},fields||{});
-        if(!plugin.settings.worldlineCharacterOverrides)plugin.settings.worldlineCharacterOverrides={};
-        if(!plugin.settings.worldlineCharacterOverrides[activeWl.id])plugin.settings.worldlineCharacterOverrides[activeWl.id]={};
-        plugin.settings.worldlineCharacterOverrides[activeWl.id][name]={};
-        dynamicFields.forEach(function(k){if(Object.prototype.hasOwnProperty.call(copied,k)){plugin.settings.worldlineCharacterOverrides[activeWl.id][name][k]=String(copied[k]||'');delete copied[k];}});
-        fields=copied; await plugin.saveSettings();
+        // 人物档案在全局 MD 中只有一个实体；在分支中新建时，完整字段写入该线快照，
+        // 不把分支专属内容写回全局基础档案。
+        var copied = Object.assign({}, fields || {});
+        if (!plugin.settings.worldlineCharacterOverrides) plugin.settings.worldlineCharacterOverrides = {};
+        if (!plugin.settings.worldlineCharacterOverrides[activeWl.id]) plugin.settings.worldlineCharacterOverrides[activeWl.id] = {};
+        if (!alreadyExists || !plugin.settings.worldlineCharacterOverrides[activeWl.id][name]) plugin.settings.worldlineCharacterOverrides[activeWl.id][name] = {};
+        worldlineScopedFields.forEach(function(k) {
+            var value = String(copied[k] == null ? '' : copied[k]);
+            dynamicValues[k] = value;
+            plugin.settings.worldlineCharacterOverrides[activeWl.id][name][k] = value;
+            delete copied[k];
+        });
+        fields = copied;
+        await plugin.saveSettings();
+    } else if (plugin && plugin.settings && Array.isArray(plugin.settings.timelineWorldlines)) {
+        // 在原世界线创建人物时，把初始完整档案作为已有分支的继承基线；不再写入空白覆盖值。
+        if (!plugin.settings.worldlineCharacterOverrides) plugin.settings.worldlineCharacterOverrides = {};
+        plugin.settings.timelineWorldlines.forEach(function(w) {
+            if (!w || w.id === 'worldline-original') return;
+            if (!plugin.settings.worldlineCharacterOverrides[w.id]) plugin.settings.worldlineCharacterOverrides[w.id] = {};
+            if (!plugin.settings.worldlineCharacterOverrides[w.id][name]) {
+                plugin.settings.worldlineCharacterOverrides[w.id][name] = {};
+                worldlineScopedFields.forEach(function(k) {
+                    plugin.settings.worldlineCharacterOverrides[w.id][name][k] = String(fields[k] == null ? '' : fields[k]);
+                });
+            }
+        });
+        await plugin.saveSettings();
     }
-    var path = plugin.settings.charFile ? resolveCharPathForExt(plugin) : '人物索引.md';
     var fullPath = getCharFullPathForExt(plugin);
     var block = buildCharMdBlock(name, fields);
     var existing = app.vault.getAbstractFileByPath(fullPath);
     if (existing) {
         var content = await app.vault.read(existing);
-        if (content.indexOf('## ' + name) !== -1) {
-            return updateCharInMd(app, plugin, name, fields);
-        }
+        if (content.indexOf('## ' + name) !== -1) return updateCharInMd(app, plugin, name, fields);
         await app.vault.modify(existing, content.trim() + '\n\n' + block + '\n');
     } else {
         var folder = fullPath.substring(0, fullPath.lastIndexOf('/'));
         if (folder && !await app.vault.adapter.exists(folder)) await app.vault.adapter.mkdir(folder);
         await app.vault.create(fullPath, '# 人物索引\n\n' + block + '\n');
+    }
+    if (activeWl && activeWl.id !== 'worldline-original' && Object.keys(dynamicValues).length) {
+        var historyFile = app.vault.getAbstractFileByPath(fullPath);
+        if (historyFile) {
+            var historyContent = await app.vault.read(historyFile), emptyBefore = {};
+            Object.keys(dynamicValues).forEach(function(k) { emptyBefore[k] = ''; });
+            await app.vault.modify(historyFile, rwAppendCharacterHistory(historyContent, plugin, activeWl.id, name, dynamicValues, emptyBefore));
+        }
     }
 }
 
@@ -2401,104 +2884,329 @@ async function deleteCharacterAndLinkedEvents(app, plugin, view, name, deleteLin
             plugin.settings.activeTimelineWorldlineId = activeId;
         }
     }
-    await app.vault.modify(charFile, out.join('\n'));
+    var cleanedCharacterContent = out.join('\n');
+    var characterHistoryStore = rwReadHiddenStore(charText, RW_CHARACTER_HISTORY_KEY);
+    if (characterHistoryStore && Array.isArray(characterHistoryStore.records)) {
+        characterHistoryStore.records = characterHistoryStore.records.filter(function(r) { return r.character !== name; });
+        cleanedCharacterContent = rwWriteHiddenStore(cleanedCharacterContent, RW_CHARACTER_HISTORY_KEY, characterHistoryStore);
+    }
+    await app.vault.modify(charFile, cleanedCharacterContent);
     if (plugin.settings.worldlineCharacterOverrides) Object.keys(plugin.settings.worldlineCharacterOverrides).forEach(function(wid) { delete plugin.settings.worldlineCharacterOverrides[wid][name]; });
     if (Array.isArray(plugin.settings.orgMemberships)) plugin.settings.orgMemberships = plugin.settings.orgMemberships.filter(function(r) { return r.character !== name; });
     await rwSaveEventRegistry(plugin);
     await plugin.saveSettings();
-    if (view) { view._lastCharMd = out.join('\n'); await view.loadAllData({ silent: true }); }
+    if (view) { view._lastCharMd = cleanedCharacterContent; await view.loadAllData({ silent: true }); }
     return { timelineDeleted: timelineDeleted };
 }
 
-async function updateCharInMd(app, plugin, name, fields) {
-    var activeWl = plugin && plugin.settings && Array.isArray(plugin.settings.timelineWorldlines) ? plugin.settings.timelineWorldlines.find(function(w){return w.id === plugin.settings.activeTimelineWorldlineId;}) : null;
-    var dynamicFields = ['阵营','身份','职位','组织','出生','出生时间','死亡','死亡时间','正文首次出现','首次出场'];
-    if (activeWl && activeWl.id !== 'worldline-original') {
-        if (!plugin.settings.worldlineCharacterOverrides) plugin.settings.worldlineCharacterOverrides = {};
-        if (!plugin.settings.worldlineCharacterOverrides[activeWl.id]) plugin.settings.worldlineCharacterOverrides[activeWl.id] = {};
-        if (!plugin.settings.worldlineCharacterOverrides[activeWl.id][name]) plugin.settings.worldlineCharacterOverrides[activeWl.id][name] = {};
-        dynamicFields.forEach(function(k){if(Object.prototype.hasOwnProperty.call(fields,k)) plugin.settings.worldlineCharacterOverrides[activeWl.id][name][k]=String(fields[k]||'');});
-        await plugin.saveSettings();
+// ============================================================
+// Unified worldline state engine — character dynamic history
+// Stored as an invisible Markdown comment in the single shared character file.
+// IDs remain implementation metadata and never enter ordinary Markdown text.
+// ============================================================
+var RW_CHARACTER_HISTORY_KEY = 'RW_CHARACTER_WORLDLINE_HISTORY_V1';
+function rwReadHiddenStore(content, key) {
+    var re = new RegExp('<!--\\s*' + key + '\\s*\\n([\\s\\S]*?)\\n\\s*-->', 'm');
+    var match = String(content || '').match(re);
+    if (!match) return null;
+    try { var value = JSON.parse(decodeURIComponent(match[1].trim())); return value && typeof value === 'object' ? value : null; }
+    catch (e) { console.error('[Relation Weaver] 隐藏元数据解析失败：' + key, e); return null; }
+}
+function rwWriteHiddenStore(content, key, value) {
+    var source = String(content || '').replace(/\s+$/, '');
+    var block = '<!-- ' + key + '\n' + encodeURIComponent(JSON.stringify(value || {})) + '\n-->';
+    var re = new RegExp('\\n?<!--\\s*' + key + '\\s*\\n[\\s\\S]*?\\n\\s*-->', 'm');
+    return (re.test(source) ? source.replace(re, '\n' + block) : (source ? source + '\n\n' : '') + block) + '\n';
+}
+function rwRemoveHiddenStore(content, key) {
+    var source = String(content || '');
+    var re = new RegExp('\\n?<!--\\s*' + key + '\\s*\\n[\\s\\S]*?\\n\\s*-->', 'm');
+    return source.replace(re, '').replace(/\n{3,}/g, '\n\n').replace(/\s+$/, '') + (source.trim() ? '\n' : '');
+}
+function rwCompareStoryTime(a, b) {
+    a = String(a || '').trim(); b = String(b || '').trim();
+    if (!a || !b) return a === b ? 0 : (!a ? -1 : 1);
+    var pa = parseHistoricalDate(a), pb = parseHistoricalDate(b);
+    if (pa && pb && pa.sortValue !== null && pb.sortValue !== null) return pa.sortValue - pb.sortValue;
+    return a.localeCompare(b, 'zh-Hant');
+}
+function rwTimeIsAtOrBefore(value, ceiling) {
+    if (!ceiling) return true;
+    if (!value) return true; // legacy/undated history is retained as baseline data
+    return rwCompareStoryTime(value, ceiling) <= 0;
+}
+function rwMinStoryTime(a, b) {
+    a = String(a || '').trim(); b = String(b || '').trim();
+    if (!a) return b; if (!b) return a;
+    return rwCompareStoryTime(a, b) <= 0 ? a : b;
+}
+function rwGetWorldlineLineage(plugin, worldlineId, currentTime) {
+    var all = rwGetWorldlines(plugin), byId = Object.create(null);
+    all.forEach(function(w) { if (w && w.id) byId[w.id] = w; });
+    var cursor = byId[worldlineId] || rwGetActiveWorldline(plugin), ceiling = '', chain = [], guard = Object.create(null);
+    while (cursor && cursor.id && !guard[cursor.id]) {
+        guard[cursor.id] = true;
+        chain.push({ id: cursor.id, maxTime: ceiling });
+        if (!cursor.parentWorldlineId || !byId[cursor.parentWorldlineId]) break;
+        ceiling = rwMinStoryTime(ceiling, cursor.branchPoint || '');
+        cursor = byId[cursor.parentWorldlineId];
     }
+    return chain.reverse();
+}
+function rwAppendCharacterHistory(content, plugin, worldlineId, charName, changes, beforeFields) {
+    // 新版人物历史写入插件设置（data.json），不再向全局人物 Markdown 追加隐藏 JSON。
+    // 兼容旧版：首次写入时先接收旧 MD 隐藏记录，再由调用方保存设置后清理旧块。
+    var legacyStore = rwReadHiddenStore(content, RW_CHARACTER_HISTORY_KEY) || { version: 1, records: [] };
+    var store = plugin.settings.worldlineCharacterHistory || legacyStore;
+    if (!Array.isArray(store.records)) store.records = [];
+    if (legacyStore.records && legacyStore.records.length && store !== legacyStore) {
+        var known = Object.create(null); store.records.forEach(function(r){known[r.id]=true;});
+        legacyStore.records.forEach(function(r){if(!known[r.id])store.records.push(r);});
+    }
+    var world = rwGetWorldlines(plugin).find(function(w) { return w.id === worldlineId; });
+    var storyTime = String((world && world.currentTimePoint) || plugin.settings.currentTimePoint || '').trim();
+    Object.keys(changes || {}).forEach(function(field) {
+        var value = String(changes[field] == null ? '' : changes[field]);
+        var previous = beforeFields && Object.prototype.hasOwnProperty.call(beforeFields, field) ? String(beforeFields[field] == null ? '' : beforeFields[field]) : '';
+        if (previous === value) return;
+        store.records.push({ id: 'cwh_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 9), worldlineId: worldlineId || 'worldline-original', character: charName, field: field, time: storyTime, beforeValue: previous, value: value, createdAt: Date.now() });
+    });
+    plugin.settings.worldlineCharacterHistory = store;
+    return rwRemoveHiddenStore(content, RW_CHARACTER_HISTORY_KEY);
+}
+function rwGetEffectiveCharacterHistory(plugin, content, worldlineId, currentTime) {
+    var sidecar = plugin.settings.worldlineCharacterHistory || { records: [] };
+    var legacy = rwReadHiddenStore(content, RW_CHARACTER_HISTORY_KEY) || { records: [] };
+    var mergedRecords = [], seenRecordIds = Object.create(null);
+    (sidecar.records || []).concat(legacy.records || []).forEach(function(r){if(!r)return;var key=String(r.id || JSON.stringify(r));if(seenRecordIds[key])return;seenRecordIds[key]=true;mergedRecords.push(r);});
+    var store = { records: mergedRecords };
+    if (!store.records.length) return {};
+    var lineage = rwGetWorldlineLineage(plugin, worldlineId, currentTime), rank = Object.create(null), limits = Object.create(null);
+    lineage.forEach(function(item, i) { rank[item.id] = i; limits[item.id] = item.maxTime; });
+    var records = store.records.filter(function(r) { return r && Object.prototype.hasOwnProperty.call(rank, r.worldlineId) && rwTimeIsAtOrBefore(r.time, limits[r.worldlineId]); });
+    records.sort(function(a, b) {
+        var timeOrder = rwCompareStoryTime(a.time, b.time);
+        return timeOrder || (Number(a.createdAt || 0) - Number(b.createdAt || 0));
+    });
+    var result = Object.create(null), initialized = Object.create(null);
+    records.forEach(function(r) {
+        if (!result[r.character]) result[r.character] = {};
+        var key = r.character + '\u0000' + r.field;
+        if (!initialized[key]) { result[r.character][r.field] = String(r.beforeValue == null ? '' : r.beforeValue); initialized[key] = true; }
+        if (rwTimeIsAtOrBefore(r.time, currentTime)) result[r.character][r.field] = String(r.value == null ? '' : r.value);
+    });
+    return result;
+}
+function rwApplyCharacterHistory(view, content) {
+    var active = rwGetActiveWorldline(view.plugin);
+    if (!active || !Array.isArray(view.chars)) return;
+    var state = rwGetEffectiveCharacterHistory(view.plugin, content, active.id, view.plugin.settings.currentTimePoint || '');
+    view.chars.forEach(function(ch) {
+        var fields = state[ch.name];
+        if (!fields) return;
+        if (!ch.fields) ch.fields = {};
+        Object.keys(fields).forEach(function(key) { ch.fields[key] = fields[key]; });
+    });
+}
+
+function rwBuildCharacterWorldlineSnapshot(chars) {
+    var snapshot = {};
+    (Array.isArray(chars) ? chars : []).forEach(function(character) {
+        if (!character || !character.name) return;
+        var fields = {};
+        Object.keys(character.fields || {}).forEach(function(key) { fields[key] = String(character.fields[key] == null ? '' : character.fields[key]); });
+        snapshot[character.name] = fields;
+    });
+    return snapshot;
+}
+
+function rwEnsureCharacterWorldlineSnapshots(plugin, content, chars) {
+    if (!plugin || !plugin.settings || !Array.isArray(chars)) return false;
+    var changed = false;
+    rwGetWorldlines(plugin).forEach(function(world) {
+        if (!world || world.id === 'worldline-original') return;
+        if (!plugin.settings.worldlineCharacterOverrides) plugin.settings.worldlineCharacterOverrides = {};
+        if (!plugin.settings.worldlineCharacterOverrides[world.id]) plugin.settings.worldlineCharacterOverrides[world.id] = {};
+        var historicalState = rwGetEffectiveCharacterHistory(plugin, content, world.id, world.currentTimePoint || plugin.settings.currentTimePoint || '');
+        chars.forEach(function(character) {
+            if (!character || !character.name) return;
+            var overrides = plugin.settings.worldlineCharacterOverrides[world.id][character.name] || (plugin.settings.worldlineCharacterOverrides[world.id][character.name] = {});
+            Object.keys(character.fields || {}).forEach(function(field) {
+                var baseValue = String(character.fields[field] == null ? '' : character.fields[field]);
+                if (!Object.prototype.hasOwnProperty.call(overrides, field)) {
+                    overrides[field] = baseValue;
+                    changed = true;
+                } else if (String(overrides[field] == null ? '' : overrides[field]) === '' && baseValue !== '' && !(historicalState[character.name] && Object.prototype.hasOwnProperty.call(historicalState[character.name], field))) {
+                    // 旧版本自动生成的空白覆盖值不是用户的修改；没有明确清空历史时恢复继承值。
+                    overrides[field] = baseValue;
+                    changed = true;
+                }
+            });
+        });
+    });
+    return changed;
+}
+
+async function updateCharInMd(app, plugin, name, fields, targetWorldlineId) {
+    var targetId = targetWorldlineId || (plugin && plugin.settings && plugin.settings.activeTimelineWorldlineId);
+    var activeWl = plugin && plugin.settings && Array.isArray(plugin.settings.timelineWorldlines) ? plugin.settings.timelineWorldlines.find(function(w){return w.id === targetId;}) : null;
+    var isBranch = !!(activeWl && activeWl.id !== 'worldline-original');
     var fullPath = getCharFullPathForExt(plugin);
     var file = app.vault.getAbstractFileByPath(fullPath);
     if (!file) return false;
     var content = await app.vault.read(file);
-    var lines = content.split('\n');
-    var out = [];
-    var inTarget = false;
-    var inSubSection = false;
-    var replaced = false;
+    var originalOverridesSnapshot = JSON.parse(JSON.stringify(plugin.settings.worldlineCharacterOverrides || {}));
+    var parsedBeforeChar = parseCharsFromContent(content).find(function(c) { return c.name === name; });
+    var beforeFields = Object.assign({}, parsedBeforeChar && parsedBeforeChar.fields || {});
+    var existingOverrides = plugin.settings.worldlineCharacterOverrides || {};
+    if (existingOverrides[targetId] && existingOverrides[targetId][name]) Object.assign(beforeFields, existingOverrides[targetId][name]);
+    var historyBefore = rwGetEffectiveCharacterHistory(plugin, content, targetId || 'worldline-original', activeWl && activeWl.currentTimePoint || plugin.settings.currentTimePoint || '');
+    if (historyBefore[name]) Object.keys(historyBefore[name]).forEach(function(k) { beforeFields[k] = historyBefore[name][k]; });
 
-    for (var i = 0; i < lines.length; i++) {
-        var line = lines[i];
-        var trimmed = line.trim();
-        if (trimmed.startsWith('## ') && !trimmed.startsWith('### ')) {
-            inTarget = false;
-            inSubSection = false;
-            if (trimmed === '## ' + name) {
-                inTarget = true;
-                out.push(line);
-                for (var k2 in fields) {
-                    if (fields.hasOwnProperty(k2) && fields[k2] && !(activeWl && activeWl.id !== 'worldline-original' && dynamicFields.indexOf(k2) >= 0)) out.push('- ' + k2 + '：' + fields[k2]);
+    var normalizedFields = Object.assign({}, fields || {});
+    var historyChanges = {};
+    Object.keys(normalizedFields).forEach(function(k) {
+        var nextValue = String(normalizedFields[k] == null ? '' : normalizedFields[k]);
+        var previousValue = String(beforeFields[k] == null ? '' : beforeFields[k]);
+        if (nextValue !== previousValue) historyChanges[k] = nextValue;
+    });
+
+    if (isBranch) {
+        // 分支线修改任何人物字段都只写入该线覆盖层；共享人物 MD 不被分支改写。
+        if (!plugin.settings.worldlineCharacterOverrides) plugin.settings.worldlineCharacterOverrides = {};
+        if (!plugin.settings.worldlineCharacterOverrides[targetId]) plugin.settings.worldlineCharacterOverrides[targetId] = {};
+        if (!plugin.settings.worldlineCharacterOverrides[targetId][name]) plugin.settings.worldlineCharacterOverrides[targetId][name] = {};
+        Object.keys(historyChanges).forEach(function(k) {
+            plugin.settings.worldlineCharacterOverrides[targetId][name][k] = historyChanges[k];
+        });
+    } else {
+        // 原世界线更新共享基础档案；为尚未拥有该字段快照的旧分支补齐当时的继承值，
+        // 已有分支覆盖或历史差异绝不被覆盖。
+        if (!plugin.settings.worldlineCharacterOverrides) plugin.settings.worldlineCharacterOverrides = {};
+        var oldChar = parsedBeforeChar;
+        rwGetWorldlines(plugin).forEach(function(w) {
+            if (!w || w.id === 'worldline-original') return;
+            if (!plugin.settings.worldlineCharacterOverrides[w.id]) plugin.settings.worldlineCharacterOverrides[w.id] = {};
+            var ov = plugin.settings.worldlineCharacterOverrides[w.id][name] || (plugin.settings.worldlineCharacterOverrides[w.id][name] = {});
+            Object.keys(oldChar && oldChar.fields || {}).forEach(function(k) {
+                if (!Object.prototype.hasOwnProperty.call(ov, k)) ov[k] = String(oldChar.fields[k] == null ? '' : oldChar.fields[k]);
+            });
+        });
+        var lines = content.split('\n'), out = [], inTarget = false, inSubSection = false, replaced = false;
+        for (var i = 0; i < lines.length; i++) {
+            var line = lines[i], trimmed = line.trim();
+            if (trimmed.startsWith('## ') && !trimmed.startsWith('### ')) {
+                inTarget = false; inSubSection = false;
+                if (trimmed === '## ' + name) {
+                    inTarget = true; out.push(line);
+                    Object.keys(normalizedFields).forEach(function(k) {
+                        if (normalizedFields[k] !== '' && normalizedFields[k] != null) out.push('- ' + k + '：' + normalizedFields[k]);
+                    });
+                    replaced = true; continue;
                 }
-                replaced = true;
-                continue;
+                out.push(line); continue;
+            }
+            if (inTarget) {
+                if (trimmed.startsWith('### ')) { inSubSection = true; out.push(line); continue; }
+                if (inSubSection) { out.push(line); continue; }
+                if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) continue;
             }
             out.push(line);
-            continue;
         }
-        if (inTarget) {
-            if (trimmed.startsWith('### ')) {
-                inSubSection = true;
-                out.push(line);
-                continue;
-            }
-            if (inSubSection) {
-                out.push(line);
-                continue;
-            }
-            if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
-                if (activeWl && activeWl.id !== 'worldline-original') {
-                    var oldFieldLine=trimmed.replace(/^[-*]\s*/,''), oldSep=oldFieldLine.indexOf('：'); if(oldSep<0) oldSep=oldFieldLine.indexOf(':');
-                    var oldKey=oldSep>=0?oldFieldLine.substring(0,oldSep).trim():'';
-                    if(dynamicFields.indexOf(oldKey)>=0) out.push(line);
-                }
-                continue;
-            }
-            out.push(line);
-            continue;
-        }
-        out.push(line);
+        if (!replaced) { out.push(''); out.push(buildCharMdBlock(name, normalizedFields)); }
+        content = out.join('\n');
     }
-    if (!replaced) {
-        out.push('');
-        out.push(buildCharMdBlock(name, fields));
+
+    if (Object.keys(historyChanges).length) content = rwAppendCharacterHistory(content, plugin, targetId || 'worldline-original', name, historyChanges, beforeFields);
+    var originalContent = await app.vault.read(file);
+    try {
+        await app.vault.modify(file, content);
+        await plugin.saveSettings();
+        if (Object.keys(historyChanges).length) { try { await rwRefreshWorldlineChangeLog(plugin, targetId); } catch (logError) { console.error('[Relation Weaver] 更新世界线变更记录失败：', logError); }}
+    } catch (persistError) {
+        plugin.settings.worldlineCharacterOverrides = originalOverridesSnapshot;
+        try {
+            var currentContent = await app.vault.read(file);
+            if (currentContent !== originalContent) await app.vault.modify(file, originalContent);
+        } catch (rollbackError) { console.error('[Relation Weaver] 人物档案保存回滚失败：', rollbackError); }
+        throw persistError;
     }
-    await app.vault.modify(file, out.join('\n'));
     return true;
 }
 
 function resolveCharPathForExt(plugin) {
-    var folder = (plugin.settings.charFolder || '').trim();
-    if (!folder) {
-        var f = plugin.app.workspace.getActiveFile();
-        if (f && f.parent) folder = f.parent.path;
-    }
-    return (plugin.settings.charFile || '人物索引.md').trim();
+    return getCharFullPathForExt(plugin);
 }
 
 function getCharFullPathForExt(plugin) {
-    var folder = (plugin.settings.charFolder || '').trim();
-    if (!folder) {
+    var folder = String(plugin && plugin.settings && plugin.settings.charFolder || '').trim();
+    // 仅为升级前的默认项目保留旧版活动笔记目录兼容；其他项目路径必须稳定。
+    if (!folder && rwGetProjectId(plugin) === 'project-default') {
         var f = plugin.app.workspace.getActiveFile();
         if (f && f.parent) folder = f.parent.path;
     }
-    var fname = (plugin.settings.charFile || '人物索引.md').trim();
-    return folder ? folder + '/' + fname : fname;
+    if (!folder && rwGetProjectId(plugin) !== 'project-default') {
+        var projectRecord = rwGetActiveProjectRecord(plugin);
+        folder = rwProjectFolderName(projectRecord && projectRecord.name || '小说项目', rwGetProjectId(plugin));
+    }
+    var fname = String(plugin && plugin.settings && plugin.settings.charFile || '人物索引.md').trim() || '人物索引.md';
+    return normalizeVaultPath(folder ? folder + '/' + fname : fname);
 }
 
 // ========== 多世界线时间管理（3.49.0）==========
+var RW_WORLDLINE_META_KEY = 'RW_WORLDLINE_META_V1';
+async function rwReconcileWorldlineTimelinePaths(plugin) {
+    rwEnsureWorldlineSettings(plugin);
+    var files = plugin.app.vault.getMarkdownFiles ? plugin.app.vault.getMarkdownFiles() : [];
+    var changed = false;
+    for (var i = 0; i < rwGetWorldlines(plugin).length; i++) {
+        var world = rwGetWorldlines(plugin)[i];
+        if (!world || !world.id) continue;
+        var currentPath = normalizeVaultPath(world.timelinePath || '');
+        var currentFile = currentPath ? plugin.app.vault.getAbstractFileByPath(currentPath) : null;
+        if (currentFile && world.timelineFileCtime && currentFile.stat && Number(currentFile.stat.ctime) !== Number(world.timelineFileCtime)) currentFile = null;
+        if (currentFile) {
+            try {
+                var currentContent = await plugin.app.vault.read(currentFile);
+                var currentMeta = rwReadHiddenStore(currentContent, RW_WORLDLINE_META_KEY);
+                if (currentMeta && currentMeta.id && currentMeta.id !== world.id) currentFile = null;
+            } catch (_) {}
+        }
+        var found = currentFile;
+        if (!found && world.timelineFileCtime) {
+            // 内部索引的创建时间指纹可在插件未运行时发生重命名/移动后尝试找回文件。
+            var ctimeMatches = files.filter(function(candidate) {
+                return candidate && candidate.stat && Number(candidate.stat.ctime) === Number(world.timelineFileCtime);
+            });
+            if (ctimeMatches.length === 1) found = ctimeMatches[0];
+        }
+        // 兼容旧版已经写入 Markdown 的 ID 注释；找到后迁移到插件内部索引并清理旧注释。
+        if (!found) {
+            for (var fi = 0; fi < files.length; fi++) {
+                try {
+                    var candidateContent = await plugin.app.vault.read(files[fi]);
+                    var meta = rwReadHiddenStore(candidateContent, RW_WORLDLINE_META_KEY);
+                    if (meta && meta.id === world.id) { found = files[fi]; break; }
+                } catch (_) {}
+            }
+        }
+        if (found) {
+            var foundPath = normalizeVaultPath(found.path);
+            if (currentPath !== foundPath) { world.timelinePath = foundPath; changed = true; }
+            var ctime = found.stat && Number(found.stat.ctime);
+            if (ctime && Number(world.timelineFileCtime) !== ctime) { world.timelineFileCtime = ctime; changed = true; }
+            var content = await plugin.app.vault.read(found);
+            var cleaned = rwRemoveHiddenStore(content, RW_WORLDLINE_META_KEY);
+            if (cleaned !== content) {
+                await plugin.app.vault.modify(found, cleaned);
+                changed = true;
+            }
+        }
+    }
+    if (changed) await plugin.saveSettings();
+}
+
+
 function rwGetWorldlines(plugin) {
     if (!plugin.settings.timelineWorldlines || !Array.isArray(plugin.settings.timelineWorldlines)) plugin.settings.timelineWorldlines = [];
     return plugin.settings.timelineWorldlines;
@@ -2521,6 +3229,29 @@ function rwEnsureWorldlineSettings(plugin) {
     if (active && !active.timelinePath) active.timelinePath = resolveDataFilePath(plugin, 'timelineFolder', 'timelineFile', '时间线.md');
     return active;
 }
+function rwSyncActiveWorldlineTimelinePathFromSettings(plugin) {
+    if (!plugin || !plugin.settings) return '';
+    var world = rwGetActiveWorldline(plugin);
+    if (!world) return '';
+    var targetPath = normalizeVaultPath(resolveDataFilePath(plugin, 'timelineFolder', 'timelineFile', '时间线.md'));
+    if (!targetPath) return '';
+    var oldPath = normalizeVaultPath(world.timelinePath || '');
+    if (oldPath === targetPath) return targetPath;
+    var targetFile = plugin.app && plugin.app.vault && plugin.app.vault.getAbstractFileByPath(targetPath);
+    var oldFile = oldPath && plugin.app && plugin.app.vault && plugin.app.vault.getAbstractFileByPath(oldPath);
+    // 设置页中的路径是作者指定的权威位置。设置输入会逐字触发 onChange，
+    // 因此这里只更新映射，不在输入过程中反复移动文件；目标已存在时直接接管它。
+    return (async function() {
+        world.timelinePath = targetPath;
+        world.timelineFileCtime = targetFile && targetFile.stat ? Number(targetFile.stat.ctime || 0) : 0;
+        if (oldPath && oldPath !== targetPath && plugin.settings.timelineEventRegistry && Object.prototype.hasOwnProperty.call(plugin.settings.timelineEventRegistry, oldPath)) {
+            if (!Object.prototype.hasOwnProperty.call(plugin.settings.timelineEventRegistry, targetPath)) plugin.settings.timelineEventRegistry[targetPath] = plugin.settings.timelineEventRegistry[oldPath];
+            delete plugin.settings.timelineEventRegistry[oldPath];
+        }
+        await plugin.saveSettings();
+        return targetPath;
+    })();
+}
 function rwGetTimelinePath(plugin) {
     var active = rwEnsureWorldlineSettings(plugin);
     return active && active.timelinePath ? normalizeVaultPath(active.timelinePath) : resolveDataFilePath(plugin, 'timelineFolder', 'timelineFile', '时间线.md');
@@ -2536,17 +3267,138 @@ function rwApplyWorldlineChapterTimes(plugin, worldlineId) {
     var lib=plugin.settings && plugin.settings.chapterLibrary;
     if(!lib || !Array.isArray(lib.chapters)) return;
     var map=plugin.settings.worldlineChapterTimes && plugin.settings.worldlineChapterTimes[worldlineId];
-    if(!map) return;
-    lib.chapters.forEach(function(ch){if(ch && ch.path && Object.prototype.hasOwnProperty.call(map,ch.path)) ch.storyTime=map[ch.path];});
+    // 每次切换都覆盖全部章节时间；目标线没有记录的章节清空，不能沿用上一条线的故事时间。
+    lib.chapters.forEach(function(ch){if(ch && ch.path) ch.storyTime = map && Object.prototype.hasOwnProperty.call(map,ch.path) ? String(map[ch.path] || '') : '';});
+}
+
+function rwGetWorldlineChangeLogPath(worldline) {
+    return worldline && worldline.changeLogPath ? normalizeVaultPath(worldline.changeLogPath) : '';
+}
+function rwWorldlineChangeLabel(key) {
+    return ({factions:'组织/阵营资料',relations:'人物关系',orgRelations:'组织关系',orgMemberships:'组织成员与职位',orgPositionDefs:'组织职位定义',orgTerritoryChanges:'组织领地变化'})[key] || key;
+}
+function rwBuildWorldlineChangeLogMarkdown(worldline, characterRecords, relationStore) {
+    var name = String(worldline && worldline.name || '未命名世界线');
+    var lines = ['# ' + name + (name.slice(-3) === '世界线' ? '变更记录' : '世界线变更记录'), '', '> 本文件由 Relation Weaver 自动整理，记录本世界线相对于继承基线的实际变化。'];
+    if (worldline && worldline.parentWorldlineId) lines.push('', '- 继承来源：' + String(worldline.parentWorldlineName || '父世界线'), '- 分叉时间：' + (worldline.branchPoint || '未设定'));
+    var chars = (characterRecords || []).filter(function(r){return r && r.worldlineId === worldline.id;}).slice().sort(function(a,b){return Number(a.createdAt||0)-Number(b.createdAt||0);});
+    lines.push('', '## 人物档案变化');
+    if (!chars.length) lines.push('', '暂无人物档案修改。');
+    else {
+        var groups = Object.create(null);
+        chars.forEach(function(r){var key=String(r.character||'未命名人物');(groups[key]||(groups[key]=[])).push(r);});
+        Object.keys(groups).sort().forEach(function(character){
+            lines.push('', '### ' + character);
+            groups[character].forEach(function(r){lines.push('- ' + (r.time || '未标注故事时间') + ' · ' + r.field + '：' + (r.beforeValue == null || r.beforeValue === '' ? '（空）' : String(r.beforeValue)) + ' → ' + (r.value == null || r.value === '' ? '（清空）' : String(r.value)));});
+        });
+    }
+    var rels = (relationStore && relationStore.changeHistory || []).filter(function(r){return r && r.worldlineId === worldline.id && !r.baseline && r.delta;}).slice().sort(function(a,b){return Number(a.createdAt||0)-Number(b.createdAt||0);});
+    lines.push('', '## 人物关系与阵营组织变化');
+    if (!rels.length) lines.push('', '暂无人物关系或阵营组织修改。');
+    else rels.forEach(function(r){
+        var d=r.delta||{}, count=(d.upsert||[]).length+(d.patches||[]).length+(d.remove||[]).length;
+        var details=[];
+        (d.upsert||[]).forEach(function(x){details.push('新增 ' + String(x.name || x.charA && (x.charA+'—'+x.charB) || x.from && (x.from+'—'+x.to) || x.organization || x.character || '记录'));});
+        (d.patches||[]).forEach(function(x){var patchKey=String(x.key||'');details.push('修改 ' + (patchKey.indexOf('name:')===0 ? patchKey.slice(5) : '既有记录'));});
+        (d.remove||[]).forEach(function(x){var removeKey=String(x||'');details.push('移除 ' + (removeKey.indexOf('name:')===0 ? removeKey.slice(5) : '既有记录'));});
+        lines.push('', '- **' + rwWorldlineChangeLabel(r.entityType) + '** · ' + (r.time || '未标注故事时间') + '：' + count + ' 项变化' + (details.length ? '（' + details.join('；') + '）' : ''));
+    });
+    lines.push('', '---', '最后整理：' + new Date().toISOString(), '');
+    return lines.join('\n');
+}
+var RW_WORLDLINE_AUTHOR_BLOCK_START = '<!-- RW_AUTHOR_DATA_START -->';
+var RW_WORLDLINE_AUTHOR_BLOCK_END = '<!-- RW_AUTHOR_DATA_END -->';
+function rwUpsertWorldlineGeneratedRegion(markdown, generated) {
+    var text=String(markdown||'');
+    // 清理旧版本暴露给作者的 JSON 数据区；只移除插件旧版明确标记的区块，保留其余手写说明。
+    var authorStart=text.indexOf(RW_WORLDLINE_AUTHOR_BLOCK_START), authorEnd=text.indexOf(RW_WORLDLINE_AUTHOR_BLOCK_END);
+    if(authorStart>=0 && authorEnd>=authorStart) {
+        var removeStart=text.lastIndexOf('## 作者可编辑数据区', authorStart);
+        if(removeStart<0) removeStart=authorStart;
+        text=text.slice(0,removeStart)+text.slice(authorEnd+RW_WORLDLINE_AUTHOR_BLOCK_END.length);
+    } else {
+        // 兼容曾经生成但标记不完整的旧 JSON 区：仅删除明确的标题及其后续 JSON 代码块。
+        text=text.replace(/\n## 作者可编辑数据区[\s\S]*?(?=\n## (?!作者可编辑数据区)|$)/g,'');
+    }
+    var start='<!-- RW_GENERATED_START -->', end='<!-- RW_GENERATED_END -->';
+    var region=start+'\n'+String(generated||'').trim()+'\n'+end;
+    var a=text.indexOf(start), b=text.indexOf(end);
+    if(a>=0 && b>a) text=text.slice(0,a)+region+text.slice(b+end.length);
+    else text=text.replace(/\s*$/,'\n\n')+region+'\n';
+    return text.replace(/\n{4,}/g,'\n\n\n');
+}
+async function rwRefreshWorldlineChangeLog(plugin, worldlineId) {
+    if (!plugin || !plugin.app || !plugin.app.vault || !worldlineId) return false;
+    var world = rwGetWorldlines(plugin).find(function(w){return w.id === worldlineId;});
+    if (!world) return false;
+    var path = rwGetWorldlineChangeLogPath(world);
+    if (!path) return false;
+    var vault=plugin.app.vault, adapter=vault.adapter;
+    var charPath=getCharFullPathForExt(plugin), charFile=vault.getAbstractFileByPath(charPath), charContent=charFile ? await vault.read(charFile) : '';
+    var legacyCharStore=rwReadHiddenStore(charContent, RW_CHARACTER_HISTORY_KEY) || {records:[]};
+    var sidecarCharStore=plugin.settings.worldlineCharacterHistory || {records:[]};
+    var mergedCharRecords=[], seenCharRecords=Object.create(null);
+    (sidecarCharStore.records || []).concat(legacyCharStore.records || []).forEach(function(r){if(!r)return;var k=String(r.id || JSON.stringify(r));if(seenCharRecords[k])return;seenCharRecords[k]=true;mergedCharRecords.push(r);});
+    var charStore={records:mergedCharRecords};
+    var relationPath=getRelationMetaPath(plugin), relationFile=vault.getAbstractFileByPath(relationPath), relationStore={changeHistory:[]};
+    if (relationFile) { var relationContent=await vault.read(relationFile); relationStore=await rwLoadRelationWorldlineStore(plugin, relationContent); }
+    var existing=vault.getAbstractFileByPath(path), oldMarkdown=existing?await vault.read(existing):'';
+    var markdown=rwUpsertWorldlineGeneratedRegion(oldMarkdown,rwBuildWorldlineChangeLogMarkdown(world, charStore.records || [], relationStore));
+    if (!plugin._rwWritingChangeLogs) plugin._rwWritingChangeLogs=Object.create(null);
+    plugin._rwWritingChangeLogs[path]=true;
+    try {
+        if (existing) await vault.modify(existing, markdown);
+        else {
+            var folder=path.indexOf('/')>=0 ? path.substring(0,path.lastIndexOf('/')) : '';
+            if (folder) await rwEnsureVaultFolder(adapter, folder);
+            await vault.create(path, markdown);
+        }
+    } finally { setTimeout(function(){ if(plugin._rwWritingChangeLogs) delete plugin._rwWritingChangeLogs[path]; }, 500); }
+    return true;
+}
+
+async function rwEnsureWorldlineChangeLogFiles(plugin) {
+    var worlds=rwGetWorldlines(plugin), vault=plugin.app.vault, adapter=vault.adapter, changed=false;
+    for (var i=0;i<worlds.length;i++) {
+        var world=worlds[i];
+        if (!world) continue;
+        var logPath=rwGetWorldlineChangeLogPath(world);
+        if (!logPath) {
+            var timelinePath=normalizeVaultPath(world.timelinePath || ''), folder=timelinePath.indexOf('/')>=0?timelinePath.substring(0,timelinePath.lastIndexOf('/')):'', timelineBase=timelinePath.substring(timelinePath.lastIndexOf('/')+1).replace(/\.md$/i,'').replace(/时间线$/,'');
+            var stem=(world.id==='worldline-original' ? '原始' : String(world.name||'世界线')).replace(/[\\/:*?"<>|]/g,'-').replace(/[. ]+$/g,'').trim() || '世界线';
+            var candidate=(folder?folder+'/':'')+stem+'世界线变更记录.md', suffix=2;
+            while ((await adapter.exists(candidate) || vault.getAbstractFileByPath(candidate)) && !(world.changeLogPath===candidate)) candidate=(folder?folder+'/':'')+stem+'世界线变更记录 ('+suffix+++').md';
+            world.changeLogPath=candidate; logPath=candidate; changed=true;
+        }
+        if (!vault.getAbstractFileByPath(logPath) && !await adapter.exists(logPath)) {
+            var parent=logPath.indexOf('/')>=0?logPath.substring(0,logPath.lastIndexOf('/')):'';
+            if(parent) await rwEnsureVaultFolder(adapter,parent);
+            await vault.create(logPath,'# '+String(world.name||'世界线')+(String(world.name||'世界线').slice(-3)==='世界线'?'变更记录':'世界线变更记录')+'\n\n> 本文件由 Relation Weaver 自动维护，记录本世界线相对于继承基线的实际变化。\n');
+        }
+        try { await rwRefreshWorldlineChangeLog(plugin,world.id); }
+        catch(e) { console.error('[Relation Weaver] 初始化世界线变更记录失败：',world.name,e); }
+    }
+    if(changed) await plugin.saveSettings();
 }
 
 async function rwSwitchWorldline(view, id) {
     var plugin = view.plugin, list = rwGetWorldlines(plugin), next = list.find(function(w){return w.id === id;});
     if (!next || next.id === plugin.settings.activeTimelineWorldlineId) return;
     var current = rwGetActiveWorldline(plugin);
-    if (current) { rwCaptureWorldlineChapterTimes(plugin,current.id); current.currentTimePoint = String(plugin.settings.currentTimePoint || ''); }
+    if (current) {
+        rwCaptureWorldlineChapterTimes(plugin,current.id);
+        if (!plugin.settings.worldlineEventSetOrders) plugin.settings.worldlineEventSetOrders = {};
+        plugin.settings.worldlineEventSetOrders[current.id] = { order: (plugin.settings.timelineEventSetOrder || []).slice(), sortMode: plugin.settings.timelineEventSetSortMode || 'time' };
+        current.currentTimePoint = String(plugin.settings.currentTimePoint || '');
+        // 切换前先落盘当前线的所有动态资料，避免尚未离开编辑界面的更改丢失。
+        if (view.saveFactionsAndRelations) await view.saveFactionsAndRelations();
+        if (plugin.saveIntimacyHistory) await plugin.saveIntimacyHistory();
+    }
     plugin.settings.activeTimelineWorldlineId = next.id;
     rwApplyWorldlineChapterTimes(plugin,next.id);
+    var nextSetOrder = plugin.settings.worldlineEventSetOrders && plugin.settings.worldlineEventSetOrders[next.id];
+    plugin.settings.timelineEventSetOrder = nextSetOrder && Array.isArray(nextSetOrder.order) ? nextSetOrder.order.slice() : [];
+    plugin.settings.timelineEventSetSortMode = nextSetOrder && nextSetOrder.sortMode || 'time';
     plugin.settings.currentTimePoint = String(next.currentTimePoint || '');
     view.selectedTag=''; view._secondaryTagFilter=''; view._plotLineFilter=''; view._yearSearchText='';
     await plugin.saveSettings();
@@ -2554,55 +3406,430 @@ async function rwSwitchWorldline(view, id) {
     view.render();
     new obsidian.Notice('已切换至「' + next.name + '」');
 }
+function rwEnsureVaultFolder(adapter, folder) {
+    return (async function ensure(dir) {
+        if (!dir || await adapter.exists(dir)) return;
+        var parent = dir.indexOf('/') >= 0 ? dir.substring(0, dir.lastIndexOf('/')) : '';
+        if (parent && parent !== dir) await ensure(parent);
+        if (!await adapter.exists(dir)) await adapter.mkdir(dir);
+    })(folder);
+}
+async function rwMoveWorldlineManagedFile(vault, adapter, oldPath, newPath, defaultContent) {
+    oldPath = normalizeVaultPath(oldPath || ''); newPath = normalizeVaultPath(newPath || '');
+    if (!newPath || !/\.md$/i.test(newPath)) throw new Error('文件路径必须以 .md 结尾');
+    if (newPath.split('/').some(function(part){return part === '..';})) throw new Error('文件路径不能包含 ..');
+    if (oldPath === newPath) return { oldPath: oldPath, newPath: newPath, moved: false, created: false };
+    var existing = oldPath ? vault.getAbstractFileByPath(oldPath) : null, target = vault.getAbstractFileByPath(newPath);
+    // 目标文件已由作者在设置页/文件管理器中创建或移动时，直接采用它，不覆盖内容。
+    if (target) return { oldPath: oldPath, newPath: newPath, moved: false, created: false, adopted: true, targetFile: target };
+    await rwEnsureVaultFolder(adapter, newPath.indexOf('/') >= 0 ? newPath.substring(0,newPath.lastIndexOf('/')) : '');
+    if (existing) { await vault.rename(existing, newPath); return { oldPath: oldPath, newPath: newPath, moved: true, created: false }; }
+    await vault.create(newPath, defaultContent || '');
+    return { oldPath: oldPath, newPath: newPath, moved: true, created: true };
+}
+function rwOpenWorldlineFileSettings(view, worldlineId) {
+    var plugin=view.plugin, worlds=rwGetWorldlines(view.plugin), world=worldlineId ? worlds.find(function(w){return w && w.id===worldlineId;}) : rwGetActiveWorldline(plugin), app=view.app||plugin.app;
+    if(!world){new obsidian.Notice('没有可配置的世界线');return;}
+    var modal=new obsidian.Modal(app), content=modal.contentEl;
+    modal.titleEl.setText('世界线文件设置 · '+String(world.name||'世界线'));
+    content.createEl('p',{text:'分别设置本世界线的时间线和变更记录文件路径。路径包含文件夹与文件名；移动时不会覆盖已有文件。原世界线与分支世界线使用相同规则。',cls:'my-char-muted'});
+    var timelinePath=content.createEl('input',{type:'text',cls:'my-char-form-input'}); timelinePath.style.width='100%'; timelinePath.value=normalizeVaultPath(world.timelinePath||(world.id===plugin.settings.activeTimelineWorldlineId?rwGetTimelinePath(plugin):''));
+    var timelineLabel=content.createEl('label',{text:'时间线 MD 完整路径'}); timelineLabel.style.display='block'; timelineLabel.style.marginTop='10px';
+    content.appendChild(timelinePath);
+    var logPath=content.createEl('input',{type:'text',cls:'my-char-form-input'}); logPath.style.width='100%'; logPath.value=normalizeVaultPath(world.changeLogPath||'');
+    var logLabel=content.createEl('label',{text:'世界线变更记录 MD 完整路径'}); logLabel.style.display='block'; logLabel.style.marginTop='12px';
+    content.appendChild(logPath);
+    var hint=content.createEl('small',{text:'示例：世界线/重生线/重生线时间线.md',cls:'my-char-muted'}); hint.style.display='block'; hint.style.marginTop='6px';
+    var actions=content.createDiv({cls:'my-char-modal-actions'});
+    actions.createEl('button',{text:'取消',cls:'my-char-btn-ghost'}).addEventListener('click',function(){modal.close();});
+    var save=actions.createEl('button',{text:'保存并移动文件',cls:'my-char-view-btn mod-cta'});
+    save.addEventListener('click',async function(){
+        var nextTimeline=normalizeVaultPath(timelinePath.value), nextLog=normalizeVaultPath(logPath.value);
+        if(!nextTimeline||!nextLog){new obsidian.Notice('请填写两个 Markdown 文件路径');return;}
+        if(nextTimeline===nextLog){new obsidian.Notice('时间线与变更记录不能使用同一个文件路径');return;}
+        if(!/\.md$/i.test(nextTimeline)||!/\.md$/i.test(nextLog)){new obsidian.Notice('两个文件都必须使用 .md 扩展名');return;}
+        var oldTimeline=normalizeVaultPath(world.timelinePath||''), oldLog=normalizeVaultPath(world.changeLogPath||'');
+        var adapter=app.vault.adapter, moved=[], oldRegistry=deepCloneJson(plugin.settings.timelineEventRegistry||{}), oldWorldTimeline=world.timelinePath, oldWorldLog=world.changeLogPath;
+        try{
+            var t=await rwMoveWorldlineManagedFile(app.vault,adapter,oldTimeline,nextTimeline,'# '+String(world.name||'世界线')+'\n'); moved.push(t);
+            var l=await rwMoveWorldlineManagedFile(app.vault,adapter,oldLog,nextLog,'# '+String(world.name||'世界线')+'世界线变更记录\n\n> 本文件由 Relation Weaver 自动维护。\n'); moved.push(l);
+            world.timelinePath=nextTimeline; world.changeLogPath=nextLog;
+            var adoptedTimelineFile=app.vault.getAbstractFileByPath(nextTimeline);
+            if(adoptedTimelineFile && adoptedTimelineFile.stat) world.timelineFileCtime=Number(adoptedTimelineFile.stat.ctime||0);
+            if(plugin.settings.timelineEventRegistry && Object.prototype.hasOwnProperty.call(plugin.settings.timelineEventRegistry,oldTimeline)){
+                plugin.settings.timelineEventRegistry[nextTimeline]=plugin.settings.timelineEventRegistry[oldTimeline]; delete plugin.settings.timelineEventRegistry[oldTimeline];
+            }
+            await plugin.saveSettings();
+            if (!l.adopted) await rwRefreshWorldlineChangeLog(plugin,world.id);
+            modal.close();
+            new obsidian.Notice('世界线文件位置与名称已更新');
+            await view.loadAllData({silent:true}); view.render();
+        }catch(e){
+            // 回滚已移动的文件；不删除任何目标文件内容。
+            world.timelinePath=oldWorldTimeline; world.changeLogPath=oldWorldLog; plugin.settings.timelineEventRegistry=oldRegistry;
+            for(var i=moved.length-1;i>=0;i--){var m=moved[i];if(m&&m.moved){try{var f=app.vault.getAbstractFileByPath(m.newPath);if(f){if(m.created) await app.vault.delete(f); else {await rwEnsureVaultFolder(adapter,m.oldPath.indexOf('/')>=0?m.oldPath.substring(0,m.oldPath.lastIndexOf('/')):'');await app.vault.rename(f,m.oldPath);}}}catch(rollbackError){console.error('[Relation Weaver] 世界线文件移动回滚失败',rollbackError);}}}
+            try { await plugin.saveSettings(); } catch (settingsRollbackError) { console.error('[Relation Weaver] 世界线文件设置回滚失败',settingsRollbackError); }
+            showUserError('世界线文件设置失败',e);
+        }
+    });
+    modal.open();
+}
+
+function rwPromptWorldlineName(app, mode) {
+    return new Promise(function(resolve) {
+        if (!obsidian.Modal) {
+            var fallback = typeof window !== 'undefined' && window.prompt ? window.prompt('请输入新世界线名称：', mode === 'branch' ? '分支世界线' : '新世界线') : null;
+            resolve(fallback);
+            return;
+        }
+        var modal = new obsidian.Modal(app);
+        var settled = false;
+        function finish(value) { if (settled) return; settled = true; modal.close(); resolve(value); }
+        modal.titleEl.setText(mode === 'branch' ? '创建分支世界线' : '创建独立世界线');
+        var input = modal.contentEl.createEl('input', { type: 'text', cls: 'my-char-form-input' });
+        input.value = mode === 'branch' ? '分支世界线' : '新世界线';
+        input.placeholder = '请输入世界线名称';
+        input.style.width = '100%';
+        var hint = modal.contentEl.createEl('p', { text: '新世界线将以当前世界线为基础，继承分叉点之前的完整人物档案与有效状态、时间线、关系与阵营、组织资料、亲密度历史及创作配置。创建后只需修改发生变化的字段，各线独立保存，不必重新填写整份人物档案。', cls: 'my-char-muted' });
+        var actions = modal.contentEl.createDiv({ cls: 'my-char-modal-actions' });
+        actions.createEl('button', { text: '取消', cls: 'my-char-btn-ghost' }).addEventListener('click', function(){ finish(null); });
+        actions.createEl('button', { text: '创建', cls: 'my-char-view-btn mod-cta' }).addEventListener('click', function(){ finish(input.value); });
+        input.addEventListener('keydown', function(e){ if (e.key === 'Enter') { e.preventDefault(); finish(input.value); } if (e.key === 'Escape') finish(null); });
+        modal.onClose = function(){ if (!settled) { settled = true; resolve(null); } };
+        modal.open();
+        setTimeout(function(){ input.focus(); input.select(); }, 20);
+    });
+}
+
+function rwRecordStoryTime(record) {
+    if (!record || typeof record !== 'object') return '';
+    return String(record.storyTime || record.storyYear || record.eventYear || record.startTime || record.recordTime || record.date || record.timestamp || '').trim();
+}
+function rwFilterTimedRecordsAt(recordList, branchPoint, kind) {
+    if (!Array.isArray(recordList) || !branchPoint) return Array.isArray(recordList) ? deepCloneJson(recordList) : [];
+    return recordList.reduce(function(out, raw) {
+        if (!raw || typeof raw !== 'object') return out;
+        var rec = deepCloneJson(raw), start = String(rec.startTime || rec.storyTime || rec.storyYear || rec.eventYear || rec.date || '').trim();
+        if (start && rwCompareStoryTime(start, branchPoint) > 0) return out;
+        var end = String(rec.endTime || '').trim();
+        if (end && rwCompareStoryTime(end, branchPoint) > 0) rec.endTime = '';
+        if (kind === 'intimacy') {
+            var time = rwRecordStoryTime(rec);
+            if (time && rwCompareStoryTime(time, branchPoint) > 0) return out;
+        }
+        out.push(rec);
+        return out;
+    }, []);
+}
+function rwFilterRelationSnapshotAt(data, branchPoint) {
+    data = deepCloneJson(data || {});
+    ['relations','orgRelations','orgMemberships','orgTerritoryChanges'].forEach(function(key) {
+        if (Array.isArray(data[key])) data[key] = rwFilterTimedRecordsAt(data[key], branchPoint, key);
+    });
+    if (Array.isArray(data.intimacyHistory)) data.intimacyHistory = rwFilterTimedRecordsAt(data.intimacyHistory, branchPoint, 'intimacy');
+    return data;
+}
+function rwTrimTimelineMdAtTime(content, branchPoint, settings) {
+    if (!branchPoint) return String(content || '');
+    var source = String(content || ''), events = parseTimelineExtended(source, settings || {}), removeLines = Object.create(null);
+    events.forEach(function(evt) {
+        var eventTime = String(evt.storyYear || evt.year || '').trim();
+        if (eventTime && rwCompareStoryTime(eventTime, branchPoint) > 0 && Number.isInteger(evt._lineIndex)) removeLines[evt._lineIndex] = true;
+    });
+    if (!Object.keys(removeLines).length) return source;
+    return source.split('\n').filter(function(line, index) { return !removeLines[index]; }).join('\n');
+}
+
 async function rwCreateWorldline(view, mode) {
-    var plugin = view.plugin, list = rwGetWorldlines(plugin);
-    var name = (prompt('请输入新世界线名称：', mode === 'branch' ? '分支世界线' : '新世界线') || '').trim();
+    var plugin = view.plugin, app = view.app || plugin.app, vault = app && app.vault, adapter = vault && vault.adapter;
+    var list = rwGetWorldlines(plugin);
+    if (!vault || !adapter) { new obsidian.Notice('无法访问 Obsidian Vault，未创建世界线'); return; }
+    var name = String(await rwPromptWorldlineName(app, mode) || '').trim();
     if (!name) return;
-    if (list.some(function(w){return w.name === name;})) { new obsidian.Notice('世界线名称已存在'); return; }
+    if (list.some(function(w){ return String(w.name || '').trim() === name; })) { new obsidian.Notice('世界线名称已存在，请使用不同名称'); return; }
+
+    var isBranch = mode === 'branch';
     var id = 'worldline-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,7);
     var base = rwGetActiveWorldline(plugin);
     var basePath = rwGetTimelinePath(plugin);
-    var folder = basePath.indexOf('/') >= 0 ? basePath.substring(0, basePath.lastIndexOf('/') + 1) : '';
-    var safeName = name.replace(/[\\/:*?"<>|]/g, '-');
-    var path = folder + safeName + '.md';
-    if (view.app.vault.getAbstractFileByPath(path)) { new obsidian.Notice('目标文件已存在，为避免覆盖已取消创建'); return; }
-    var initial = '# ' + name + '\n';
-    if (mode === 'branch') {
-        var source = view.app.vault.getAbstractFileByPath(basePath);
-        if (source) initial = await view.app.vault.read(source);
+    var sourceCurrentTime = String(plugin.settings.currentTimePoint || (base && base.currentTimePoint) || '').trim();
+    // 只有分支线才需要分叉点；独立线完整复制当前线，不做时间截断。
+    var forkPoint = isBranch ? sourceCurrentTime : '';
+    if (isBranch && !forkPoint && Array.isArray(view.timeline)) {
+        view.timeline.forEach(function(evt) {
+            var t = String(evt && (evt.storyYear || evt.year || evt.eventYear) || '').trim();
+            if (t && (!forkPoint || rwCompareStoryTime(t, forkPoint) > 0)) forkPoint = t;
+        });
     }
-    var dir = path.includes('/') ? path.substring(0,path.lastIndexOf('/')) : '';
-    if (dir && !await view.app.vault.adapter.exists(dir)) await view.app.vault.createFolder(dir).catch(function(){});
-    await view.app.vault.create(path, initial);
-    if (mode === 'branch') {
-        try {
-            var safeId=id.replace(/[^a-zA-Z0-9_-]/g,'_');
-            var srcRel=getDataPath(plugin), dstRel=plugin.app.vault.configDir+'/plugins/'+plugin.manifest.id+'/relations-data.'+safeId+'.json';
-            if(await plugin.app.vault.adapter.exists(srcRel)) await plugin.app.vault.adapter.write(dstRel,await plugin.app.vault.adapter.read(srcRel));
-            var srcHistory=rwGetIntimacyHistoryPath(plugin), dstHistory=plugin.app.vault.configDir+'/plugins/'+plugin.manifest.id+'/intimacy_history.'+safeId+'.json';
-            if(await plugin.app.vault.adapter.exists(srcHistory)) await plugin.app.vault.adapter.write(dstHistory,await plugin.app.vault.adapter.read(srcHistory));
-            if(plugin.settings.timelineEventRegistry && Array.isArray(plugin.settings.timelineEventRegistry[basePath])) plugin.settings.timelineEventRegistry[path]=JSON.parse(JSON.stringify(plugin.settings.timelineEventRegistry[basePath]));
-        } catch(copyErr){console.warn('[Relation Weaver] 分支历史快照复制失败',copyErr);}
+    var folder = basePath.indexOf('/') >= 0 ? basePath.substring(0, basePath.lastIndexOf('/')) : '';
+    var safeName = name.replace(/[\\/:*?"<>|]/g, '-').replace(/[. ]+$/g, '').trim() || '新世界线';
+    var suffix = 1, path = '', changeLogPath = '';
+    function makeWorldlinePaths(n) {
+        var suffixText = n > 1 ? ' (' + n + ')' : '';
+        var stem = safeName + suffixText;
+        return {
+            timeline: (folder ? folder + '/' : '') + stem + '时间线.md',
+            changes: (folder ? folder + '/' : '') + stem + '世界线变更记录.md'
+        };
     }
-    var rec = { id:id, name:name, type:mode === 'branch' ? 'branch' : 'independent', color:['#4a90e2','#2eaa78','#a477d5','#d18a42','#d66a83'][list.length % 5], timelinePath:path, currentTimePoint: mode === 'branch' ? String(plugin.settings.currentTimePoint || '') : '', parentWorldlineId: mode === 'branch' && base ? base.id : '', branchPoint: mode === 'branch' ? String(plugin.settings.currentTimePoint || '') : '', createdAt:Date.now(), isDefault:false };
-    if (mode === 'branch' && plugin.settings.worldlineCharacterOverrides && base && plugin.settings.worldlineCharacterOverrides[base.id]) {
-        if (!plugin.settings.worldlineCharacterOverrides[id]) plugin.settings.worldlineCharacterOverrides[id] = JSON.parse(JSON.stringify(plugin.settings.worldlineCharacterOverrides[base.id]));
-        var branchSeedFields=['阵营','身份','职位','组织','出生','出生时间','死亡','死亡时间','正文首次出现','首次出场'];
-        (view.chars||[]).forEach(function(ch){if(!plugin.settings.worldlineCharacterOverrides[id][ch.name]){var f={};branchSeedFields.forEach(function(k){if(ch.fields&&Object.prototype.hasOwnProperty.call(ch.fields,k))f[k]=String(ch.fields[k]||'');});plugin.settings.worldlineCharacterOverrides[id][ch.name]=f;}});
-    } else {
-        // 新世界线以创建时的人物状态作为初始快照，后续修改只写入该世界线覆盖层。
+    var candidatePaths = makeWorldlinePaths(suffix);
+    while (await adapter.exists(candidatePaths.timeline) || vault.getAbstractFileByPath(candidatePaths.timeline) || await adapter.exists(candidatePaths.changes) || vault.getAbstractFileByPath(candidatePaths.changes)) candidatePaths = makeWorldlinePaths(++suffix);
+    path = candidatePaths.timeline;
+    changeLogPath = candidatePaths.changes;
+
+    // 先落盘当前线，确保分支快照包含尚未离开界面的最后修改。
+    try {
+        if (view.saveFactionsAndRelations) await view.saveFactionsAndRelations();
+        if (plugin.saveIntimacyHistory) await plugin.saveIntimacyHistory();
+    } catch (saveErr) {
+        showUserError('保存当前世界线失败，已取消创建', saveErr);
+        return;
+    }
+
+    var createdTimeline = false, createdTimelineFile = null, createdChangeLog = false, copiedPaths = [], rec = null;
+    var relationMetaRollback = null, relationMetaRollbackPath = '';
+    var pluginDir = rwGetProjectStorageDir(plugin);
+    async function ensureDir(dir) {
+        if (!dir || await adapter.exists(dir)) return;
+        var parent = dir.substring(0, dir.lastIndexOf('/'));
+        if (parent && parent !== dir) await ensureDir(parent);
+        if (!await adapter.exists(dir)) await adapter.mkdir(dir);
+    }
+    async function copyIfExists(source, destination) {
+        if (!source || !destination || !(await adapter.exists(source))) return;
+        await ensureDir(destination.substring(0, destination.lastIndexOf('/')));
+        var raw = await adapter.read(source);
+        // 校验 JSON 后再写，避免把损坏的源文件复制成新世界线数据。
+        if (/\.json$/i.test(destination)) {
+            var parsedCopy = JSON.parse(raw);
+            var branchPointForCopy = forkPoint;
+            if (isBranch && /relations-data/i.test(destination)) parsedCopy = rwFilterRelationSnapshotAt(parsedCopy, branchPointForCopy);
+            else if (isBranch && /intimacy_history/i.test(destination)) parsedCopy = rwFilterTimedRecordsAt(parsedCopy, branchPointForCopy, 'intimacy');
+            raw = JSON.stringify(parsedCopy, null, 2);
+        }
+        await adapter.write(destination, raw);
+        copiedPaths.push(destination);
+    }
+    try {
+        if (folder) await ensureDir(folder);
+        var initial = '# ' + name + '\n';
+        var source = basePath ? vault.getAbstractFileByPath(basePath) : null;
+        if (source) {
+            var sourceTimelineText = await vault.read(source);
+            // 分支线只继承分叉点及之前的事件；独立线完整复制来源时间线。
+            initial = isBranch ? rwTrimTimelineMdAtTime(sourceTimelineText, forkPoint, plugin.settings) : sourceTimelineText;
+            // 不把旧世界线的文件标记复制到新文件；新 ID 仅保存在插件设置中。
+            initial = rwRemoveHiddenStore(initial, RW_WORLDLINE_META_KEY);
+            initial = initial.replace(/^#\s+.*$/m, '# ' + name);
+        }
+        createdTimelineFile = await vault.create(path, initial);
+        createdTimeline = true;
+        var changeLogInitial = '# ' + name + (name.slice(-3) === '世界线' ? '变更记录' : '世界线变更记录') + '\n\n> 本文件由 Relation Weaver 自动维护，记录本世界线相对于继承基线的实际变化。\n';
+        await vault.create(changeLogPath, changeLogInitial);
+        createdChangeLog = true;
+
+        var safeId = id.replace(/[^a-zA-Z0-9_-]/g, '_');
+        // 关系数据、组织数据与亲密度历史均复制为新线自己的起始快照。
+        // 独立线完整复制；分支线按分叉时间裁剪有时间字段的动态记录。
+        await copyIfExists(getDataPath(plugin), pluginDir + '/relations-data.' + safeId + '.json');
+        await copyIfExists(rwGetIntimacyHistoryPath(plugin), pluginDir + '/intimacy_history.' + safeId + '.json');
+        if (plugin.settings.timelineEventRegistry && Array.isArray(plugin.settings.timelineEventRegistry[basePath])) {
+            var retainedEvents = parseTimelineExtended(initial, plugin.settings), retainedIds = Object.create(null);
+            retainedEvents.forEach(function(evt) { if (evt.eventId) retainedIds[evt.eventId] = true; });
+            plugin.settings.timelineEventRegistry[path] = JSON.parse(JSON.stringify(plugin.settings.timelineEventRegistry[basePath])).filter(function(entry) { return entry && retainedIds[entry.id]; });
+        }
+
+        rec = {
+            id: id, name: name, type: isBranch ? 'branch' : 'independent',
+            color: ['#4a90e2','#2eaa78','#a477d5','#d18a42','#d66a83'][list.length % 5],
+            timelinePath: path,
+            changeLogPath: changeLogPath,
+            timelineFileCtime: createdTimelineFile && createdTimelineFile.stat ? Number(createdTimelineFile.stat.ctime || 0) : 0,
+            currentTimePoint: isBranch ? forkPoint : sourceCurrentTime,
+            // 没有可识别的故事时间就无法安全建立时间继承边界；此时仍完整快照，避免未来串线。
+            parentWorldlineId: isBranch && forkPoint && base ? base.id : '',
+            parentWorldlineName: isBranch && forkPoint && base ? String(base.name || '') : '',
+            branchPoint: isBranch && forkPoint ? forkPoint : '',
+            createdAt: Date.now(), isDefault: false
+        };
+        // 插件目录中的独立世界线 JSON 仓库是关系/组织图谱的权威来源。
+        // 仅复制 JSON 文件不足以完成继承：必须为新线建立一条明确的基线快照，
+        // 否则 loadRelationsFromMd 会因为找不到新线记录而回退到空数据或父线正文。
+        var relationMetaPath = getRelationMetaPath(plugin);
+        var relationMetaFile = vault.getAbstractFileByPath(relationMetaPath);
+        if (relationMetaFile) {
+            var relationMetaContent = await vault.read(relationMetaFile);
+            relationMetaRollback = relationMetaContent;
+            relationMetaRollbackPath = relationMetaPath;
+            var relationStore = await rwLoadRelationWorldlineStore(plugin, relationMetaContent);
+            if (!relationStore.worlds || typeof relationStore.worlds !== 'object') relationStore.worlds = {};
+            // 兼容尚未建立隐藏仓库基线的旧档案：先用当前已加载的来源线状态补齐来源快照，
+            // 否则新分支在回看分叉点之前时可能找不到父线的初始关系/组织数据。
+            if (isBranch && base) {
+                var sourceWorldData = relationStore.worlds[base.id] || (relationStore.worlds[base.id] = {});
+                var sourceStateByKey = {
+                    factions: view.factions || [], relations: view.relations || [],
+                    orgRelations: normalizeOrgRelations(view.orgRelations || []),
+                    orgMemberships: normalizeOrgMemberships(view.orgMemberships || []),
+                    orgPositionDefs: normalizeOrgPositionDefs(view.orgPositionDefs || []),
+                    orgTerritoryChanges: normalizeOrgTerritoryChanges(view.orgTerritoryChanges || [])
+                };
+                Object.keys(sourceStateByKey).forEach(function(key) {
+                    if (!Array.isArray(sourceWorldData[key])) {
+                        sourceWorldData[key] = deepCloneJson(sourceStateByKey[key]);
+                        var hasSourceLedger = (relationStore.changeHistory || []).some(function(r) { return r && r.worldlineId === base.id && r.entityType === key; });
+                        if (!hasSourceLedger) rwAppendRelationStoreChange(relationStore, base.id, key, [], sourceWorldData[key], '', true);
+                    }
+                });
+            }
+            var relationSnapshot = {
+                factions: deepCloneJson(view.factions || []),
+                relations: deepCloneJson(view.relations || []),
+                orgRelations: deepCloneJson(normalizeOrgRelations(view.orgRelations || [])),
+                orgMemberships: deepCloneJson(normalizeOrgMemberships(view.orgMemberships || [])),
+                orgPositionDefs: deepCloneJson(normalizeOrgPositionDefs(view.orgPositionDefs || [])),
+                orgTerritoryChanges: deepCloneJson(normalizeOrgTerritoryChanges(view.orgTerritoryChanges || [])),
+                intimacyHistory: deepCloneJson(plugin._intimacyHistory || []),
+                parentWorldlineId: isBranch && forkPoint && base ? base.id : '',
+                branchPoint: isBranch && forkPoint ? forkPoint : '',
+                updatedAt: Date.now()
+            };
+            if (isBranch) {
+                // 尽量从统一历史引擎重算分叉点状态，避免把分叉点之后的关系变化带入分支。
+                var atFork = rwGetEffectiveRelationStoreState(plugin, relationStore, base && base.id, forkPoint);
+                ['factions','relations','orgRelations','orgMemberships','orgPositionDefs','orgTerritoryChanges'].forEach(function(key) {
+                    if (Array.isArray(atFork[key])) relationSnapshot[key] = deepCloneJson(atFork[key]);
+                });
+                // 旧数据可能只有静态快照、没有完整变更账本；再按分叉时间裁剪带时间字段的关系记录。
+                relationSnapshot = rwFilterRelationSnapshotAt(relationSnapshot, forkPoint);
+                relationSnapshot.intimacyHistory = rwFilterTimedRecordsAt(relationSnapshot.intimacyHistory, forkPoint, 'intimacy');
+            }
+            relationStore.worlds[id] = relationSnapshot;
+            var baselineTime = isBranch ? forkPoint : '';
+            ['factions','relations','orgRelations','orgMemberships','orgPositionDefs','orgTerritoryChanges'].forEach(function(key) {
+                rwAppendRelationStoreChange(relationStore, id, key, [], relationSnapshot[key] || [], baselineTime, true);
+            });
+            var relationMetaNext = await rwSaveRelationWorldlineStore(plugin, relationMetaContent, relationStore);
+            await vault.modify(relationMetaFile, relationMetaNext);
+        }
+
         if (!plugin.settings.worldlineCharacterOverrides) plugin.settings.worldlineCharacterOverrides = {};
-        var seedFields=['阵营','身份','职位','组织','出生','出生时间','死亡','死亡时间','正文首次出现','首次出场'];
-        var seed={}; (view.chars||[]).forEach(function(ch){var fields={};seedFields.forEach(function(k){if(ch.fields && Object.prototype.hasOwnProperty.call(ch.fields,k)) fields[k]=String(ch.fields[k]||'');});seed[ch.name]=fields;});
-        plugin.settings.worldlineCharacterOverrides[id]=seed;
+        // 新线继承人物完整档案；快照保存在插件内部，人物 MD 仍然全局唯一。
+        plugin.settings.worldlineCharacterOverrides[id] = rwBuildCharacterWorldlineSnapshot(view.chars || []);
+        if (!plugin.settings.worldlineChapterTimes) plugin.settings.worldlineChapterTimes = {};
+        var sourceWorldlineId = base ? base.id : plugin.settings.activeTimelineWorldlineId;
+        rwCaptureWorldlineChapterTimes(plugin, sourceWorldlineId);
+        plugin.settings.worldlineChapterTimes[id] = JSON.parse(JSON.stringify(plugin.settings.worldlineChapterTimes[sourceWorldlineId] || {}));
+        if (!plugin.settings.worldlineEventSetOrders) plugin.settings.worldlineEventSetOrders = {};
+        plugin.settings.worldlineEventSetOrders[sourceWorldlineId] = {
+            order: (plugin.settings.timelineEventSetOrder || []).slice(),
+            sortMode: plugin.settings.timelineEventSetSortMode || 'time'
+        };
+        plugin.settings.worldlineEventSetOrders[id] = JSON.parse(JSON.stringify(plugin.settings.worldlineEventSetOrders[sourceWorldlineId] || { order: [], sortMode: 'time' }));
+        list.push(rec);
+        await plugin.saveSettings();
+        await rwRefreshWorldlineChangeLog(plugin, id);
+        await rwSwitchWorldline(view, id);
+        new obsidian.Notice((isBranch ? '分支世界线' : '独立世界线') + '「' + name + '」创建成功：已继承人物、关系、组织、亲密度与创作配置');
+    } catch (err) {
+        if (rec) {
+            var idx = list.findIndex(function(w) { return w.id === id; });
+            if (idx >= 0) list.splice(idx, 1);
+        }
+        Object.keys(plugin.settings.worldlineCharacterOverrides || {}).forEach(function(k) { if (k === id) delete plugin.settings.worldlineCharacterOverrides[k]; });
+        if (plugin.settings.worldlineChapterTimes) delete plugin.settings.worldlineChapterTimes[id];
+        if (plugin.settings.worldlineEventSetOrders) delete plugin.settings.worldlineEventSetOrders[id];
+        if (plugin.settings.timelineEventRegistry) delete plugin.settings.timelineEventRegistry[path];
+        if (relationMetaRollback !== null && relationMetaRollbackPath) {
+            try {
+                var relationRollbackFile = vault.getAbstractFileByPath(relationMetaRollbackPath);
+                if (relationRollbackFile) await vault.modify(relationRollbackFile, relationMetaRollback);
+            } catch (relationRollbackError) { console.error('[Relation Weaver] 回滚世界线关系快照失败：', relationRollbackError); }
+        }
+        if (base && plugin.settings.activeTimelineWorldlineId === id) {
+            plugin.settings.activeTimelineWorldlineId = base.id;
+            plugin.settings.currentTimePoint = String(base.currentTimePoint || '');
+            try { await view.loadAllData({ silent: true }); view.render(); } catch (_) {}
+        }
+        for (var ci = copiedPaths.length - 1; ci >= 0; ci--) {
+            try { if (await adapter.exists(copiedPaths[ci])) await adapter.remove(copiedPaths[ci]); } catch (_) {}
+        }
+        try { if (createdTimeline && await adapter.exists(path)) await adapter.remove(path); } catch (_) {}
+        try { if (createdChangeLog && await adapter.exists(changeLogPath)) await adapter.remove(changeLogPath); } catch (_) {}
+        try { await plugin.saveSettings(); } catch (_) {}
+        showUserError('创建世界线失败，已回滚本次新建文件', err);
     }
-    if(!plugin.settings.worldlineChapterTimes) plugin.settings.worldlineChapterTimes={};
-    rwCaptureWorldlineChapterTimes(plugin,base ? base.id : plugin.settings.activeTimelineWorldlineId);
-    plugin.settings.worldlineChapterTimes[id]=JSON.parse(JSON.stringify(plugin.settings.worldlineChapterTimes[base ? base.id : plugin.settings.activeTimelineWorldlineId] || {}));
-    list.push(rec);
-    await plugin.saveSettings();
-    await rwSwitchWorldline(view,id);
 }
+async function rwDeleteWorldline(view, worldlineId) {
+    var plugin = view.plugin, worlds = rwGetWorldlines(plugin), target = worlds.find(function(w) { return w.id === worldlineId; });
+    if (!target) return false;
+    if (target.isDefault || target.id === 'worldline-original' || worlds.length <= 1) {
+        new obsidian.Notice('默认世界线或最后一条世界线不能删除'); return false;
+    }
+    var children = worlds.filter(function(w) { return w.parentWorldlineId === target.id; });
+    if (children.length) {
+        new obsidian.Notice('该世界线仍有分支（' + children.map(function(w) { return w.name; }).join('、') + '），请先处理子分支，避免继承链断裂'); return false;
+    }
+    if (!confirm('确定删除世界线「' + target.name + '」及其专属时间线、变更记录文件和该线历史记录吗？\n\n人物角色.md、关系阵营.md 及其他世界线不会删除。')) return false;
+    var adapter = plugin.app.vault.adapter, vault = plugin.app.vault, rollbackFiles = [], settingsBeforeDelete = deepCloneJson(plugin.settings);
+    async function removeWithBackup(path) { if (path && await adapter.exists(path)) { rollbackFiles.push({ path: path, content: await adapter.read(path) }); await adapter.remove(path); } }
+    try {
+        if (plugin.settings.activeTimelineWorldlineId === target.id) {
+            if (view.saveFactionsAndRelations) await view.saveFactionsAndRelations();
+            if (plugin.saveIntimacyHistory) await plugin.saveIntimacyHistory();
+        }
+        // 删除前只移除该世界线自己的时间线文件；共享人物/关系文件绝不删除。
+        var timelinePath = normalizeVaultPath(target.timelinePath || '');
+        await removeWithBackup(timelinePath);
+        await removeWithBackup(rwGetWorldlineChangeLogPath(target));
+        var oldActive = plugin.settings.activeTimelineWorldlineId;
+        plugin.settings.activeTimelineWorldlineId = target.id;
+        var dataPath = getDataPath(plugin), intimacyPath = rwGetIntimacyHistoryPath(plugin);
+        await removeWithBackup(dataPath);
+        await removeWithBackup(dataPath + '.bak');
+        await removeWithBackup(intimacyPath);
+        plugin.settings.activeTimelineWorldlineId = oldActive;
+        var charPath = getCharFullPathForExt(plugin), charFile = vault.getAbstractFileByPath(charPath);
+        if (charFile) {
+            var charContent = await vault.read(charFile); rollbackFiles.push({ path: charPath, content: charContent });
+            var charStore = rwReadHiddenStore(charContent, RW_CHARACTER_HISTORY_KEY);
+            if (charStore && Array.isArray(charStore.records)) {
+                charStore.records = charStore.records.filter(function(r) { return r.worldlineId !== target.id; });
+                await vault.modify(charFile, charStore.records.length ? rwWriteHiddenStore(charContent, RW_CHARACTER_HISTORY_KEY, charStore) : rwRemoveHiddenStore(charContent, RW_CHARACTER_HISTORY_KEY));
+            }
+        }
+        var relPath = getRelationMetaPath(plugin), relFile = vault.getAbstractFileByPath(relPath);
+        if (relFile) {
+            var relContent = await vault.read(relFile); rollbackFiles.push({ path: relPath, content: relContent });
+            var relStore = await rwLoadRelationWorldlineStore(plugin, relContent);
+            if (relStore.worlds) delete relStore.worlds[target.id];
+            if (Array.isArray(relStore.changeHistory)) relStore.changeHistory = relStore.changeHistory.filter(function(r) { return r.worldlineId !== target.id; });
+            await vault.modify(relFile, await rwSaveRelationWorldlineStore(plugin, relContent, relStore));
+        }
+        worlds.splice(worlds.findIndex(function(w) { return w.id === target.id; }), 1);
+        ['worldlineCharacterOverrides','worldlineChapterTimes','worldlineEventSetOrders'].forEach(function(key) { if (plugin.settings[key]) delete plugin.settings[key][target.id]; });
+        if (plugin.settings.worldlineCharacterHistory && Array.isArray(plugin.settings.worldlineCharacterHistory.records)) plugin.settings.worldlineCharacterHistory.records = plugin.settings.worldlineCharacterHistory.records.filter(function(r){return r && r.worldlineId !== target.id;});
+        if (plugin.settings.timelineEventRegistry) delete plugin.settings.timelineEventRegistry[timelinePath];
+        var next = worlds[0];
+        plugin.settings.activeTimelineWorldlineId = next.id;
+        plugin.settings.currentTimePoint = String(next.currentTimePoint || '');
+        await plugin.saveSettings();
+        await view.loadAllData({ silent: true }); view.render();
+        new obsidian.Notice('已删除世界线「' + target.name + '」；共享人物与关系文件已保留');
+        return true;
+    } catch (e) {
+        // 删除失败时恢复本次已触及的所有文件与设置，避免只删掉时间线却留下半套状态。
+        for (var rbi = rollbackFiles.length - 1; rbi >= 0; rbi--) {
+            try { await adapter.write(rollbackFiles[rbi].path, rollbackFiles[rbi].content); } catch (restoreError) { console.error('[Relation Weaver] 删除回滚失败：', restoreError); }
+        }
+        plugin.settings = settingsBeforeDelete;
+        try { await plugin.saveSettings(); } catch (_) {}
+        try { await view.loadAllData({ silent: true }); view.render(); } catch (_) {}
+        showUserError('删除世界线失败，已尝试恢复本次修改', e);
+        return false;
+    }
+}
+
 function rwRenderWorldlineCompare(view, container) {
     var list = rwGetWorldlines(view.plugin);
     var panel = container.createEl('div',{cls:'rw-worldline-compare'});
@@ -2630,13 +3857,18 @@ function rwRenderWorldlineCompare(view, container) {
 
 function getTimelineFullPathForExt(plugin) {
     if (plugin && plugin.settings && plugin.settings.timelineWorldlines) return rwGetTimelinePath(plugin);
-    var folder = (plugin.settings.timelineFolder || plugin.settings.charFolder || '').trim();
+    var folder = String(plugin.settings.timelineFolder || plugin.settings.charFolder || '').trim();
     if (!folder) {
-        var f = plugin.app.workspace.getActiveFile();
-        if (f && f.parent) folder = f.parent.path;
+        if (rwGetProjectId(plugin) === 'project-default') {
+            var f = plugin.app.workspace.getActiveFile();
+            if (f && f.parent) folder = f.parent.path;
+        } else {
+            var projectRecord = rwGetActiveProjectRecord(plugin);
+            folder = rwProjectFolderName(projectRecord && projectRecord.name || '小说项目', rwGetProjectId(plugin));
+        }
     }
-    var fname = (plugin.settings.timelineFile || '时间线.md').trim();
-    return folder ? folder + '/' + fname : fname;
+    var fname = String(plugin.settings.timelineFile || '时间线.md').trim() || '时间线.md';
+    return normalizeVaultPath(folder ? folder + '/' + fname : fname);
 }
 
 function rwInsertTimelineEventByCalendarOrder(content, evt) {
@@ -2970,78 +4202,57 @@ function auditFirstAppearSync(view) {
 }
 
 async function setCharFieldInMd(app, plugin, charName, fieldName, fieldValue) {
-    // 非原始世界线的动态人物字段写入世界线覆盖层，避免重生线改写原始人物档案。
+    // 分支世界线中的字段编辑一律进入该线覆盖层；原线仍写共享人物档案。
     var activeWl = plugin && plugin.settings && Array.isArray(plugin.settings.timelineWorldlines) ? plugin.settings.timelineWorldlines.find(function(w){return w.id === plugin.settings.activeTimelineWorldlineId;}) : null;
-    var dynamicFields = ['阵营','身份','职位','组织','出生','出生时间','死亡','死亡时间','正文首次出现','首次出场'];
-    if (activeWl && activeWl.id !== 'worldline-original' && dynamicFields.indexOf(String(fieldName || '').trim()) >= 0) {
-        if (!plugin.settings.worldlineCharacterOverrides) plugin.settings.worldlineCharacterOverrides = {};
-        if (!plugin.settings.worldlineCharacterOverrides[activeWl.id]) plugin.settings.worldlineCharacterOverrides[activeWl.id] = {};
-        if (!plugin.settings.worldlineCharacterOverrides[activeWl.id][charName]) plugin.settings.worldlineCharacterOverrides[activeWl.id][charName] = {};
-        plugin.settings.worldlineCharacterOverrides[activeWl.id][charName][fieldName] = String(fieldValue || '');
-        await plugin.saveSettings();
-        return true;
-    }
     var fullPath = getCharFullPathForExt(plugin);
     var file = app.vault.getAbstractFileByPath(fullPath);
     if (!file) return false;
     var content = await app.vault.read(file);
-    var lines = content.split('\n');
-    var out = [];
-    var inTarget = false;
-    var inSubSection = false;
-    var fieldUpdated = false;
-    var foundChar = false;
-
+    var originalContent = content;
+    var originalOverridesSnapshot = JSON.parse(JSON.stringify(plugin.settings.worldlineCharacterOverrides || {}));
+    var parsedChar = parseCharsFromContent(content).find(function(c) { return c.name === charName; });
+    var previousValue = parsedChar && parsedChar.fields ? String(parsedChar.fields[fieldName] == null ? '' : parsedChar.fields[fieldName]) : '';
+    if (activeWl && activeWl.id !== 'worldline-original') {
+        var ov = plugin.settings.worldlineCharacterOverrides || (plugin.settings.worldlineCharacterOverrides = {});
+        var worldOverrides = ov[activeWl.id] || (ov[activeWl.id] = {});
+        var charOverrides = worldOverrides[charName] || (worldOverrides[charName] = {});
+        if (Object.prototype.hasOwnProperty.call(charOverrides, fieldName)) previousValue = String(charOverrides[fieldName] == null ? '' : charOverrides[fieldName]);
+        var hist = rwGetEffectiveCharacterHistory(plugin, content, activeWl.id, activeWl.currentTimePoint || plugin.settings.currentTimePoint || '');
+        if (hist[charName] && Object.prototype.hasOwnProperty.call(hist[charName], fieldName)) previousValue = hist[charName][fieldName];
+        charOverrides[fieldName] = String(fieldValue == null ? '' : fieldValue);
+        content = rwAppendCharacterHistory(content, plugin, activeWl.id, charName, (function(){var x={};x[fieldName]=String(fieldValue==null?'':fieldValue);return x;})(), (function(){var x={};x[fieldName]=previousValue;return x;})());
+        try {
+            await app.vault.modify(file, content);
+            await plugin.saveSettings();
+        } catch (persistError) {
+            plugin.settings.worldlineCharacterOverrides = originalOverridesSnapshot;
+            try { var latestContent = await app.vault.read(file); if (latestContent !== originalContent) await app.vault.modify(file, originalContent); }
+            catch (rollbackError) { console.error('[Relation Weaver] 人物字段保存回滚失败：', rollbackError); }
+            throw persistError;
+        }
+        return true;
+    }
+    var lines = content.split('\n'), out = [], inTarget = false, inSubSection = false, fieldUpdated = false, foundChar = false;
     for (var i = 0; i < lines.length; i++) {
-        var line = lines[i];
-        var trimmed = line.trim();
+        var line = lines[i], trimmed = line.trim();
         if (trimmed.startsWith('## ') && !trimmed.startsWith('### ')) {
-            if (inTarget && !fieldUpdated) {
-                out.push('- ' + fieldName + '：' + fieldValue);
-                fieldUpdated = true;
-            }
-            inTarget = trimmed === '## ' + charName;
-            inSubSection = false;
+            if (inTarget && !fieldUpdated) { out.push('- ' + fieldName + '：' + fieldValue); fieldUpdated = true; }
+            inTarget = trimmed === '## ' + charName; inSubSection = false;
             if (inTarget) foundChar = true;
-            out.push(line);
-            continue;
+            out.push(line); continue;
         }
-        if (inTarget && trimmed.startsWith('### ')) {
-            if (!fieldUpdated) {
-                out.push('- ' + fieldName + '：' + fieldValue);
-                fieldUpdated = true;
-            }
-            inSubSection = true;
-            out.push(line);
-            continue;
-        }
-        if (inTarget && inSubSection) {
-            out.push(line);
-            continue;
-        }
-        if (inTarget && (trimmed.startsWith('- ') || trimmed.startsWith('* '))) {
-            var fieldLine = trimmed.substring(2);
-            var colonIdx = fieldLine.indexOf('：');
-            if (colonIdx === -1) colonIdx = fieldLine.indexOf(':');
-            if (colonIdx !== -1) {
-                var key = fieldLine.substring(0, colonIdx).trim();
-                if (key === fieldName) {
-                    out.push('- ' + fieldName + '：' + fieldValue);
-                    fieldUpdated = true;
-                    continue;
-                }
+        if (inTarget) {
+            if (trimmed.startsWith('### ')) { inSubSection = true; out.push(line); continue; }
+            if (!inSubSection && (trimmed.startsWith('- ' + fieldName + '：') || trimmed.startsWith('- ' + fieldName + ':') || trimmed.startsWith('* ' + fieldName + '：') || trimmed.startsWith('* ' + fieldName + ':'))) {
+                if (!fieldUpdated) { out.push('- ' + fieldName + '：' + fieldValue); fieldUpdated = true; }
+                continue;
             }
         }
         out.push(line);
     }
-    if (inTarget && !fieldUpdated) {
-        out.push('- ' + fieldName + '：' + fieldValue);
-        fieldUpdated = true;
-    }
     if (!foundChar) return false;
-    var nextContent = out.join('\n');
-    await app.vault.modify(file, nextContent);
-    // 此工具函数不持有 MyView 实例；调用方在写入后统一 loadAllData 刷新视图。
+    if (!fieldUpdated) out.push('- ' + fieldName + '：' + fieldValue);
+    await app.vault.modify(file, out.join('\n'));
     return true;
 }
 
@@ -3693,15 +4904,15 @@ function chooseTimelineEvents(app, events, selectedIds) {
 }
 
 function rwGetIntimacyHistoryPath(plugin) {
-    var dir=plugin.app.vault.configDir + '/plugins/' + plugin.manifest.id;
+    var dir=rwGetProjectStorageDir(plugin);
     var active=plugin.settings && Array.isArray(plugin.settings.timelineWorldlines) ? plugin.settings.timelineWorldlines.find(function(w){return w.id===plugin.settings.activeTimelineWorldlineId;}) : null;
     var suffix=active && active.id && active.id!=='worldline-original' ? '.'+String(active.id).replace(/[^a-zA-Z0-9_-]/g,'_') : '';
     return dir + '/intimacy_history' + suffix + '.json';
 }
 
 function getDataPath(plugin) {
-    // 原始世界线沿用旧文件，保证升级无损；新增世界线使用独立关系数据文件。
-    var base = plugin.app.vault.configDir + '/plugins/' + plugin.manifest.id + '/relations-data';
+    // 默认项目沿用 3.64.0 原文件路径；其他小说项目使用各自独立的 JSON 目录。
+    var base = rwGetProjectStorageDir(plugin) + '/relations-data';
     var active = plugin.settings && Array.isArray(plugin.settings.timelineWorldlines) ? plugin.settings.timelineWorldlines.find(function(w){return w.id === plugin.settings.activeTimelineWorldlineId;}) : null;
     var suffix = active && active.id && active.id !== 'worldline-original' ? '.' + String(active.id).replace(/[^a-zA-Z0-9_-]/g,'_') : '';
     return base + suffix + '.json';
@@ -3738,10 +4949,14 @@ async function loadSavedData(plugin) {
     }
     if (primaryError) throw new Error('关系数据文件无法读取，且没有可用备份：' + primaryError.message);
 
+    // 旧版 data.json 仅允许原始世界线迁移；分支/独立线缺少文件时必须保持空白，
+    // 不能把原始线的数据复制进新线，避免首次切换时发生跨线污染。
+    var activeForMigration = rwGetActiveWorldline(plugin);
+    if (activeForMigration && activeForMigration.id !== 'worldline-original') return { factions: [], relations: [], orgRelations: [], orgMemberships: [], orgPositionDefs: [], orgTerritoryChanges: [] };
     // 3.3.3 及更早版本曾把关系数据写入 Obsidian 专用的 data.json，
     // 与 Plugin.loadData()/saveData() 的设置存储发生冲突。只迁移可识别的关系字段，绝不覆盖原文件。
     var legacyPath = plugin.app.vault.configDir + '/plugins/' + plugin.manifest.id + '/data.json';
-    if (await adapter.exists(legacyPath)) {
+    if (rwGetProjectId(plugin) === 'project-default' && await adapter.exists(legacyPath)) {
         try {
             var legacy = JSON.parse(await adapter.read(legacyPath));
             if (legacy && typeof legacy === 'object' && !Array.isArray(legacy) &&
@@ -3767,7 +4982,7 @@ async function saveData(plugin, data) {
     var adapter = plugin.app.vault.adapter;
     var path = getDataPath(plugin);
     var backupPath = path + '.bak';
-    var dir = plugin.app.vault.configDir + '/plugins/' + plugin.manifest.id;
+    var dir = path.substring(0, path.lastIndexOf('/'));
     var payload;
     try {
         payload = JSON.stringify(data, null, 2);
@@ -3782,7 +4997,11 @@ async function saveData(plugin, data) {
 
     var previous = plugin._rwDataSaveQueue || Promise.resolve();
     var current = previous.catch(function() {}).then(async function() {
-        if (!await adapter.exists(dir)) await adapter.mkdir(dir);
+        if (!await adapter.exists(dir)) {
+            var parent = dir.substring(0, dir.lastIndexOf('/'));
+            if (parent && !await adapter.exists(parent)) await adapter.mkdir(parent);
+            if (!await adapter.exists(dir)) await adapter.mkdir(dir);
+        }
         var tempPath = path + '.tmp-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
         var hadOriginal = await adapter.exists(path);
         var movedOriginal = false;
@@ -3850,12 +5069,18 @@ function getCurrentFolder(app) {
 
 function resolveDataFilePath(plugin, folderSettingKey, fileSettingKey, defaultFileName) {
     var settings = plugin.settings || {};
-    var folder = (settings[folderSettingKey] || '').trim();
+    var folder = String(settings[folderSettingKey] || '').trim();
     if (!folder) {
-        folder = getCurrentFolder(plugin.app);
+        // 旧版默认项目保留跟随当前笔记目录的行为；独立小说项目必须使用自身固定目录，
+        // 不能因作者切换 Obsidian 活动笔记而读取另一部小说的同名 MD。
+        if (rwGetProjectId(plugin) === 'project-default') folder = getCurrentFolder(plugin.app);
+        else {
+            var projectRecord = rwGetActiveProjectRecord(plugin);
+            folder = rwProjectFolderName(projectRecord && projectRecord.name || '小说项目', rwGetProjectId(plugin));
+        }
     }
-    var filename = (settings[fileSettingKey] || defaultFileName).trim();
-    return folder ? folder + '/' + filename : filename;
+    var filename = String(settings[fileSettingKey] || defaultFileName).trim() || defaultFileName;
+    return normalizeVaultPath(folder ? folder + '/' + filename : filename);
 }
 
 function getCharFullPath(plugin) {
@@ -4726,8 +5951,8 @@ async function createVaultSnapshot(app, plugin) {
         function() { return copyVaultFile(getTimelineFullPath(plugin), '时间线.md'); },
         function() { return copyVaultFile(getRelationMetaPath(plugin), '关系与阵营.md'); },
         function() { return copyAdapterFile(getDataPath(plugin), 'relations-data.json'); },
-        function() { return copyAdapterFile(app.vault.configDir + '/plugins/' + plugin.manifest.id + '/data.json', 'plugin-settings.json'); },
-        function() { return copyAdapterFile(app.vault.configDir + '/plugins/' + plugin.manifest.id + '/intimacy_history.json', 'intimacy_history.json'); }
+        function() { return copyAdapterFile(plugin.app.vault.configDir + '/plugins/' + plugin.manifest.id + '/data.json', 'plugin-settings.json'); },
+        function() { return copyAdapterFile(rwGetIntimacyHistoryPath(plugin), 'intimacy_history.json'); }
     ];
     for (var i = 0; i < tasks.length; i++) {
         try { await tasks[i](); } catch (e) { failures.push(e.message || String(e)); }
@@ -4791,7 +6016,7 @@ function getAllowedSnapshotTargets(plugin) {
         '关系与阵营.md': getRelationMetaPath(plugin),
         'relations-data.json': getDataPath(plugin),
         'plugin-settings.json': folder + 'data.json',
-        'intimacy_history.json': folder + 'intimacy_history.json'
+        'intimacy_history.json': rwGetIntimacyHistoryPath(plugin)
     };
 }
 
@@ -5009,6 +6234,7 @@ function validateImportData(data) {
         if (!Array.isArray(data.orgTerritoryChanges)) return { ok: false, error: 'orgTerritoryChanges 必须是数组' };
         for (var oti=0; oti<data.orgTerritoryChanges.length; oti++) if (!data.orgTerritoryChanges[oti] || !String(data.orgTerritoryChanges[oti].territory||'').trim()) return { ok:false, error:'领地变迁第 '+(oti+1)+' 项缺少 territory' };
     }
+    if (data.intimacyHistory !== undefined && !Array.isArray(data.intimacyHistory)) return { ok: false, error: 'intimacyHistory 必须是数组' };
     if (data.timeline !== undefined) {
         if (!Array.isArray(data.timeline)) return { ok: false, error: 'timeline 必须是数组' };
         for (var ti = 0; ti < data.timeline.length; ti++) if (!data.timeline[ti] || !data.timeline[ti].event) return { ok: false, error: '事件第 ' + (ti + 1) + ' 项缺少 event' };
@@ -5024,10 +6250,14 @@ function relationImportKey(rel) {
 function eventImportKey(evt) {
     return [evt.year, evt.month, evt.tag, evt.event, evt.plotLine].map(normalizeImportKey).join('::');
 }
+function intimacyImportKey(record) {
+    if (record && record.id) return String(record.id);
+    return [record.charA,record.charB,record.recordKind,record.oldValue,record.newValue,record.changeReason,record.recordDate,record.timestamp,record.eventId].map(normalizeImportKey).join('::');
+}
 function sameImportValue(a, b) { return JSON.stringify(a || {}) === JSON.stringify(b || {}); }
 function buildSmartImportPlan(view, data, overwriteConflicts) {
     data = data || {};
-    var plan = { factions: [], relations: [], chars: [], timeline: [], orgRelations: [], orgMemberships: [], orgPositionDefs: [], orgTerritoryChanges: [], conflicts: [], duplicates: [], warnings: [], counts: {} };
+    var plan = { factions: [], relations: [], chars: [], timeline: [], intimacyHistory: [], orgRelations: [], orgMemberships: [], orgPositionDefs: [], orgTerritoryChanges: [], conflicts: [], duplicates: [], warnings: [], counts: {} };
     function mergeList(existing, incoming, keyFn, label, overwrite) {
         var out = (existing || []).slice();
         var map = {};
@@ -5080,9 +6310,16 @@ function buildSmartImportPlan(view, data, overwriteConflicts) {
         if (!key || eventKeys[key]) plan.duplicates.push('事件：' + (e.year || '') + ' ' + (e.event || '').slice(0, 24));
         else { plan.timeline.push(e); eventKeys[key] = true; }
     });
+    var historyKeys = {};
+    (view.plugin._intimacyHistory || []).forEach(function(h) { historyKeys[intimacyImportKey(h)] = true; });
+    (data.intimacyHistory || []).forEach(function(h) {
+        var key = intimacyImportKey(h);
+        if (!key || historyKeys[key]) plan.duplicates.push('亲密度历史：' + (h.charA || '') + ' ↔ ' + (h.charB || '') + ' · ' + (h.recordDate || h.timestamp || '未注明时间'));
+        else { plan.intimacyHistory.push(h); historyKeys[key] = true; }
+    });
     plan.counts = {
         factions: plan.factions.length, relations: plan.relations.length,
-        chars: plan.chars.length, timeline: plan.timeline.length, orgRelations: plan.orgRelations.length, orgMemberships: plan.orgMemberships.length, orgPositionDefs: plan.orgPositionDefs.length, orgTerritoryChanges: plan.orgTerritoryChanges.length,
+        chars: plan.chars.length, timeline: plan.timeline.length, intimacyHistory: plan.intimacyHistory.length, orgRelations: plan.orgRelations.length, orgMemberships: plan.orgMemberships.length, orgPositionDefs: plan.orgPositionDefs.length, orgTerritoryChanges: plan.orgTerritoryChanges.length,
         conflicts: plan.conflicts.length, duplicates: plan.duplicates.length, warnings: plan.warnings.length
     };
     return plan;
@@ -5211,6 +6448,7 @@ var MyView = /** @class */ (function (_super) {
         _this.expandedFactions = {};
         _this.selectedTag = '';
         _this.relationFilterType = 'all';
+        _this.relationFilterCategory = 'all';
         _this.relationFilterIntimacy = 'all';
         _this.relationSortBy = 'intimacy';
         _this.relationViewMode = 'list';
@@ -5274,7 +6512,7 @@ var MyView = /** @class */ (function (_super) {
     // 应用级自由工作台：浮动层挂载到 Obsidian .app-container，而不是插件侧栏。
     // 每个窗口复用同一个 MyView 实例与现有 renderCurrentTab 数据源，不创建第二份图谱模型。
     var RW_FLOAT_STATE_KEYS = [
-        'searchText','expandedFactions','selectedTag','relationFilterType','relationFilterIntimacy','relationSortBy',
+        'searchText','expandedFactions','selectedTag','relationFilterType','relationFilterCategory','relationFilterIntimacy','relationSortBy',
         'relationViewMode','expandedRelationGroups','lifecycleSortBy','lifecycleSortOrder','lifecycleOnlyDated',
         '_plotLineFilter','_timelineExpandedYears','_timelineExpandedMonths','_globalSearchText',
         'heatmapMode','heatmapGranularity','heatmapYearRange','heatmapPage','heatmapPageSize','heatmapSearchText',
@@ -5952,6 +7190,12 @@ var MyView = /** @class */ (function (_super) {
             if (globalWl && w.id === globalWl.id) op.selected = true;
         });
         globalWlSelect.addEventListener('change', function() { rwSwitchWorldline(self, globalWlSelect.value); });
+        var globalAddIndependent = globalWlBar.createEl('button', { text: '+ 独立', cls: 'my-char-btn-ghost my-char-btn-sm', attr: { title: '创建独立世界线' } });
+        globalAddIndependent.addEventListener('click', function() { rwCreateWorldline(self, 'independent'); });
+        var globalAddBranch = globalWlBar.createEl('button', { text: '+ 分支', cls: 'my-char-btn-ghost my-char-btn-sm', attr: { title: '从当前世界线创建分支' } });
+        globalAddBranch.addEventListener('click', function() { rwCreateWorldline(self, 'branch'); });
+        var globalFileSettings = globalWlBar.createEl('button', { text: '文件设置', cls: 'my-char-btn-ghost my-char-btn-sm', attr: { title: '自定义当前世界线时间线与变更记录的文件位置和名称' } });
+        globalFileSettings.addEventListener('click', function() { rwOpenWorldlineFileSettings(self); });
         globalWlBar.createEl('span', { text: '当前时间点', cls: 'rw-global-worldline-label' });
         var globalTimeInput = globalWlBar.createEl('input', { type: 'text', cls: 'my-char-form-input rw-global-worldline-time', attr: { placeholder: '设置当前故事时间' } });
         globalTimeInput.value = String(this.plugin.settings.currentTimePoint || '');
@@ -5962,6 +7206,7 @@ var MyView = /** @class */ (function (_super) {
             self.plugin.settings.currentTimePoint = value;
             if (active) active.currentTimePoint = value;
             await self.plugin.saveSettings();
+            await self.loadAllData({ silent: true });
             self.render();
             new obsidian.Notice('当前工作世界线时间已更新');
         });
@@ -6418,6 +7663,14 @@ var MyView = /** @class */ (function (_super) {
     MyView.prototype.loadAllData = async function (options) {
         options = options || {};
         var silent = !!options.silent;
+        var loadToken = (this._rwProjectLoadToken || 0) + 1;
+        this._rwProjectLoadToken = loadToken;
+        var loadProjectId = rwGetProjectId(this.plugin);
+        function rwLoadStillCurrent(view) { return view._rwProjectLoadToken === loadToken && rwGetProjectId(view.plugin) === loadProjectId; }
+        // 每次加载都先清空视图缓存；目标项目缺少某个文件时，绝不残留上一个项目的内容。
+        this.chars = []; this.timeline = []; this.factions = []; this.relations = [];
+        this.orgRelations = []; this.orgMemberships = []; this.orgPositionDefs = []; this.orgTerritoryChanges = [];
+        this._lastCharMd = ''; this._lastTimelineMd = '';
         rwEnsureWorldlineSettings(this.plugin);
         
         if (this.plugin.settings.charFile) {
@@ -6425,11 +7678,17 @@ var MyView = /** @class */ (function (_super) {
             var charFile = this.app.vault.getAbstractFileByPath(fullCharPath);
             if (charFile) {
                 var charContent = await this.app.vault.read(charFile);
+                if (!rwLoadStillCurrent(this)) return;
                 this._lastCharMd = charContent;
                 this.chars = this.parseChars(charContent);
+                var legacyWorldlineOverridesChanged = rwEnsureCharacterWorldlineSnapshots(this.plugin, charContent, this.chars);
+                if (legacyWorldlineOverridesChanged) { await this.plugin.saveSettings(); if (!rwLoadStillCurrent(this)) return; }
                 var activeWlForChars=rwGetActiveWorldline(this.plugin);
                 var charOverrides=this.plugin.settings.worldlineCharacterOverrides && activeWlForChars ? this.plugin.settings.worldlineCharacterOverrides[activeWlForChars.id] : null;
                 if(charOverrides){this.chars.forEach(function(ch){var ov=charOverrides[ch.name];if(ov){if(!ch.fields)ch.fields={};Object.keys(ov).forEach(function(k){ch.fields[k]=ov[k];});}});}
+                // Timestamped changes are authoritative over legacy latest-value overrides.
+                // The ancestry resolver clamps every parent line at its child's branch point.
+                rwApplyCharacterHistory(this, charContent);
             } else if (!silent) {
                 console.log('人物文件未找到:', fullCharPath);
                 new obsidian.Notice('未找到人物文件: ' + fullCharPath);
@@ -6441,11 +7700,14 @@ var MyView = /** @class */ (function (_super) {
             var timelineFile = this.app.vault.getAbstractFileByPath(fullTimelinePath);
             if (timelineFile) {
                 var timelineContent = await this.app.vault.read(timelineFile);
+                if (!rwLoadStillCurrent(this)) return;
                 this._lastTimelineMd = timelineContent;
                 this.timeline = this.parseTimeline(timelineContent);
                 rwApplyChapterStoryTimes(this);
                 await rwReconcileTimelineEventRegistry(this, fullTimelinePath);
+                if (!rwLoadStillCurrent(this)) return;
                 await rwStripLegacyEventIdentityMetadata(this, timelineFile, timelineContent);
+                if (!rwLoadStillCurrent(this)) return;
             } else {
                 // 原文文件被作者删除/移动时，不能继续显示上一次加载的内存事件。
                 this.timeline = [];
@@ -6458,11 +7720,15 @@ var MyView = /** @class */ (function (_super) {
         }
 
         var savedData = await loadSavedData(this.plugin);
+        if (!rwLoadStillCurrent(this)) return;
         // 亲密度变化历史：优先人物 MD，其次 JSON 备份
         try {
             var historyPath = rwGetIntimacyHistoryPath(this.plugin);
-            if (await this.plugin.app.vault.adapter.exists(historyPath)) {
+            var hasHistoryFile = await this.plugin.app.vault.adapter.exists(historyPath);
+            if (!rwLoadStillCurrent(this)) return;
+            if (hasHistoryFile) {
                 var histContent = await this.plugin.app.vault.adapter.read(historyPath);
+                if (!rwLoadStillCurrent(this)) return;
                 this.plugin._intimacyHistory = JSON.parse(histContent);
             } else {
                 this.plugin._intimacyHistory = [];
@@ -6471,35 +7737,36 @@ var MyView = /** @class */ (function (_super) {
             console.log('加载变化历史失败:', e);
             this.plugin._intimacyHistory = [];
         }
-        this.factions = savedData.factions || [];
-        this.relations = savedData.relations || [];
+        // 当前项目的关系与阵营 Markdown 是作者可见数据的权威来源。
+        // 空数组也是有效状态：不得再用 JSON 备份中的旧记录把空 MD 填满。
+        this.factions = Array.isArray(savedData.factions) ? savedData.factions : [];
+        this.relations = Array.isArray(savedData.relations) ? savedData.relations : [];
         this.orgRelations = normalizeOrgRelations(savedData.orgRelations || []);
         this.orgMemberships = normalizeOrgMemberships(savedData.orgMemberships || []);
         this.orgPositionDefs = normalizeOrgPositionDefs(savedData.orgPositionDefs || []);
         this.orgTerritoryChanges = normalizeOrgTerritoryChanges(savedData.orgTerritoryChanges || []);
         var mdData = await novelExt.loadRelationsFromMd(this.plugin);
-        if (mdData && (mdData.factions.length > 0 || mdData.relations.length > 0)) {
-            if (mdData.factions.length > 0) {
-                // 旧版关系与阵营.md 未记录上级组织时，优先从 JSON 备份恢复，避免升级首次加载丢失层级。
-                var savedFactionByName = Object.create(null);
-                (savedData.factions || []).forEach(function(f) { if (f && f.name) savedFactionByName[String(f.name).trim()] = f; });
-                this.factions = mdData.factions.map(function(f) {
-                    var saved = savedFactionByName[String(f.name || '').trim()];
-                    if (f.parentOrganization === undefined && saved && saved.parentOrganization) {
-                        f.parentOrganization = saved.parentOrganization;
-                    }
-                    return f;
-                });
-            }
-            if (mdData.relations.length > 0) this.relations = mdData.relations;
+        if (!rwLoadStillCurrent(this)) return;
+        if (mdData) {
+            this.factions = Array.isArray(mdData.factions) ? deepCloneJson(mdData.factions) : [];
+            this.relations = Array.isArray(mdData.relations) ? deepCloneJson(mdData.relations) : [];
+            if (Array.isArray(mdData.orgRelations)) this.orgRelations = normalizeOrgRelations(mdData.orgRelations);
+            if (Array.isArray(mdData.orgMemberships)) this.orgMemberships = normalizeOrgMemberships(mdData.orgMemberships);
+            if (Array.isArray(mdData.orgPositionDefs)) this.orgPositionDefs = normalizeOrgPositionDefs(mdData.orgPositionDefs);
+            if (Array.isArray(mdData.orgTerritoryChanges)) this.orgTerritoryChanges = normalizeOrgTerritoryChanges(mdData.orgTerritoryChanges);
+            if (Array.isArray(mdData.intimacyHistory)) this.plugin._intimacyHistory = mdData.intimacyHistory;
         }
 
         // 人物索引内 ### 关系 / ### 关系变化 为权威来源；空的「关系变化」不能冲掉 JSON 备份
         this._mdParseErrors = [];
         var fullCharPathForRel = getCharFullPath(this.plugin);
         var charFileForRel = this.app.vault.getAbstractFileByPath(fullCharPathForRel);
-        if (charFileForRel) {
+        var relationSourceWorldline = rwGetActiveWorldline(this.plugin);
+        // 旧人物索引中的关系小节仅作为原始事件线的迁移/兼容来源。
+        // 其他事件线绝不从共享人物档案回读关系，避免切换后串线覆盖。
+        if (charFileForRel && !mdData && (!relationSourceWorldline || relationSourceWorldline.id === 'worldline-original')) {
             var charRaw = await this.app.vault.read(charFileForRel);
+            if (!rwLoadStillCurrent(this)) return;
             var hasRelSection = /(?:^|\n)###\s*关系\s*(?:\n|$)/.test(charRaw);
             var hasHistSection = /(?:^|\n)###\s*关系变化\s*(?:\n|$)/.test(charRaw);
             var embedded = parseCharEmbeddedRelationsAndHistory(charRaw);
@@ -6525,11 +7792,27 @@ var MyView = /** @class */ (function (_super) {
                 (usesOldListFormat && (this.relations.length > 0 || (this.plugin._intimacyHistory || []).length > 0 || embedded.relations.length > 0 || embedded.history.length > 0))
             );
             if (needSyncToMd) {
-                await syncRelationsIntoCharMd(this.app, this.plugin, this.relations, this.plugin._intimacyHistory || []);
-                if (this.plugin.saveIntimacyHistory) {
-                    await this.plugin.saveIntimacyHistory();
-                }
+                // 旧版人物档案内嵌关系/亲密度数据迁移到唯一共享关系阵营 MD；
+                // 不再把关系数据继续写回人物档案，避免两份 MD 互相覆盖。
+                await novelExt.saveRelationsToMd(this.plugin, this.factions, this.relations, {
+                    orgRelations: this.orgRelations, orgMemberships: this.orgMemberships,
+                    orgPositionDefs: this.orgPositionDefs, orgTerritoryChanges: this.orgTerritoryChanges,
+                    intimacyHistory: this.plugin._intimacyHistory || []
+                });
+                if (!rwLoadStillCurrent(this)) return;
+                if (this.plugin.saveIntimacyHistory) { await this.plugin.saveIntimacyHistory(); if (!rwLoadStillCurrent(this)) return; }
             }
+        }
+
+        // 将旧版 JSON/人物 MD 中读取到的当前线数据安全写入唯一共享关系阵营 MD。
+        // 只在该世界线尚无隐藏快照时初始化，不覆盖已经存在的权威记录。
+        if (!mdData || !mdData.fromWorldlineStore) {
+            await novelExt.saveRelationsToMd(this.plugin, this.factions, this.relations, {
+                orgRelations: this.orgRelations, orgMemberships: this.orgMemberships,
+                orgPositionDefs: this.orgPositionDefs, orgTerritoryChanges: this.orgTerritoryChanges,
+                intimacyHistory: this.plugin._intimacyHistory || []
+            });
+            if (!rwLoadStillCurrent(this)) return;
         }
 
         if (this.plugin.settings.customIntimacyLevels) {
@@ -6550,7 +7833,13 @@ var MyView = /** @class */ (function (_super) {
                         factions: this.factions,
                         relations: this.relations
                     });
-                    await novelExt.saveRelationsToMd(this.plugin, this.factions, this.relations);
+                    if (!rwLoadStillCurrent(this)) return;
+                    await novelExt.saveRelationsToMd(this.plugin, this.factions, this.relations, {
+                        orgRelations: this.orgRelations, orgMemberships: this.orgMemberships,
+                        orgPositionDefs: this.orgPositionDefs, orgTerritoryChanges: this.orgTerritoryChanges,
+                        intimacyHistory: this.plugin._intimacyHistory || []
+                    });
+                    if (!rwLoadStillCurrent(this)) return;
                 } catch (e) {
                     console.log('自动保存阵营失败:', e);
                 }
@@ -6560,6 +7849,7 @@ var MyView = /** @class */ (function (_super) {
         var settingsChanged = syncSettingsFromParsedData(this.plugin, this.chars, this.relations, this.timeline);
         if (settingsChanged) {
             try { await this.plugin.saveSettings(); } catch (e) { console.log('自动同步设定失败:', e); }
+            if (!rwLoadStillCurrent(this)) return;
         }
 
         invalidateTagCache(this.plugin);
@@ -6671,8 +7961,11 @@ var MyView = /** @class */ (function (_super) {
             orgPositionDefs: normalizeOrgPositionDefs(this.orgPositionDefs || []),
             orgTerritoryChanges: normalizeOrgTerritoryChanges(this.orgTerritoryChanges || [])
         });
-        await novelExt.saveRelationsToMd(this.plugin, this.factions, this.relations);
-        await syncRelationsIntoCharMd(this.app, this.plugin, this.relations, this.plugin._intimacyHistory || []);
+        await novelExt.saveRelationsToMd(this.plugin, this.factions, this.relations, {
+            orgRelations: this.orgRelations, orgMemberships: this.orgMemberships,
+            orgPositionDefs: this.orgPositionDefs, orgTerritoryChanges: this.orgTerritoryChanges,
+            intimacyHistory: this.plugin._intimacyHistory || []
+        });
         if (this.plugin.saveIntimacyHistory) {
             await this.plugin.saveIntimacyHistory();
         }
@@ -6714,6 +8007,7 @@ var MyView = /** @class */ (function (_super) {
             settings.currentTimePoint = select.value;
             var activeWl = rwGetActiveWorldline(self.plugin); if (activeWl) activeWl.currentTimePoint = settings.currentTimePoint;
             await self.plugin.saveSettings();
+            await self.loadAllData({ silent: true });
             self.render();
         });
         var input = bar.createEl('input', { type: 'text', cls: 'my-char-input-inline' });
@@ -6725,6 +8019,7 @@ var MyView = /** @class */ (function (_super) {
                 settings.currentTimePoint = input.value.trim();
                 var activeWl = rwGetActiveWorldline(self.plugin); if (activeWl) activeWl.currentTimePoint = settings.currentTimePoint;
                 await self.plugin.saveSettings();
+                await self.loadAllData({ silent: true });
                 self.render();
             }
         });
@@ -6734,6 +8029,7 @@ var MyView = /** @class */ (function (_super) {
             settings.currentTimePoint = next;
             var activeWl = rwGetActiveWorldline(self.plugin); if (activeWl) activeWl.currentTimePoint = next;
             await self.plugin.saveSettings();
+            await self.loadAllData({ silent: true });
             new obsidian.Notice('时间点 → ' + next);
             self.render();
         });
@@ -7384,14 +8680,26 @@ var MyView = /** @class */ (function (_super) {
 
         var syncMdBtn = titleArea.createEl('button', { text: '📥 从 MD 同步设定' });
         syncMdBtn.className = 'my-char-view-btn my-char-view-btn-secondary my-char-btn-sm';
-        syncMdBtn.title = '从人物/时间线 MD 自动识别关系、阵营、字段、标签并刷新显示';
-        syncMdBtn.addEventListener('click', function () {
-            self.loadAllData().then(function() {
+        syncMdBtn.title = '从当前小说项目指定的人物、关系阵营及时间线 MD 读取设定并刷新显示';
+        syncMdBtn.addEventListener('click', async function () {
+            syncMdBtn.disabled = true;
+            var relationPath = getRelationMetaPath(self.plugin);
+            try {
+                // 同步前先验证当前项目的关系 MD 路径及可解析性，禁止用 JSON 回退数据冒充 MD 同步成功。
+                if (!await self.app.vault.adapter.exists(relationPath)) {
+                    throw new Error('当前项目的关系与阵营 MD 不存在：' + relationPath + '。请检查项目路径设置；未读取其他小说的同名文件。');
+                }
+                var mdCheck = await novelExt.loadRelationsFromMd(self.plugin);
+                if (!mdCheck) throw new Error('关系与阵营 MD 未能成功解析：' + relationPath + '。本次未报告同步成功，请检查文件标题及内容格式。');
+                await self.loadAllData();
                 var changed = syncSettingsFromParsedData(self.plugin, self.chars, self.relations, self.timeline);
-                if (changed) self.plugin.saveSettings();
+                if (changed) await self.plugin.saveSettings();
                 self.render();
-                new obsidian.Notice('已从 MD 同步：' + self.relations.length + ' 条关系，' + self.factions.length + ' 个阵营');
-            });
+                new obsidian.Notice('已从当前项目 MD 同步：' + self.relations.length + ' 条关系，' + self.factions.length + ' 个阵营。来源：' + relationPath, 8000);
+            } catch (syncError) {
+                console.error('[Relation Weaver] 从 MD 同步失败：', syncError);
+                new obsidian.Notice('从 MD 同步失败：' + (syncError && syncError.message ? syncError.message : syncError), 10000);
+            } finally { syncMdBtn.disabled = false; }
         });
 
         var statsSpan = toolbar.createEl('span', { text: '共 ' + this.relations.length + ' 条关系' });
@@ -7423,6 +8731,30 @@ var MyView = /** @class */ (function (_super) {
         typeSelect.value = this.relationFilterType;
         typeSelect.addEventListener('change', function() {
             self.relationFilterType = typeSelect.value;
+            self.renderRelations(container);
+        });
+
+        // 上属关系分类筛选：与具体关系类型筛选并列，分类来源优先采用关系记录自身的 category。
+        var categorySelect = filterBar.createEl('select');
+        categorySelect.className = 'my-char-select';
+        categorySelect.add(createOption('all', '🗂 全部上属分类'));
+        var categorySet = {};
+        getRelationCategories(this.plugin).forEach(function(category) {
+            var name = String(category || '').trim();
+            if (name) categorySet[name] = true;
+        });
+        for (var ci = 0; ci < this.relations.length; ci++) {
+            var relation = this.relations[ci] || {};
+            var relationCategory = String(relation.category || inferRelationCategory(relation.type || relation.relation || '')).trim();
+            if (relationCategory) categorySet[relationCategory] = true;
+        }
+        Object.keys(categorySet).sort().forEach(function(category) {
+            categorySelect.add(createOption(category, category));
+        });
+        categorySelect.value = this.relationFilterCategory || 'all';
+        if (categorySelect.value !== 'all' && !categorySet[categorySelect.value]) categorySelect.value = 'all';
+        categorySelect.addEventListener('change', function() {
+            self.relationFilterCategory = categorySelect.value;
             self.renderRelations(container);
         });
         
@@ -7486,6 +8818,12 @@ var MyView = /** @class */ (function (_super) {
         if (this.relationFilterType !== 'all') {
             filteredRelations = filteredRelations.filter(function(r) {
                 return (r.type || '其他') === self.relationFilterType;
+            });
+        }
+        if (this.relationFilterCategory && this.relationFilterCategory !== 'all') {
+            filteredRelations = filteredRelations.filter(function(r) {
+                var category = String(r.category || inferRelationCategory(r.type || r.relation || '')).trim();
+                return category === self.relationFilterCategory;
             });
         }
         if (this.relationFilterIntimacy !== 'all') {
@@ -8629,7 +9967,8 @@ var MyView = /** @class */ (function (_super) {
         var title = getViewTitle(this.plugin);
         var body = this.buildPrintPreviewBodyHtml();
         var screenCss = this.getPrintPreviewStyles();
-        var printCss = 'body{font-family:"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;max-width:820px;margin:24px auto;padding:0 20px 40px;color:#222;line-height:1.55;font-size:13px;}' +
+        var printCss = '@page{size:auto;margin:14mm;}@media print{html,body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}body{margin:0!important;max-width:none!important;padding:0!important;}}' +
+            'body{font-family:"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;max-width:820px;margin:24px auto;padding:0 20px 40px;color:#222;line-height:1.55;font-size:13px;}' +
             'h1{font-size:22px;border-bottom:2px solid #6c5ce7;padding-bottom:8px;}' +
             'h2{font-size:15px;margin-top:22px;color:#4a7fd4;border-left:4px solid #4a7fd4;padding-left:8px;}' +
             '.meta{color:#666;font-size:12px;margin:3px 0;}ul{list-style:none;padding:0;margin:6px 0;}' +
@@ -9083,7 +10422,7 @@ function renderChapterLibraryManager(view, container) {
     if (!Array.isArray(library.chapters)) library.chapters = [];
     var top = container.createEl('div', { cls: 'rw-chapter-manager' });
     top.createEl('h3', { text: '章节库与故事时间', cls: 'my-char-section-title' });
-    top.createEl('p', { text: '扫描小说正文目录建立只读索引，为每章设置故事发生时间或时间范围（例如：公元前177年3月-9月）。范围结束月份会作为章节人物出场时间的默认值。章节时间会参与人物完整历史履历排序；不会改写正文，也不会覆盖时间线事件中明确填写的独立时间。', cls: 'my-char-muted' });
+    top.createEl('p', { text: '扫描小说正文目录建立只读索引。每章可设置一个或多个故事时间段（多个时间段用分号分隔）；单一连续范围会以结束月份作为默认时间，多段章节不会被强行绑定到某一个时间，具体事件请在事件编辑中填写对应故事内时间。章节时间会参与人物完整历史履历排序；不会改写正文，也不会覆盖时间线事件中明确填写的独立时间。', cls: 'my-char-muted' });
     var chapterModeBar = top.createEl('div', { cls: 'my-char-lifecycle-toolbar rw-chapter-modebar' });
     var chapterSettingsPanel = top.createEl('section', { cls: 'rw-chapter-settings-panel' });
     var chapterPreviewPanel = top.createEl('section', { cls: 'rw-chapter-preview-panel' });
@@ -9106,7 +10445,7 @@ function renderChapterLibraryManager(view, container) {
     var list = chapterSettingsPanel.createEl('div', { cls: 'rw-chapter-library-list' });
     var preview = chapterPreviewPanel.createEl('div', { cls: 'rw-chapter-time-preview' });
     preview.createEl('h4', { text: '章节时间轴预览' });
-    preview.createEl('p', { text: '按故事时间排序查看已设置时间的章节；点击章节名称可直接打开正文。', cls: 'my-char-muted' });
+    preview.createEl('p', { text: '按故事时间段排序查看章节；同一章节允许出现多个时间段，点击章节名称可直接打开正文。', cls: 'my-char-muted' });
     var previewBody = preview.createEl('div');
     function chapterSort(a,b) {
         var pa=parseChapterHeading(a.name), pb=parseChapterHeading(b.name);
@@ -9125,34 +10464,33 @@ function renderChapterLibraryManager(view, container) {
         var q=String(search.value||'').trim().toLowerCase();
         var mode=statusFilter.value;
         var visible=chapters.filter(function(ch){
-            var has=!!String(ch.storyTime||'').trim();
+            var has=rwSplitChapterStoryTimes(ch.storyTime||'').length>0;
             return (mode==='all'||(mode==='set'&&has)||(mode==='unset'&&!has)) && (!q||(String(ch.name+' '+ch.path).toLowerCase().indexOf(q)>=0));
         });
-        var setCount=chapters.filter(function(ch){return !!String(ch.storyTime||'').trim();}).length;
-        stats.textContent='共 '+chapters.length+' 章 · 已设置时间 '+setCount+' 章 · 待设置 '+(chapters.length-setCount)+' 章';
+        var setCount=chapters.filter(function(ch){return rwSplitChapterStoryTimes(ch.storyTime||'').length>0;}).length;
+        var segmentCount=chapters.reduce(function(total,ch){return total+rwSplitChapterStoryTimes(ch.storyTime||'').length;},0);
+        stats.textContent='共 '+chapters.length+' 章 · 已设置 '+setCount+' 章 / '+segmentCount+' 个时间段 · 待设置 '+(chapters.length-setCount)+' 章';
         if(!visible.length) list.createEl('p',{text:chapters.length?'没有符合筛选条件的章节。':'尚未建立章节索引，请先填写正文文件夹并扫描。',cls:'my-char-view-empty'});
         visible.forEach(function(ch,index){
             var row=list.createEl('div',{cls:'rw-chapter-row'});
             var open=row.createEl('button',{text:ch.name,cls:'rw-text-link'});
             open.title=ch.path; open.addEventListener('click',function(){openChapter(ch);});
-            var time=row.createEl('input',{type:'text',value:ch.storyTime||'',placeholder:'如：公元前177年3月-9月 / 景和元年三月'});
-            time.setAttribute('aria-label',ch.name+' 的故事时间');
+            var time=row.createEl('input',{type:'text',value:ch.storyTime||'',placeholder:'单段：前177年三月-九月；多段用；分隔'});
+            time.setAttribute('aria-label',ch.name+' 的故事时间段，可用分号分隔多个时间段');
+            time.title='一个章节可填写多个故事时间段，用中文分号；或英文分号;分隔。若有多个时间段，章节不会被强行绑定到某一个唯一时间；具体事件请在事件编辑中填写故事内时间。';
             time.addEventListener('change',async function(){ch.storyTime=time.value.trim();rwApplyChapterStoryTimes(self);await self.plugin.saveSettings();await self.loadAllData({silent:true});self.render();});
-            var state=row.createEl('span',{text:ch.storyTime?'已设置':'待设置',cls:ch.storyTime?'rw-chapter-time-set':'rw-chapter-time-unset'});
+            var segments=rwSplitChapterStoryTimes(ch.storyTime||'');
+            var state=row.createEl('span',{text:segments.length?(segments.length+' 段时间'):'待设置',cls:segments.length?'rw-chapter-time-set':'rw-chapter-time-unset'});
             var path=row.createEl('span',{text:ch.path,cls:'my-char-muted'});
             path.style.flex='1';
             var openBtn=row.createEl('button',{text:'打开正文',cls:'my-char-btn-ghost my-char-btn-xs'});
             openBtn.addEventListener('click',function(){openChapter(ch);});
         });
-        var timed=chapters.filter(function(ch){return !!String(ch.storyTime||'').trim();}).sort(function(a,b){
-            var pa=parseHistoricalDate(rwGetChapterDefaultStoryTime(a.storyTime)),pb=parseHistoricalDate(rwGetChapterDefaultStoryTime(b.storyTime));
-            if(pa&&pb&&pa.sortValue!=null&&pb.sortValue!=null&&pa.sortValue!==pb.sortValue)return pa.sortValue-pb.sortValue;
-            if(pa&&pa.sortValue!=null&&(!pb||pb.sortValue==null))return -1;
-            if(pb&&pb.sortValue!=null&&(!pa||pa.sortValue==null))return 1;
-            return chapterSort(a,b);
-        });
-        if(!timed.length) previewBody.createEl('p',{text:'设置章节时间后，这里会按故事时间展示章节顺序。',cls:'my-char-muted'});
-        timed.forEach(function(ch){var item=previewBody.createEl('div',{cls:'rw-chapter-time-preview-item'});item.createEl('time',{text:ch.storyTime});var btn=item.createEl('button',{text:ch.name,cls:'rw-text-link'});btn.addEventListener('click',function(){openChapter(ch);});});
+        var timed=[];
+        chapters.forEach(function(ch){rwSplitChapterStoryTimes(ch.storyTime||'').forEach(function(segment,index){var parsed=parseHistoricalDate(rwGetChapterDefaultStoryTime(segment));timed.push({chapter:ch,segment:segment,index:index,sort:parsed&&parsed.sortValue!=null?parsed.sortValue:null});});});
+        timed.sort(function(a,b){if(a.sort!=null&&b.sort!=null&&a.sort!==b.sort)return a.sort-b.sort;if(a.sort!=null&&b.sort==null)return -1;if(b.sort!=null&&a.sort==null)return 1;return chapterSort(a.chapter,b.chapter)||a.index-b.index;});
+        if(!timed.length) previewBody.createEl('p',{text:'设置章节时间段后，这里会按各个时间段分别展示；同一章节可以出现多次。',cls:'my-char-view-empty'});
+        timed.forEach(function(entry){var item=previewBody.createEl('div',{cls:'rw-chapter-time-preview-item'});item.createEl('time',{text:entry.segment});var btn=item.createEl('button',{text:entry.chapter.name+(rwSplitChapterStoryTimes(entry.chapter.storyTime).length>1?' · 第'+(entry.index+1)+'段':''),cls:'rw-text-link'});btn.addEventListener('click',function(){openChapter(entry.chapter);});});
     }
     scanBtn.addEventListener('click',async function(){
         library.folder=folderInput.value.trim().replace(/^\/+|\/+$/g,'');
@@ -9228,7 +10566,7 @@ MyView.prototype.renderTimeline = function (container) {
     var renameWorldlineBtn=worldlineBar.createEl('button',{text:'重命名',cls:'my-char-btn-ghost my-char-btn-sm'});
     renameWorldlineBtn.addEventListener('click',async function(){var w=rwGetActiveWorldline(self.plugin);if(!w)return;var n=(prompt('修改世界线名称：',w.name)||'').trim();if(n){w.name=n;await self.plugin.saveSettings();self.renderTimeline(container);}});
     var deleteWorldlineBtn=worldlineBar.createEl('button',{text:'删除世界线',cls:'my-char-btn-ghost my-char-btn-sm'});
-    deleteWorldlineBtn.addEventListener('click',async function(){var w=rwGetActiveWorldline(self.plugin);if(!w)return;if(worldlines.length<=1 || w.isDefault){new obsidian.Notice(w.isDefault?'原始世界线是兼容基线，不能删除':'至少保留一条世界线');return;}if(!confirm('确定删除世界线配置「'+w.name+'」？对应 Markdown 与关系数据文件不会自动删除。建议先备份。'))return;var idx=worldlines.findIndex(function(x){return x.id===w.id;});worldlines.splice(idx,1);var next=worldlines[0];self.plugin.settings.activeTimelineWorldlineId=next.id;self.plugin.settings.currentTimePoint=next.currentTimePoint||'';await self.plugin.saveSettings();await self.loadAllData({silent:true});self.render();});
+    deleteWorldlineBtn.addEventListener('click', async function(){ var w = rwGetActiveWorldline(self.plugin); if (w) await rwDeleteWorldline(self, w.id); });
     if ((self._timelineSubMode || 'events') === 'chapters') { renderChapterLibraryManager(self, container); return; }
 
     // ===== 年份搜索框 =====
@@ -9886,10 +11224,10 @@ function renderCharacterHistoryOverview(view, container) {
             getCharacterOrganizationsAtProgress(self,name,progress).records.forEach(function(m){var state=classifyOrgMembershipAtProgress(m,progress,self.orgMemberships);var label={current:'当前有效',history:'历史',future:'待生效',unknown:'待确认'}[state]||state;entries.push({time:m.startTime,type:'阵营 / 组织变动',title:m.organization+(m.position?' · '+m.position:''),detail:m.type+' · '+label+(m.endTime?' · 至 '+m.endTime:'')+(m.reason?' · '+m.reason:''),event:m.linkedEvent});});
             (self.relations||[]).filter(function(r){return r.charA===name||r.charB===name;}).forEach(function(r){var other=r.charA===name?r.charB:r.charA;entries.push({time:r.startTime,type:'人物关系建立',title:(r.type||'关系')+' · '+other,detail:(r.desc||'')+(r.endTime?' · 结束：'+r.endTime:''),event:''});});
             (self.plugin._intimacyHistory||[]).filter(function(h){return h.charA===name||h.charB===name;}).forEach(function(h){var other=h.charA===name?h.charB:h.charA;var pair=h.recordKind==='relation_type'||h.recordKind==='relation_pair';entries.push({time:h.eventYear||h.recordDate||h.timestamp,type:pair?'关系变化':'关系变化',title:other+' · '+(h.changeReason||h.recordKind||'关系记录'),detail:(h.oldValue!==undefined||h.newValue!==undefined?String(h.oldValue==null?'—':h.oldValue)+' → '+String(h.newValue==null?'—':h.newValue):'')+(h.note?' · '+h.note:''),event:h.eventId||''});});
-            library.chapters.forEach(function(ch){if((ch.mentions||[]).indexOf(name)>=0)entries.push({time:ch.storyTime||'',type:'章节出场',title:'正文出场 · '+ch.name,detail:'按人物姓名文本匹配的正文提及索引',chapter:ch});});
-            (self.timeline||[]).forEach(function(e){var raw=[e.event,e.title,e.content,e.description,e.people,e.characters,e.character].join(' ');if(raw.indexOf(name)<0)return;var linked=rwGetEventLinkedChapters(self.plugin.settings,e);var ch=linked[0]||resolveChapterForEvent(e);var rawYear=String(e.year||'');var linkedTimes=linked.map(function(c){return String(c.storyTime||'').trim();});var commonTime=linkedTimes.length&&linkedTimes.every(function(t){return !!t&&t===linkedTimes[0];})?linkedTimes[0]:'';var storyTime=(e.storyYear||'')||commonTime||(!linked.length?((parseChapterHeading(rawYear)&&ch&&ch.storyTime)?ch.storyTime:rawYear)||(ch&&ch.storyTime)||'': '')||e.date||e.time||'';var chapterNames=linked.map(function(c){return c.name;});entries.push({time:storyTime,type:'重要事件',title:e.event||e.title||e.name||'时间线事件',detail:[e.tag,e.plotLine,e.plotBeat].filter(Boolean).join(' · ')+(chapterNames.length?' · 关联章节：'+chapterNames.join('、'):''),event:e.eventId||'',chapter:ch,chapters:linked});});
+            library.chapters.forEach(function(ch){if((ch.mentions||[]).indexOf(name)>=0)entries.push({time:rwGetChapterDefaultStoryTime(ch.storyTime||''),type:'章节出场',title:'正文出场 · '+ch.name,detail:rwSplitChapterStoryTimes(ch.storyTime||'').length>1?'按人物姓名文本匹配；该章节有多个故事时间段，需由具体事件指定时间':'按人物姓名文本匹配的正文提及索引',chapter:ch});});
+            (self.timeline||[]).forEach(function(e){var raw=[e.event,e.title,e.content,e.description,e.people,e.characters,e.character].join(' ');if(raw.indexOf(name)<0)return;var linked=rwGetEventLinkedChapters(self.plugin.settings,e);var ch=linked[0]||resolveChapterForEvent(e);var rawYear=String(e.year||'');var linkedTimes=linked.map(function(c){return rwGetChapterDefaultStoryTime(c.storyTime||'');});var commonTime=linkedTimes.length&&linkedTimes.every(function(t){return !!t&&t===linkedTimes[0];})?linkedTimes[0]:'';var storyTime=(e.storyYear||'')||commonTime||(!linked.length?((parseChapterHeading(rawYear)&&ch&&rwGetChapterDefaultStoryTime(ch.storyTime))?rwGetChapterDefaultStoryTime(ch.storyTime):rawYear)||(ch&&rwGetChapterDefaultStoryTime(ch.storyTime))||'': '')||e.date||e.time||'';var chapterNames=linked.map(function(c){return c.name;});entries.push({time:storyTime,type:'重要事件',title:e.event||e.title||e.name||'时间线事件',detail:[e.tag,e.plotLine,e.plotBeat].filter(Boolean).join(' · ')+(chapterNames.length?' · 关联章节：'+chapterNames.join('、'):''),event:e.eventId||'',chapter:ch,chapters:linked});});
             // 事件多章节关联全部保留；只有单一或同时间章节才回填统一故事时间。
-            entries.forEach(function(en){if(!en.chapter){var match=(self.timeline||[]).filter(function(e){return en.event&&(e.eventId===en.event);})[0];if(match){en.chapters=rwGetEventLinkedChapters(self.plugin.settings,match);en.chapter=en.chapters[0]||resolveChapterForEvent(match);}}if(en.chapter&&!en.time&&(!en.chapters||en.chapters.length<=1))en.time=en.chapter.storyTime||'';en.age=rwAgeAtTime(life.birth,en.time);});
+            entries.forEach(function(en){if(!en.chapter){var match=(self.timeline||[]).filter(function(e){return en.event&&(e.eventId===en.event);})[0];if(match){en.chapters=rwGetEventLinkedChapters(self.plugin.settings,match);en.chapter=en.chapters[0]||resolveChapterForEvent(match);}}if(en.chapter&&!en.time&&(!en.chapters||en.chapters.length<=1))en.time=rwGetChapterDefaultStoryTime(en.chapter.storyTime||'');en.age=rwAgeAtTime(life.birth,en.time);});
             entries.sort(function(a,b){var av=parseHistoricalDate(a.time),bv=parseHistoricalDate(b.time);if(av&&bv&&av.sortValue!=null&&bv.sortValue!=null&&av.sortValue!==bv.sortValue)return av.sortValue-bv.sortValue;if(av&&av.sortValue!=null&&(!bv||bv.sortValue==null))return -1;if(bv&&bv.sortValue!=null&&(!av||av.sortValue==null))return 1;return String(a.time||'').localeCompare(String(b.time||''),'zh-CN');});
             entries=entries.filter(function(e){return (type==='全部类型'||e.type===type)&&(!timeQuery||String(e.time||'').toLowerCase().indexOf(timeQuery)>=0)&&(!query||(name.toLowerCase().indexOf(query)>=0||String(e.title+' '+e.detail+' '+(e.chapter&&e.chapter.name||'')).toLowerCase().indexOf(query)>=0));});
             if(!entries.length && (type!=='全部类型'||timeQuery||query))return;
@@ -9948,21 +11286,28 @@ function renderCharacterLifeCinema(view, container) {
         shown.forEach(function(char) {
             var life = getCharLifecycle(self, char);
             var name = String(char.name || '未命名人物');
+            var asOfText = String(self.plugin.settings.currentTimePoint || '').trim();
+            var asOf = asOfText ? parseHistoricalDate(asOfText) : null;
+            function visibleAtCurrentTime(value) {
+                if (!value || !asOf || asOf.sortValue == null) return !!value;
+                var parsed = parseHistoricalDate(value);
+                return !parsed || parsed.sortValue == null || parsed.sortValue <= asOf.sortValue;
+            }
             var events = [];
-            if (life.birth) events.push({ time: life.birth, title: '出生' });
-            if (life.firstAppear) events.push({ time: life.firstAppear, title: '首次出场' + (life.firstAppearChapterLabel ? ' · ' + life.firstAppearChapterLabel : '') });
+            if (life.birth && visibleAtCurrentTime(life.birth)) events.push({ time: life.birth, title: '出生' });
+            if (life.firstAppear && visibleAtCurrentTime(life.firstAppear)) events.push({ time: life.firstAppear, title: '首次出场' + (life.firstAppearChapterLabel ? ' · ' + life.firstAppearChapterLabel : '') });
             (self.timeline || []).forEach(function(e) {
                 var raw = [e.event,e.title,e.content,e.description,e.people,e.characters,e.character].join(' ');
                 if (raw.indexOf(name) < 0) return;
                 var linked = rwGetEventLinkedChapters(self.plugin.settings, e);
                 var chapter = linked[0] || rwResolveChapterForEvent(self, e);
-                var linkedTimes = linked.map(function(c) { return String(c.storyTime || '').trim(); });
+                var linkedTimes = linked.map(function(c) { return rwGetChapterDefaultStoryTime(c.storyTime || ''); });
                 var sameTime = linkedTimes.length && linkedTimes.every(function(t) { return !!t && t === linkedTimes[0]; }) ? linkedTimes[0] : '';
-                var time = e.storyYear || sameTime || (!linked.length ? e.year || (chapter && chapter.storyTime) || '' : '') || e.date || e.time || '';
+                var time = e.storyYear || sameTime || (!linked.length ? e.year || (chapter && rwGetChapterDefaultStoryTime(chapter.storyTime || '')) || '' : '') || e.date || e.time || '';
                 if (!time && linked.length === 1) time = linked[0].storyTime || '';
-                if (time) events.push({ time: time, title: e.event || e.title || e.name || '重要事件' });
+                if (time && visibleAtCurrentTime(time)) events.push({ time: time, title: e.event || e.title || e.name || '重要事件' });
             });
-            if (life.death) events.push({ time: life.death, title: '死亡' });
+            if (life.death && visibleAtCurrentTime(life.death)) events.push({ time: life.death, title: '死亡' });
             // 公元前使用负数纪年：前300年(-300)早于前200年(-200)，
             // 再早于公元1年(+1)。无法识别的年号不参与字符串倒序，保持原始采集顺序。
             // 同一时间点也稳定保留人物生平/时间线中的原始顺序。
@@ -9979,7 +11324,9 @@ function renderCharacterLifeCinema(view, container) {
             var card = stage.createEl('section', { cls: 'rw-life-cinema-person' });
             var head = card.createEl('header', { cls: 'rw-life-cinema-person-head' });
             head.createEl('h3', { text: name });
-            var span = life.birth && life.death && life.lifespan !== null && life.lifespan !== undefined ? life.birth + ' — ' + life.death + ' · 享年约 ' + life.lifespan + ' 岁' : (life.birth ? '生于 ' + life.birth : '');
+            var birthVisible = life.birth && visibleAtCurrentTime(life.birth);
+            var deathVisible = life.death && visibleAtCurrentTime(life.death);
+            var span = birthVisible && deathVisible && life.lifespan !== null && life.lifespan !== undefined ? life.birth + ' — ' + life.death + ' · 享年约 ' + life.lifespan + ' 岁' : (birthVisible ? '生于 ' + life.birth : '');
             if (span) head.createEl('span', { text: span });
             var timeline = card.createEl('div', { cls: 'rw-life-cinema-events' });
             var seen = {};
@@ -10000,7 +11347,7 @@ function renderCharacterLifeCinema(view, container) {
     render();
 }
 
-    // ========== 生命周期视图 ==========
+    // 人物生命周期视图：按当前工作世界线读取动态字段，并按当前时间点过滤未来节点。
     MyView.prototype.renderLifecycle = function (container) {
         var self = this;
         container.empty();
@@ -10010,7 +11357,9 @@ function renderCharacterLifeCinema(view, container) {
         container.createEl('p', {
             text: '支持公元前/公元时间排序。出生、首次出场、死亡字段可在设置中配置。时间格式示例：公元前280年、前100年、280年、公元100年',
             cls: 'my-char-muted'
-        }).style.margin = '0 0 12px';
+        }).style.margin = '0 0 8px';
+        var activeLifeWorldline = rwGetActiveWorldline(this.plugin);
+        container.createEl('p', { text: '当前工作世界线：' + (activeLifeWorldline ? activeLifeWorldline.name : '原始世界线') + ' · 当前时间点：' + (this.plugin.settings.currentTimePoint || '未限定（显示完整时间范围）') + '。生命时间轴与完整历史履历展示人物档案中的完整时间；纯享观看遵守当前时间点，不提前展示未来节点。', cls: 'my-char-muted' }).style.margin = '0 0 12px';
 
         var modeBar = container.createEl('div', { cls: 'my-char-lifecycle-toolbar' });
         var lifeMode = this._lifecycleMode || 'life';
@@ -10073,6 +11422,8 @@ function renderCharacterLifeCinema(view, container) {
         for (var ci = 0; ci < this.chars.length; ci++) {
             var char = this.chars[ci];
             var lc = getCharLifecycle(this, char);
+            // 生命时间轴展示人物档案中的完整生命周期，不因当前故事时间点而隐藏未来的出生/出场/死亡资料。
+            // 当前时间点过滤仅用于「纯享观看」；完整历史履历也始终保留完整记录。
             var points = [];
             if (lc.birthParsed && lc.birthParsed.sortValue !== null) points.push(lc.birthParsed.sortValue);
             if (lc.firstAppearParsed && lc.firstAppearParsed.sortValue !== null) points.push(lc.firstAppearParsed.sortValue);
@@ -10443,8 +11794,14 @@ function renderCharacterLifeCinema(view, container) {
         exportDiv.createEl('h4', { text: '导出数据', cls: 'my-char-subsection-title' }); exportDiv.lastChild.style.margin = '0 0 10px';
 
         var exportData = {
-            version: '1.2.0',
+            version: '1.3.0',
             exportTime: new Date().toISOString(),
+            activeWorldline: (function(w) { return w ? { id: w.id, name: w.name, type: w.type, currentTimePoint: String(self.plugin.settings.currentTimePoint || ''), parentWorldlineId: w.parentWorldlineId || '', branchPoint: w.branchPoint || '' } : null; })(rwGetActiveWorldline(this.plugin)),
+            currentTimePoint: String(this.plugin.settings.currentTimePoint || ''),
+            intimacyHistory: deepCloneJson(this.plugin._intimacyHistory || []),
+            chapterLibrary: deepCloneJson(this.plugin.settings.chapterLibrary || { folder: '', chapters: [] }),
+            timelineEventSetOrder: (this.plugin.settings.timelineEventSetOrder || []).slice(),
+            timelineEventSetSortMode: this.plugin.settings.timelineEventSetSortMode || 'time',
             factions: this.factions,
             relations: this.relations,
             chars: this.chars.map(function(c) {
@@ -10454,14 +11811,27 @@ function renderCharacterLifeCinema(view, container) {
             orgRelations: this.orgRelations || [],
             orgMemberships: this.orgMemberships || [],
             orgPositionDefs: this.orgPositionDefs || [],
-            orgTerritoryChanges: normalizeOrgTerritoryChanges(this.orgTerritoryChanges || [])
+            orgTerritoryChanges: normalizeOrgTerritoryChanges(this.orgTerritoryChanges || []),
+            worldlineArchive: null
         };
 
         var exportJSONBtn = exportDiv.createEl('button', { text: '📄 导出为 JSON' });
         exportJSONBtn.className = 'my-char-view-btn'; exportJSONBtn.style.marginRight = '10px';
-        exportJSONBtn.addEventListener('click', function() {
-            exportToJSON(exportData, 'char-relation-data.json');
-            new obsidian.Notice('导出成功');
+        exportJSONBtn.addEventListener('click', async function() {
+            try {
+                var charPath = getCharFullPathForExt(self.plugin), relationPath = getRelationMetaPath(self.plugin);
+                var charFile = self.app.vault.getAbstractFileByPath(charPath), relationFile = self.app.vault.getAbstractFileByPath(relationPath);
+                var charContent = charFile ? await self.app.vault.read(charFile) : (self._lastCharMd || '');
+                var relationContent = relationFile ? await self.app.vault.read(relationFile) : '';
+                var timelineContents = {};
+                for (var wi = 0; wi < rwGetWorldlines(self.plugin).length; wi++) {
+                    var world = rwGetWorldlines(self.plugin)[wi], timelineFile = self.app.vault.getAbstractFileByPath(world.timelinePath);
+                    if (timelineFile) timelineContents[world.id] = await self.app.vault.read(timelineFile);
+                }
+                exportData.worldlineArchive = rwBuildWorldlineArchive(self.plugin, charContent, relationContent, timelineContents);
+                exportToJSON(exportData, 'relation-weaver-multi-worldline-backup.json');
+                new obsidian.Notice('多世界线完整备份导出成功：' + Object.keys(timelineContents).length + ' 条时间线');
+            } catch (e) { showUserError('多世界线备份导出失败', e); }
         });
 
         var exportCSVBtn = exportDiv.createEl('button', { text: '📊 导出关系为 CSV' });
@@ -10851,7 +12221,8 @@ function renderCharacterLifeCinema(view, container) {
         this.render();
     };
 
-    // ========== 人物详情弹窗 ==========
+    
+// ========== 人物详情弹窗 ==========
     MyView.prototype.showCharDetail = function (charData) {
         var self = this;
         var relatedEvents = [];
@@ -11129,30 +12500,45 @@ var PrintPreviewModal = /** @class */ (function (_super) {
         var html = this.customHtml || this.view.buildPrintPreviewHtml();
         var iframe = document.createElement('iframe');
         iframe.setAttribute('aria-hidden', 'true');
-        iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:none;opacity:0;pointer-events:none;';
+        iframe.setAttribute('title', 'Relation Weaver 打印文档');
+        // 0×0 的隐藏 iframe 在部分 Electron/Chromium 版本中不会进入打印流程；
+        // 保留真实布局尺寸，等文档 load 后再调用 print。
+        iframe.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;border:0;opacity:0.01;pointer-events:none;z-index:-1;';
+        var printed = false, cleaned = false;
+        function cleanup() {
+            if (cleaned) return; cleaned = true;
+            window.setTimeout(function() { if (iframe.parentNode) iframe.parentNode.removeChild(iframe); }, 300);
+        }
         document.body.appendChild(iframe);
         var iwin = iframe.contentWindow;
         var idoc = iframe.contentDocument || (iwin && iwin.document);
         if (!idoc || !iwin) {
-            document.body.removeChild(iframe);
+            cleanup();
             new obsidian.Notice('打印初始化失败，请重试');
             return;
         }
-        idoc.open();
-        idoc.write(html);
-        idoc.close();
-        window.setTimeout(function() {
+        function printWhenReady() {
+            if (printed || cleaned) return;
+            printed = true;
             try {
                 iwin.focus();
+                // 文档 load 后再打印，避免在 iframe 尚未完成布局时触发空白页。
                 iwin.print();
             } catch (e) {
                 console.error(e);
+                cleanup();
                 new obsidian.Notice('打印失败：' + e.message);
             }
-            window.setTimeout(function() {
-                if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
-            }, 1000);
-        }, 300);
+        }
+        if (iwin.addEventListener) iwin.addEventListener('afterprint', cleanup, { once: true });
+        iframe.onload = function() { window.setTimeout(printWhenReady, 250); };
+        idoc.open();
+        idoc.write(html);
+        idoc.close();
+        // 兼容部分 Electron 版本不触发 iframe.onload 的情况。
+        window.setTimeout(printWhenReady, 1200);
+        // 兜底清理只在长时间未触发 afterprint 时执行，不抢先销毁打印文档。
+        window.setTimeout(cleanup, 60000);
     };
     PrintPreviewModal.prototype.onClose = function () {
         this.contentEl.empty();
@@ -11268,6 +12654,98 @@ var SnapshotManagerModal = /** @class */ (function (_super) {
 }(obsidian.Modal));
 
 // ========== 导入预览与智能合并 ==========
+function rwBuildWorldlineArchive(plugin, characterContent, relationContent, timelineContents) {
+    return {
+        version: 1,
+        worldlines: deepCloneJson(rwGetWorldlines(plugin)),
+        activeWorldlineId: plugin.settings.activeTimelineWorldlineId,
+        currentTimePoint: String(plugin.settings.currentTimePoint || ''),
+        characterContent: String(characterContent || ''),
+        relationContent: String(relationContent || ''),
+        timelines: timelineContents || {},
+        worldlineCharacterOverrides: deepCloneJson(plugin.settings.worldlineCharacterOverrides || {}),
+        worldlineChapterTimes: deepCloneJson(plugin.settings.worldlineChapterTimes || {}),
+        worldlineEventSetOrders: deepCloneJson(plugin.settings.worldlineEventSetOrders || {}),
+        timelineEventRegistry: deepCloneJson(plugin.settings.timelineEventRegistry || {}),
+        timelineEventSetOrder: (plugin.settings.timelineEventSetOrder || []).slice(),
+        timelineEventSetSortMode: plugin.settings.timelineEventSetSortMode || 'time'
+    };
+}
+function rwValidateWorldlineArchive(archive) {
+    if (!archive || archive.version !== 1 || !Array.isArray(archive.worldlines) || !archive.worldlines.length) return '多世界线备份结构不完整';
+    if (typeof archive.characterContent !== 'string' || typeof archive.relationContent !== 'string' || !archive.timelines || typeof archive.timelines !== 'object') return '多世界线备份缺少人物、关系或时间线文件内容';
+    var ids = Object.create(null);
+    for (var i = 0; i < archive.worldlines.length; i++) {
+        var w = archive.worldlines[i];
+        if (!w || !w.id || ids[w.id]) return '世界线列表存在空 ID 或重复记录';
+        ids[w.id] = true;
+        if (typeof archive.timelines[w.id] !== 'string') return '世界线「' + (w.name || '未命名') + '」缺少对应时间线内容';
+    }
+    if (!ids[archive.activeWorldlineId]) return '备份中的当前世界线不存在';
+    return '';
+}
+async function rwEnsureVaultFolder(adapter, folder) {
+    if (!folder || await adapter.exists(folder)) return;
+    var parent = folder.substring(0, folder.lastIndexOf('/'));
+    if (parent && parent !== folder) await rwEnsureVaultFolder(adapter, parent);
+    if (!await adapter.exists(folder)) await adapter.mkdir(folder);
+}
+async function rwRestoreWorldlineArchive(view, archive) {
+    var error = rwValidateWorldlineArchive(archive);
+    if (error) throw new Error(error);
+    var plugin = view.plugin, app = view.app, vault = app.vault, adapter = vault.adapter;
+    var baseTimelinePath = getTimelineFullPathForExt(plugin), timelineFolder = baseTimelinePath.indexOf('/') >= 0 ? baseTimelinePath.substring(0, baseTimelinePath.lastIndexOf('/')) : '';
+    var baseCharPath = getCharFullPathForExt(plugin), baseRelationPath = getRelationMetaPath(plugin);
+    var nextWorldlines = deepCloneJson(archive.worldlines), createdPaths = [], newRegistry = {};
+    try {
+        for (var i = 0; i < nextWorldlines.length; i++) {
+            var w = nextWorldlines[i], sourceText = archive.timelines[w.id], oldTimelinePath = String(w.timelinePath || '');
+            var originalName = oldTimelinePath ? oldTimelinePath.split('/').pop().replace(/\.md$/i, '') : String(w.name || '世界线');
+            originalName = originalName.replace(/[\\/:*?"<>|]/g, '-').replace(/[. ]+$/g, '').trim() || '世界线';
+            var filename = originalName + '.md', target = normalizeVaultPath(timelineFolder ? timelineFolder + '/' + filename : filename), suffix = 2;
+            while (await adapter.exists(target) || vault.getAbstractFileByPath(target)) {
+                filename = originalName + '（恢复' + suffix++ + '）.md';
+                target = normalizeVaultPath(timelineFolder ? timelineFolder + '/' + filename : filename);
+            }
+            await rwEnsureVaultFolder(adapter, timelineFolder);
+            sourceText = rwRemoveHiddenStore(sourceText, RW_WORLDLINE_META_KEY);
+            var restoredTimelineFile = await vault.create(target, sourceText);
+            createdPaths.push(target); w.timelinePath = target;
+            w.timelineFileCtime = restoredTimelineFile && restoredTimelineFile.stat ? Number(restoredTimelineFile.stat.ctime || 0) : 0;
+            var oldRegistryEntries = archive.timelineEventRegistry && archive.timelineEventRegistry[oldTimelinePath];
+            if (Array.isArray(oldRegistryEntries)) newRegistry[target] = deepCloneJson(oldRegistryEntries);
+        }
+    } catch (createError) {
+        for (var ci = createdPaths.length - 1; ci >= 0; ci--) { try { if (await adapter.exists(createdPaths[ci])) await adapter.remove(createdPaths[ci]); } catch (_) {} }
+        throw createError;
+    }
+    try {
+        var charFolder = baseCharPath.indexOf('/') >= 0 ? baseCharPath.substring(0, baseCharPath.lastIndexOf('/')) : '';
+        var relationFolder = baseRelationPath.indexOf('/') >= 0 ? baseRelationPath.substring(0, baseRelationPath.lastIndexOf('/')) : '';
+        await rwEnsureVaultFolder(adapter, charFolder); await rwEnsureVaultFolder(adapter, relationFolder);
+        var charFile = vault.getAbstractFileByPath(baseCharPath);
+        if (charFile) await vault.modify(charFile, archive.characterContent); else await vault.create(baseCharPath, archive.characterContent);
+        var relationFile = vault.getAbstractFileByPath(baseRelationPath);
+        if (relationFile) await vault.modify(relationFile, archive.relationContent); else await vault.create(baseRelationPath, archive.relationContent);
+        plugin.settings.timelineWorldlines = nextWorldlines;
+        plugin.settings.activeTimelineWorldlineId = archive.activeWorldlineId;
+        plugin.settings.currentTimePoint = String(archive.currentTimePoint || (nextWorldlines.find(function(w){return w.id===archive.activeWorldlineId;}) || {}).currentTimePoint || '');
+        plugin.settings.worldlineCharacterOverrides = deepCloneJson(archive.worldlineCharacterOverrides || {});
+        plugin.settings.worldlineChapterTimes = deepCloneJson(archive.worldlineChapterTimes || {});
+        plugin.settings.worldlineEventSetOrders = deepCloneJson(archive.worldlineEventSetOrders || {});
+        plugin.settings.timelineEventRegistry = newRegistry;
+        plugin.settings.timelineEventSetOrder = (archive.timelineEventSetOrder || []).slice();
+        plugin.settings.timelineEventSetSortMode = archive.timelineEventSetSortMode || 'time';
+        await plugin.saveSettings();
+        await view.loadAllData({ silent: true }); view.render();
+        return { worldlineCount: nextWorldlines.length, timelineCount: createdPaths.length };
+    } catch (e) {
+        // Timeline files are created before the shared files/settings; remove only those new files on failure.
+        for (var ri = createdPaths.length - 1; ri >= 0; ri--) { try { if (await adapter.exists(createdPaths[ri])) await adapter.remove(createdPaths[ri]); } catch (_) {} }
+        throw e;
+    }
+}
+
 var ImportPreviewModal = /** @class */ (function (_super) {
     __extends(ImportPreviewModal, _super);
     function ImportPreviewModal(app, view, data) {
@@ -11280,14 +12758,14 @@ var ImportPreviewModal = /** @class */ (function (_super) {
         var self = this, el = this.contentEl;
         el.empty(); el.className = 'my-char-modal-body my-char-import-preview';
         el.createEl('h3', { text: '📥 导入预览与智能合并', cls: 'my-char-section-title' });
-        el.createEl('p', { text: '先比较导入文件与当前 Vault 数据。默认只新增缺失项目、跳过重复项，并保留冲突中的现有内容。', cls: 'my-char-muted' });
+        el.createEl('p', { text: '先比较导入文件与当前 Vault 数据。人物、事件、阵营、关系及亲密度历史将并入当前工作世界线；默认只新增缺失项目、跳过重复项，并保留冲突中的现有内容。', cls: 'my-char-muted' });
         var overwriteRow = el.createEl('label'); overwriteRow.style.cssText = 'display:flex;gap:8px;align-items:flex-start;margin:10px 0;padding:10px;border:1px solid var(--background-modifier-border);border-radius:8px;';
         var overwrite = overwriteRow.createEl('input', { type: 'checkbox' }); overwrite.checked = !!this.overwriteConflicts;
         overwriteRow.createEl('span', { text: '阵营/关系遇到同名或同一关系键但内容不同时，以导入文件覆盖现有项目（人物档案冲突仍保留现有内容）' });
         overwrite.addEventListener('change', function () { self.overwriteConflicts = overwrite.checked; self.render(); });
         var plan = buildSmartImportPlan(this.view, this.data, this.overwriteConflicts); this.plan = plan;
         var grid = el.createEl('div'); grid.style.cssText = 'display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0;';
-        [['新增/更新阵营',plan.counts.factions],['新增/更新关系',plan.counts.relations],['新增人物',plan.counts.chars],['新增事件',plan.counts.timeline],['组织关系',plan.counts.orgRelations||0],['领地变迁',plan.counts.orgTerritoryChanges||0],['冲突待处理',plan.counts.conflicts],['重复跳过',plan.counts.duplicates]].forEach(function(pair) {
+        [['新增/更新阵营',plan.counts.factions],['新增/更新关系',plan.counts.relations],['新增人物',plan.counts.chars],['新增事件',plan.counts.timeline],['亲密度历史',plan.counts.intimacyHistory||0],['组织关系',plan.counts.orgRelations||0],['领地变迁',plan.counts.orgTerritoryChanges||0],['冲突待处理',plan.counts.conflicts],['重复跳过',plan.counts.duplicates]].forEach(function(pair) {
             var card = grid.createEl('div'); card.style.cssText = 'padding:10px;border:1px solid var(--background-modifier-border);border-radius:8px;background:var(--background-secondary);';
             card.createEl('div', { text: String(pair[1]), cls: 'my-char-section-title' }).style.fontSize = '20px';
             card.createEl('div', { text: pair[0], cls: 'my-char-muted' });
@@ -11304,6 +12782,7 @@ var ImportPreviewModal = /** @class */ (function (_super) {
         var previewItems = [];
         plan.chars.forEach(function(x) { previewItems.push('人物 · ' + x.name); });
         plan.timeline.forEach(function(x) { previewItems.push('事件 · ' + x.year + ' · ' + x.event); });
+        plan.intimacyHistory.forEach(function(x) { previewItems.push('亲密度历史 · ' + (x.charA||'') + ' ↔ ' + (x.charB||'') + ' · ' + (x.recordDate||x.timestamp||'未注明时间')); });
         plan.orgRelations.forEach(function(x) { previewItems.push('组织关系 · '+x.from+' ↔ '+x.to+' · '+(x.type||'联盟')); });
         plan.orgMemberships.forEach(function(x) { previewItems.push('组织任职 · '+x.character+' · '+x.organization+' · '+(x.type||'加入')); });
         plan.orgPositionDefs.forEach(function(x) { previewItems.push('组织职位 · '+x.organization+' · '+x.name); });
@@ -11315,8 +12794,33 @@ var ImportPreviewModal = /** @class */ (function (_super) {
         if (previewItems.length > 100) incoming.createEl('p', { text: '另有 ' + (previewItems.length - 100) + ' 项未展开。', cls: 'my-char-muted' });
         var actions = el.createEl('div'); actions.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:14px;flex-wrap:wrap;';
         actions.createEl('button', { text: '取消', cls: 'my-char-btn-ghost' }).addEventListener('click', function() { self.close(); });
+        if (this.data && this.data.worldlineArchive) {
+            var archiveError = rwValidateWorldlineArchive(this.data.worldlineArchive);
+            var restoreArchiveBtn = actions.createEl('button', { text: '🌐 恢复完整多世界线备份', cls: 'my-char-btn-warning' });
+            restoreArchiveBtn.disabled = !!archiveError;
+            restoreArchiveBtn.title = archiveError || '恢复全部世界线、共享人物/关系 MD 和每条时间线';
+            restoreArchiveBtn.addEventListener('click', async function() {
+                if (!confirm('完整恢复将替换当前世界线配置及人物/关系共享 MD，并创建新的时间线文件。现有时间线文件不会被删除。执行前会创建快照。确定继续？')) return;
+                restoreArchiveBtn.disabled = true; restoreArchiveBtn.textContent = '正在恢复多世界线…';
+                var backup = null;
+                try {
+                    backup = await createVaultSnapshot(self.app, self.view.plugin);
+                    var result = await rwRestoreWorldlineArchive(self.view, self.data.worldlineArchive);
+                    new obsidian.Notice('完整多世界线备份恢复成功：' + result.worldlineCount + ' 条世界线、' + result.timelineCount + ' 份时间线。导入前快照：' + backup.folder, 10000);
+                    self.close();
+                } catch (e) {
+                    var rollbackMessage = '';
+                    if (backup) {
+                        try { var snaps = await listVaultSnapshots(self.app, self.view.plugin); var item = snaps.find(function(x){return x.folder === backup.folder;}); if (item && item.valid) { await restoreVaultSnapshot(self.app, self.view.plugin, item); await self.view.loadAllData({silent:true}); self.view.render(); rollbackMessage = '；已尝试从导入前快照回滚'; } }
+                        catch (re) { rollbackMessage = '；自动回滚失败，请从快照管理恢复：' + backup.folder; }
+                    }
+                    showUserError('完整多世界线恢复失败', new Error((e.message || e) + rollbackMessage));
+                    restoreArchiveBtn.disabled = false; restoreArchiveBtn.textContent = '🌐 恢复完整多世界线备份';
+                }
+            });
+        }
         var apply = actions.createEl('button', { text: '🛡️ 创建快照并执行合并', cls: 'my-char-btn-success' });
-        var total = plan.counts.factions + plan.counts.relations + plan.counts.chars + plan.counts.timeline + (plan.counts.orgRelations||0) + plan.counts.orgMemberships + plan.counts.orgPositionDefs + (plan.counts.orgTerritoryChanges||0);
+        var total = plan.counts.factions + plan.counts.relations + plan.counts.chars + plan.counts.timeline + (plan.counts.orgRelations||0) + plan.counts.orgMemberships + plan.counts.orgPositionDefs + (plan.counts.orgTerritoryChanges||0) + (plan.counts.intimacyHistory||0);
         apply.disabled = total === 0;
         apply.addEventListener('click', async function() {
             if (!confirm('将新增/更新 ' + total + ' 项，跳过 ' + plan.counts.duplicates + ' 项重复内容。执行前会创建快照。继续吗？')) return;
@@ -11333,9 +12837,10 @@ var ImportPreviewModal = /** @class */ (function (_super) {
                 self.view.orgMemberships = normalizeOrgMemberships((self.view.orgMemberships||[]).concat(plan.orgMemberships||[]));
                 self.view.orgPositionDefs = normalizeOrgPositionDefs((self.view.orgPositionDefs||[]).concat(plan.orgPositionDefs||[]));
                 self.view.orgTerritoryChanges = normalizeOrgTerritoryChanges((self.view.orgTerritoryChanges||[]).concat(plan.orgTerritoryChanges||[]));
+                self.view.plugin._intimacyHistory = (self.view.plugin._intimacyHistory || []).concat(plan.intimacyHistory || []);
                 await self.view.saveFactionsAndRelations();
                 await self.view.loadAllData({ silent: true }); self.view.render();
-                new obsidian.Notice('✅ 智能合并完成：新增人物 ' + plan.counts.chars + '、事件 ' + plan.counts.timeline + '、阵营 ' + plan.counts.factions + '、关系 ' + plan.counts.relations + '、组织关系 ' + (plan.counts.orgRelations||0) + '、组织任职履历 ' + plan.counts.orgMemberships + '、职位定义 ' + plan.counts.orgPositionDefs + '、领地变迁 ' + (plan.counts.orgTerritoryChanges||0) + '。导入前快照：' + backup.folder, 10000);
+                new obsidian.Notice('✅ 智能合并完成：新增人物 ' + plan.counts.chars + '、事件 ' + plan.counts.timeline + '、阵营 ' + plan.counts.factions + '、关系 ' + plan.counts.relations + '、组织关系 ' + (plan.counts.orgRelations||0) + '、组织任职履历 ' + plan.counts.orgMemberships + '、职位定义 ' + plan.counts.orgPositionDefs + '、领地变迁 ' + (plan.counts.orgTerritoryChanges||0) + '、亲密度历史 ' + (plan.counts.intimacyHistory||0) + '。导入前快照：' + backup.folder, 10000);
                 self.close();
             } catch (e) {
                 var rollbackMessage = '';
@@ -11492,8 +12997,9 @@ var QuickAddEventModal = /** @class */ (function (_super) {
         var storyTimeRow = el.createEl('div', { cls: 'my-char-form-row' });
         storyTimeRow.createEl('label', { text: '故事内时间（可选）', cls: 'my-char-form-label' });
         var storyTimeInput = storyTimeRow.createEl('input', { type: 'text', cls: 'my-char-form-input' });
-        storyTimeInput.placeholder = '如：公元前300年、夏末、第三日；不确定可留空';
+        storyTimeInput.placeholder = '如：前177年三月、景和三年九月；多时间段章节请填写本事件对应时间';
         if (isEdit && evt.storyYear) storyTimeInput.value = evt.storyYear;
+        storyTimeRow.createEl('small', { text: '若关联章节包含多个故事时间段，这里应填写当前事件实际发生的具体时间；插件不会擅自选取章节中的某一个时间段。', cls: 'my-char-view-muted' });
         var tagRow = el.createEl('div', { cls: 'my-char-form-row' });
         tagRow.createEl('label', { text: '主标签', cls: 'my-char-form-label' });
         var tagSelect = tagRow.createEl('select', { cls: 'my-char-select' });
@@ -11565,12 +13071,13 @@ var QuickAddEventModal = /** @class */ (function (_super) {
             if (isEdit && evt.plotStatus === plotStatusOptions[si]) sopt.selected = true;
         }
         var mergeRow = el.createEl('div', { cls: 'my-char-form-row' });
-        mergeRow.createEl('label', { text: '并入目标情节线', cls: 'my-char-form-label' });
+        mergeRow.createEl('label', { text: '并入目标情节线（必选）', cls: 'my-char-form-label' });
         var mergeSelect = mergeRow.createEl('select', { cls: 'my-char-select' });
         mergeSelect.createEl('option', { text: '（选择要并入的情节线）', value: '' });
         var knownPlotLines = getPlotLineGroups(this.view.timeline || [], this.plugin.settings).map(function(g) { return g.plotLine; }).filter(function(n) { return n && (!isEdit || n !== evt.plotLine); });
         knownPlotLines.forEach(function(n) { var op = mergeSelect.createEl('option', { text: n, value: n }); if (isEdit && evt.mergeInto === n) op.selected = true; });
         var customMergeInput = mergeRow.createEl('input', { type: 'text', cls: 'my-char-form-input', attr: { placeholder: '也可输入尚未建立的目标情节线名称' } });
+        mergeRow.createEl('small', { text: '并入表示当前情节线汇入目标情节线；必须选择已有目标或填写新目标。', cls: 'my-char-view-muted' });
         if (isEdit && evt.mergeInto && knownPlotLines.indexOf(evt.mergeInto) < 0) customMergeInput.value = evt.mergeInto;
         mergeSelect.addEventListener('change', function() { if (mergeSelect.value) customMergeInput.value = ''; });
         customMergeInput.addEventListener('input', function() { if (customMergeInput.value.trim()) mergeSelect.value = ''; });
@@ -11611,7 +13118,7 @@ var QuickAddEventModal = /** @class */ (function (_super) {
                 var cb = row.createEl('input', { type: 'checkbox' });
                 cb.checked = selectedChapterRefs.some(function(ref) { return rwChapterReferenceMatches(ref, ch); });
                 row.createEl('span', { text: ch.name || ch.path });
-                if (ch.storyTime) row.createEl('small', { text: ch.storyTime });
+                if (ch.storyTime) row.createEl('small', { text: rwSplitChapterStoryTimes(ch.storyTime).length > 1 ? ('多时间段：' + rwSplitChapterStoryTimes(ch.storyTime).join('；')) : ch.storyTime });
                 cb.addEventListener('change', function() {
                     if (cb.checked) { if (!selectedChapterRefs.some(function(ref) { return rwChapterReferenceMatches(ref, ch); })) selectedChapterRefs.push(value); }
                     else selectedChapterRefs = selectedChapterRefs.filter(function(ref) { return !rwChapterReferenceMatches(ref, ch); });
@@ -12100,13 +13607,8 @@ MyView.prototype.renderOrgRelationsPanel = function(container) {
     var graphBox=panel.createEl('section',{cls:'rw-org-history-graph'});
     var graphHead=graphBox.createEl('div',{cls:'rw-org-rel-head'}); graphHead.createEl('strong',{text:'组织关系图谱'});
     var orgFocusBtn=graphHead.createEl('button',{text:'🔍',cls:'my-char-btn-ghost my-char-btn-xs'});orgFocusBtn.title='一览组织图谱：铺满可用窗口，不需要页面滚动';orgFocusBtn.setAttribute('aria-label','一览组织图谱');orgFocusBtn.addEventListener('click',function(){var viewport=graphBox.querySelector('.rw-org-network-viewport');if(viewport)rwOpenGraphFocusOverlay(self,viewport,'组织关系网络 · 全图浏览',self._rwOrgGraphApi);});
-    var graphTimeSelect=graphHead.createEl('select',{cls:'my-char-form-input'});
-    graphTimeSelect.createEl('option',{text:'选择时间线节点…',value:''});
-    var graphTimePoints=novelExt.getTimelineTimePoints(this.timeline||[],this.plugin.settings||{});
-    graphTimePoints.forEach(function(point){var opt=graphTimeSelect.createEl('option',{text:point.label,value:point.year});});
-    var graphTime=graphHead.createEl('input',{type:'text',placeholder:'或输入历史时间点',cls:'my-char-form-input'}); graphTime.value=this._orgGraphTime || progressText;
-    graphTimeSelect.value=graphTime.value;
-    var useNow=graphHead.createEl('button',{text:'当前进度',cls:'my-char-btn-ghost my-char-btn-xs'});
+    var graphTime = { value: progressText };
+    graphHead.createEl('span', { text: '当前统一时间：' + (progressText || '未设置'), cls: 'rw-org-rel-progress' });
     var graphCanvas=graphBox.createEl('div',{cls:'rw-org-history-graph-canvas'});
     var graphTools=graphBox.createEl('div',{cls:'rw-org-graph-tools'});
     var relationKind=graphTools.createEl('select',{cls:'my-char-form-input'});
@@ -12248,9 +13750,6 @@ MyView.prototype.renderOrgRelationsPanel = function(container) {
         setState: function(state){if(!state)return;orgScale=Number(state.scale)||1;orgOffset=state.offset?{x:Number(state.offset.x)||0,y:Number(state.offset.y)||0}:{x:0,y:0};focusedOrgName=state.focusedOrgName||null;drawOrgGraph();}
     };
     resetGraph.addEventListener('click',function(){orgPositions={};orgOffset={x:0,y:0};orgScale=1;focusedOrgName=null;drawOrgGraph();});zoomIn.addEventListener('click',zoomOrgGraphIn);zoomOut.addEventListener('click',zoomOrgGraphOut);zoomReset.addEventListener('click',fitOrgGraphToView);
-    graphTime.addEventListener('change',function(){self._orgGraphTime=graphTime.value;graphTimeSelect.value=graphTime.value;drawOrgGraph();});
-    graphTimeSelect.addEventListener('change',function(){graphTime.value=graphTimeSelect.value;self._orgGraphTime=graphTime.value;drawOrgGraph();});
-    useNow.addEventListener('click',function(){graphTime.value=progressText;graphTimeSelect.value=progressText;self._orgGraphTime=progressText;drawOrgGraph();});
     drawOrgGraph();
     // 关系图谱 Tab 只呈现网络，不重复放置组织关系的管理列表。
     return;
@@ -12603,6 +14102,9 @@ var RelationModal = /** @class */ (function (_super) {
                     var customCategories = String(self.plugin.settings.customRelationCategories || '').split(',').map(function(x) { return x.trim(); }).filter(Boolean);
                     if (customCategories.indexOf(category) < 0) customCategories.push(category);
                     self.plugin.settings.customRelationCategories = customCategories.join(',');
+                    if (Array.isArray(self.plugin.settings.relationCategoryNames) && self.plugin.settings.relationCategoryNames.indexOf(category) < 0) {
+                        self.plugin.settings.relationCategoryNames.push(category);
+                    }
                     self.plugin.saveSettings();
                 }
             }
@@ -13243,8 +14745,8 @@ var DetailModal = /** @class */ (function (_super) {
                 self.close();
                 self.view.showRelationDialog({ charA: self.charData.name, charB: '', type: '朋友', intimacy: 1, _new: true });
             });
-            var factionBtn = quickActions.createEl('button', { text: '🏷 修改阵营', cls: 'my-char-btn-ghost my-char-btn-sm' });
-            factionBtn.addEventListener('click', function() { self._editMode = true; self._focusField = '阵营'; self.onOpen(); });
+            var factionBtn = quickActions.createEl('button', { text: '🏷 修改所属组织/阵营', cls: 'my-char-btn-ghost my-char-btn-sm' });
+            factionBtn.addEventListener('click', function() { self._editMode = true; self._focusField = self.view.plugin.settings.factionFieldName || '阵营'; self.onOpen(); });
             var addEventBtn = quickActions.createEl('button', { text: '＋ 添加事件', cls: 'my-char-btn-ghost my-char-btn-sm' });
             addEventBtn.addEventListener('click', function() { self.close(); self.view.showQuickAddEvent(self.charData.name + '：'); });
         }
@@ -13253,7 +14755,9 @@ var DetailModal = /** @class */ (function (_super) {
             return;
         }
 
-        var fields = this.charData.fields || {};
+        var rawFields = this.charData.fields || {};
+        var basicAliasState = rwGetCharacterFieldAliasState(rawFields);
+        var fields = basicAliasState.fields;
         var infoSec = el.createEl('details', { cls: 'my-char-detail-accordion rw-char-basic-accordion' });
         var infoSummary = infoSec.createEl('summary');
         infoSummary.createEl('strong', { text: '📋 基本资料' });
@@ -13266,15 +14770,16 @@ var DetailModal = /** @class */ (function (_super) {
         var displayed = [];
         for (var i = 0; i < fieldOrder.length; i++) {
             var key = fieldOrder[i];
+            if (basicAliasState.hidden[key] || rwIsLegacyCharacterPositionField(key)) continue;
             if (fields[key] || key === (this.view.plugin.settings.factionFieldName || '阵营')) {
                 displayed.push(key);
                 var displayValue = key === (this.view.plugin.settings.factionFieldName || '阵营')
                     ? this.view.getCharField(this.charData, key) : fields[key];
-                this.renderFieldRow(infoDiv, key, displayValue || '暂无当前阵营');
+                this.renderFieldRow(infoDiv, key === (this.view.plugin.settings.factionFieldName || '阵营') ? '所属组织/阵营' : key, displayValue || '暂无当前组织/阵营');
             }
         }
         for (var fKey in fields) {
-            if (fields.hasOwnProperty(fKey) && displayed.indexOf(fKey) === -1) {
+            if (fields.hasOwnProperty(fKey) && displayed.indexOf(fKey) === -1 && !basicAliasState.hidden[fKey] && !rwIsLegacyCharacterPositionField(fKey)) {
                 this.renderFieldRow(infoDiv, fKey, fields[fKey]);
             }
         }
@@ -13398,18 +14903,49 @@ var DetailModal = /** @class */ (function (_super) {
     DetailModal.prototype.renderEditForm = function (el) {
         var self = this;
         var form = el.createEl('div', { cls: 'my-char-detail-panel' });
-        var fields = Object.assign({}, this.charData.fields);
-        var defaultKeys = ['身份', '类型', '阵营', '首次出场', '出生', '亲密人物', '章节笔记', '别名', '拼音', '拼音首字母'];
+        var worldlines = rwGetWorldlines(this.view.plugin);
+        var activeWorldline = rwGetActiveWorldline(this.view.plugin);
+        var selectedWorldlineId = this._profileWorldlineId || (activeWorldline && activeWorldline.id) || 'worldline-original';
+        var baseChar = null;
+        try {
+            var baseChars = this.view.parseChars(this.view._lastCharMd || '');
+            baseChar = baseChars.find(function(c) { return c.name === self.charData.name; }) || null;
+        } catch (e) {}
+        var fields = Object.assign({}, (baseChar && baseChar.fields) || this.charData.fields || {});
+        var selectedOverrides = this.view.plugin.settings.worldlineCharacterOverrides || {};
+        if (selectedWorldlineId !== 'worldline-original' && selectedOverrides[selectedWorldlineId] && selectedOverrides[selectedWorldlineId][this.charData.name]) {
+            Object.keys(selectedOverrides[selectedWorldlineId][this.charData.name]).forEach(function(k) { fields[k] = selectedOverrides[selectedWorldlineId][self.charData.name][k]; });
+        }
+        var selectedWorldline = worldlines.find(function(w) { return w.id === selectedWorldlineId; });
+        var selectedHistoryState = rwGetEffectiveCharacterHistory(this.view.plugin, this.view._lastCharMd || '', selectedWorldlineId, selectedWorldline && selectedWorldline.currentTimePoint || this.view.plugin.settings.currentTimePoint || '');
+        if (selectedHistoryState[this.charData.name]) Object.keys(selectedHistoryState[this.charData.name]).forEach(function(k) { fields[k] = selectedHistoryState[self.charData.name][k]; });
+        if (worldlines.length) {
+            var wlRow = form.createEl('div', { cls: 'my-char-form-row rw-profile-worldline-row' });
+            wlRow.createEl('label', { text: '编辑应用事件线', cls: 'my-char-form-label' });
+            var wlSelect = wlRow.createEl('select', { cls: 'my-char-select' });
+            worldlines.forEach(function(w) {
+                var op = wlSelect.createEl('option', { text: w.name + (w.id === (activeWorldline && activeWorldline.id) ? '（当前工作线）' : ''), value: w.id });
+                if (w.id === selectedWorldlineId) op.selected = true;
+            });
+            wlRow.createEl('small', { text: '默认跟随当前工作事件线；人物档案仍全局唯一，分支自动继承完整资料；只需修改本线发生变化的字段。', cls: 'my-char-view-muted' });
+            wlSelect.addEventListener('change', function() { self._profileWorldlineId = wlSelect.value; self.onOpen(); });
+        }
+        // 先按语义归一化，避免继承值使用「出生时间」时又补出空白「出生」输入框。
+        var editAliasState = rwGetCharacterFieldAliasState(fields);
+        fields = editAliasState.fields;
+        var defaultKeys = ['身份', '类型', '阵营', '正文首次出现', '出生时间', '死亡时间', '亲密人物', '章节笔记', '别名', '拼音', '拼音首字母'];
         for (var dk = 0; dk < defaultKeys.length; dk++) {
-            if (!fields[defaultKeys[dk]]) fields[defaultKeys[dk]] = '';
+            if (!Object.prototype.hasOwnProperty.call(fields, defaultKeys[dk])) fields[defaultKeys[dk]] = '';
         }
         this._fieldInputs = {};
+        this._fieldInputAliasGroups = editAliasState.membersByPrimary;
         for (var key in fields) {
-            if (!fields.hasOwnProperty(key)) continue;
+            if (!fields.hasOwnProperty(key) || editAliasState.hidden[key] || rwIsLegacyCharacterPositionField(key)) continue;
             var row = form.createEl('div', { cls: 'my-char-form-row' });
             row.createEl('label', { text: key, cls: 'my-char-form-label' });
             var inp = row.createEl('input', { type: 'text', cls: 'my-char-form-input' });
             var factionKey = this.view.plugin.settings.factionFieldName || '阵营';
+            if (key === factionKey) row.querySelector('label').textContent = '所属组织/阵营';
             var hasMembershipHistory = key === factionKey && normalizeOrgMemberships(this.view.orgMemberships || []).some(function(r) { return r.character === self.charData.name; });
             inp.value = hasMembershipHistory ? this.view.getCharField(this.charData, factionKey) : (fields[key] || '');
             inp.style.pointerEvents = 'auto';
@@ -13449,19 +14985,36 @@ var DetailModal = /** @class */ (function (_super) {
             var out = {};
             var factionKey = self.view.plugin.settings.factionFieldName || '阵营';
             var hasMembershipHistory = normalizeOrgMemberships(self.view.orgMemberships || []).some(function(r) { return r.character === self.charData.name; });
+            // 旧档案中已有的职位字段不再作为人物基础资料编辑；原值保留，职位统一以组织任职履历管理。
+            Object.keys(fields).forEach(function(k) { if (rwIsLegacyCharacterPositionField(k)) out[k] = fields[k]; });
+            Object.keys(self._fieldInputAliasGroups || {}).forEach(function(primary) { (self._fieldInputAliasGroups[primary] || []).forEach(function(alias) { if (alias !== primary) out[alias] = ''; }); });
             for (var k in self._fieldInputs) {
                 // 动态阵营由履历驱动；保存人物基础资料时保留旧字段原值，避免写入「暂无当前阵营」等展示文案。
                 if (k === factionKey && hasMembershipHistory) {
                     if (self.charData.fields && self.charData.fields[k]) out[k] = self.charData.fields[k];
                     continue;
                 }
-                if (self._fieldInputs[k].value.trim()) out[k] = self._fieldInputs[k].value.trim();
+                out[k] = self._fieldInputs[k].value.trim();
             }
-            if (newKeyInput.value.trim()) out[newKeyInput.value.trim()] = newValInput.value.trim();
+            if (newKeyInput.value.trim()) {
+                var requestedNewKey = newKeyInput.value.trim();
+                if (rwIsLegacyCharacterPositionField(requestedNewKey)) { new obsidian.Notice('职位请在「组织任职履历」中添加或修改，不再作为独立人物档案字段。'); return; }
+                out[requestedNewKey] = newValInput.value.trim();
+            }
             pushUndoSnapshot(self.view, '编辑人物档案：' + self.charData.name);
-            await novelExt.updateCharInMd(self.app, self.view.plugin, self.charData.name, out);
+            await novelExt.updateCharInMd(self.app, self.view.plugin, self.charData.name, out, self._profileWorldlineId || (rwGetActiveWorldline(self.view.plugin) || {}).id);
             await self.view.loadAllData({ silent: true });
-            self.charData = self.view.findChar(self.charData.name) || self.charData;
+            var selectedId = self._profileWorldlineId || (rwGetActiveWorldline(self.view.plugin) || {}).id;
+            var baseAfterSave = self.view.parseChars(self.view._lastCharMd || '').find(function(c) { return c.name === self.charData.name; });
+            if (baseAfterSave) {
+                var selectedMap = self.view.plugin.settings.worldlineCharacterOverrides || {};
+                var selectedFields = selectedMap[selectedId] && selectedMap[selectedId][self.charData.name];
+                if (selectedFields) Object.keys(selectedFields).forEach(function(k) { baseAfterSave.fields[k] = selectedFields[k]; });
+                var selectedWorld = rwGetWorldlines(self.view.plugin).find(function(w) { return w.id === selectedId; });
+                var selectedHistory = rwGetEffectiveCharacterHistory(self.view.plugin, self.view._lastCharMd || '', selectedId, selectedWorld && selectedWorld.currentTimePoint || self.view.plugin.settings.currentTimePoint || '');
+                if (selectedHistory[self.charData.name]) Object.keys(selectedHistory[self.charData.name]).forEach(function(k) { baseAfterSave.fields[k] = selectedHistory[self.charData.name][k]; });
+                self.charData = baseAfterSave;
+            } else self.charData = self.view.findChar(self.charData.name) || self.charData;
             self._editMode = false;
             new obsidian.Notice('✅ 人物信息已保存');
             self.onOpen();
@@ -13652,6 +15205,62 @@ var EventTagModal = /** @class */ (function (_super) {
 }(obsidian.Modal));
 
 // ========== 人物关系分类与常用关系管理弹窗 ==========
+var ConcreteRelationTypeModal = /** @class */ (function (_super) {
+    __extends(ConcreteRelationTypeModal, _super);
+    function ConcreteRelationTypeModal(app, plugin, onSave) {
+        var _this = Reflect.construct(_super, [app], ConcreteRelationTypeModal);
+        _this.plugin = plugin; _this.onSave = onSave;
+        return _this;
+    }
+    ConcreteRelationTypeModal.prototype.onOpen = function () {
+        var self = this, el = this.contentEl;
+        el.style.cssText = 'padding:20px;min-width:440px;max-width:620px;max-height:78vh;overflow-y:auto;';
+        el.createEl('h3', { text: '管理具体关系类型' });
+        el.createEl('p', { text: '删除后，该类型将不再出现在新增/编辑关系的选项中；已有历史关系记录会保留，不会被改写。' }).style.cssText = 'font-size:12px;color:var(--text-muted);';
+        var addRow = el.createDiv({ cls: 'my-char-form-row' });
+        var input = addRow.createEl('input', { type: 'text', cls: 'my-char-form-input', attr: { placeholder: '新增关系类型，例如：血契、宿命共生' } });
+        var add = addRow.createEl('button', { text: '添加', cls: 'my-char-btn-ghost my-char-btn-sm' });
+        var list = el.createDiv();
+        function render() {
+            list.empty();
+            var types = getRelationTypes(self.plugin);
+            if (!types.length) { list.createEl('p', { text: '暂无可用关系类型', cls: 'my-char-muted' }); return; }
+            types.forEach(function(type) {
+                var row = list.createDiv(); row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid var(--background-modifier-border);';
+                row.createEl('span', { text: type });
+                var remove = row.createEl('button', { text: '删除', cls: 'my-char-btn-danger my-char-btn-sm' });
+                remove.addEventListener('click', async function() {
+                    if (!confirm('从可选关系类型中删除「' + type + '」？已有关系记录不会删除。')) return;
+                    var defaults = DEFAULT_RELATION_TYPES || [];
+                    if (defaults.indexOf(type) >= 0) {
+                        if (!Array.isArray(self.plugin.settings.deletedRelationTypeValues)) self.plugin.settings.deletedRelationTypeValues = [];
+                        if (self.plugin.settings.deletedRelationTypeValues.indexOf(type) < 0) self.plugin.settings.deletedRelationTypeValues.push(type);
+                    }
+                    self.plugin.settings.customRelationTypes = String(self.plugin.settings.customRelationTypes || '').split(',').map(function(x){return x.trim();}).filter(function(x){return x && x !== type;}).join(',');
+                    var configs = self.plugin.settings.relationCategoryConfigs || {};
+                    Object.keys(configs).forEach(function(category) { if (Array.isArray(configs[category].types)) configs[category].types = configs[category].types.filter(function(x){return x !== type;}); });
+                    await self.plugin.saveSettings(); render();
+                    if (self.onSave) self.onSave();
+                    new obsidian.Notice('已从可选列表删除「' + type + '」；既有历史记录已保留');
+                });
+            });
+        }
+        add.addEventListener('click', async function() {
+            var value = String(input.value || '').trim();
+            if (!value) return;
+            if (getRelationTypes(self.plugin).indexOf(value) >= 0) { new obsidian.Notice('该关系类型已存在'); return; }
+            self.plugin.settings.customRelationTypes = mergeCsvSetting(self.plugin.settings.customRelationTypes, [value]);
+            self.plugin.settings.deletedRelationTypeValues = (self.plugin.settings.deletedRelationTypeValues || []).filter(function(x){return x !== value;});
+            await self.plugin.saveSettings(); input.value = ''; render();
+            if (self.onSave) self.onSave();
+        });
+        render();
+        var close = el.createEl('button', { text: '完成', cls: 'my-char-btn-ghost' }); close.style.marginTop = '14px'; close.addEventListener('click', function(){ self.close(); });
+    };
+    ConcreteRelationTypeModal.prototype.onClose = function(){ this.contentEl.empty(); };
+    return ConcreteRelationTypeModal;
+}(obsidian.Modal));
+
 var RelationTypeModal = /** @class */ (function (_super) {
     __extends(RelationTypeModal, _super);
     function RelationTypeModal(app, plugin, onSave) {
@@ -13935,8 +15544,89 @@ var SettingTab = /** @class */ (function (_super) {
         el.empty();
         el.createEl('h2', { text: '人物关系谱系 - 设置' });
 
+        // 小说项目管理：一个 Vault 可管理多本小说，每本小说拥有独立设置与插件 JSON 数据。
+        var projectBox = el.createDiv();
+        projectBox.style.cssText = 'padding:12px 14px;margin:0 0 18px;border:1px solid var(--background-modifier-border);border-radius:10px;background:var(--background-secondary);';
+        projectBox.createEl('h3', { text: '小说项目管理' }).style.marginTop = '0';
+        projectBox.createEl('p', { text: '每本小说独立保存人物、关系阵营、组织、世界观、章节与世界线设置。切换项目不会把数据合并到其他小说。' }).style.cssText = 'font-size:12px;color:var(--text-muted);margin:0 0 10px;';
+        var projectSetting = new obsidian.Setting(projectBox).setName('当前小说').setDesc('切换后，工作台将读取所选小说的数据。');
+        projectSetting.addDropdown(function(drop) {
+            var sys = self.plugin._rwProjectSystem || { projects: [], activeProjectId: '' };
+            (sys.projects || []).forEach(function(project) { drop.addOption(project.id, project.name); });
+            drop.setValue(sys.activeProjectId || '');
+            drop.onChange(async function(value) {
+                try { await self.plugin.switchNovelProject(value); self.display(); new obsidian.Notice('已切换小说项目'); }
+                catch (e) { showUserError('切换小说项目失败', e); }
+            });
+        });
+        projectSetting.addButton(function(button) {
+            button.setButtonText('新建小说项目').setCta().onClick(function() {
+                var modal = new obsidian.Modal(self.app);
+                modal.titleEl.setText('新建小说项目');
+                var input = modal.contentEl.createEl('input', { type: 'text', placeholder: '输入小说名称' });
+                input.style.cssText = 'width:100%;margin:8px 0 14px;';
+                var actions = modal.contentEl.createDiv(); actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;';
+                var cancel = actions.createEl('button', { text: '取消' }); cancel.onclick = function(){ modal.close(); };
+                var create = actions.createEl('button', { text: '创建项目' }); create.className = 'mod-cta';
+                create.onclick = async function() {
+                    try { await self.plugin.createNovelProject(input.value); modal.close(); self.display(); new obsidian.Notice('小说项目已创建'); }
+                    catch (e) { showUserError('创建小说项目失败', e); }
+                };
+                modal.open(); input.focus();
+            });
+        });
+        projectSetting.addButton(function(button) {
+            button.setButtonText('重命名当前项目').onClick(function() {
+                var current = rwGetActiveProjectRecord(self.plugin);
+                if (!current) return;
+                var modal = new obsidian.Modal(self.app);
+                modal.titleEl.setText('重命名小说项目');
+                var input = modal.contentEl.createEl('input', { type: 'text', placeholder: '小说名称' });
+                input.value = current.name || ''; input.style.cssText = 'width:100%;margin:8px 0 14px;';
+                var actions = modal.contentEl.createDiv(); actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;';
+                var cancel = actions.createEl('button', { text: '取消' }); cancel.onclick = function(){ modal.close(); };
+                var save = actions.createEl('button', { text: '保存名称' }); save.className = 'mod-cta';
+                save.onclick = async function() {
+                    var nextName = String(input.value || '').trim();
+                    if (!nextName) { new obsidian.Notice('小说名称不能为空'); return; }
+                    try { current.name = nextName; await self.plugin.saveSettings(); modal.close(); self.display(); }
+                    catch (e) { showUserError('重命名小说项目失败', e); }
+                };
+                modal.open(); input.focus();
+            });
+        });
+        var activeProject = rwGetActiveProjectRecord(self.plugin);
+        if (activeProject && activeProject.legacyStorage) projectBox.createEl('p', { text: '当前项目承接升级前的 3.64.0 数据，继续沿用原有文件路径；其他新项目使用独立数据目录。' }).style.cssText = 'font-size:11px;color:var(--text-muted);margin:4px 0 0;';
+
+        // 在插件设置中提供完整世界线文件管理入口，不再要求用户先进入时间线页面寻找隐藏按钮。
+        var worldlineSettings = new obsidian.Setting(projectBox)
+            .setName('世界线与 Markdown 文件管理')
+            .setDesc('管理当前小说的原始世界线、独立世界线、分支线及子分支；每条世界线可分别设置时间线 MD 与变更记录 MD 的文件夹和文件名。');
+        worldlineSettings.addButton(function(button) {
+            button.setButtonText('管理世界线文件').setCta().onClick(function() {
+                var leaves = self.app.workspace.getLeavesOfType(VIEW_TYPE) || [];
+                var view = null;
+                for (var vi = 0; vi < leaves.length; vi++) if (leaves[vi] && leaves[vi].view && leaves[vi].view.plugin === self.plugin) { view = leaves[vi].view; break; }
+                if (!view) view = { plugin: self.plugin, app: self.app, loadAllData: async function(){}, render: function(){} };
+                var worlds = rwGetWorldlines(self.plugin);
+                if (!worlds.length) { new obsidian.Notice('当前小说还没有世界线，请先在时间线页面创建原始世界线。'); return; }
+                var modal = new obsidian.Modal(self.app), content = modal.contentEl;
+                modal.titleEl.setText('当前小说 · 世界线文件管理');
+                content.createEl('p', { text: '每一条世界线都可以单独设置两个 Markdown 文件的完整路径。分支线和子分支也在这里分别配置，不会共用其他世界线的文件路径。', cls: 'my-char-muted' });
+                var select = content.createEl('select', { cls: 'dropdown' }); select.style.width = '100%';
+                worlds.forEach(function(w) { var option = select.createEl('option', { text: (w.name || '未命名世界线') + (w.id === self.plugin.settings.activeTimelineWorldlineId ? '（当前）' : '') }); option.value = w.id; });
+                var selectedInfo = content.createEl('div'); selectedInfo.style.cssText = 'margin:10px 0;padding:10px;background:var(--background-secondary);border-radius:8px;font-size:12px;';
+                function updateInfo() { var w = worlds.find(function(x){return x.id === select.value;}) || worlds[0]; selectedInfo.empty(); selectedInfo.createEl('div',{text:'时间线：'+(w.timelinePath||'尚未设置')}); selectedInfo.createEl('div',{text:'变更记录：'+(w.changeLogPath||'尚未设置')}); selectedInfo.createEl('div',{text:'类型：'+(w.parentWorldlineId?'分支世界线':'原始/独立世界线')}); }
+                select.addEventListener('change', updateInfo); updateInfo();
+                var actions = content.createDiv({ cls: 'my-char-modal-actions' });
+                actions.createEl('button',{text:'关闭',cls:'my-char-btn-ghost'}).addEventListener('click',function(){modal.close();});
+                actions.createEl('button',{text:'编辑所选世界线文件路径',cls:'my-char-view-btn mod-cta'}).addEventListener('click',function(){var id=select.value;modal.close();rwOpenWorldlineFileSettings(view,id);});
+                modal.open();
+            });
+        });
+
 el.createEl('p', { 
-    text: '💡 不同场景 = 不同文件夹。指定「数据文件夹」后，插件读取该文件夹下的 md 文件；留空则跟随当前打开的笔记所在文件夹。' 
+    text: '💡 不同场景 = 不同文件夹。指定「实体数据文件夹」后，插件读取该文件夹下的人物 MD；关系阵营可在下方单独指定文件夹。留空时仅旧版默认项目兼容当前笔记目录。' 
 }).style.cssText = 'background:var(--background-secondary);padding:12px 16px;border-radius:6px;border-left:3px solid var(--interactive-accent);margin-bottom:15px;font-size:13px;';
 
         new obsidian.Setting(el)
@@ -13947,6 +15637,34 @@ el.createEl('p', {
                     .setValue(self.plugin.settings.charFolder || '')
                     .onChange(async function(value) {
                         self.plugin.settings.charFolder = value.trim();
+                        await self.plugin.saveSettings();
+                        self.updatePathHint();
+                    });
+            });
+
+        new obsidian.Setting(el)
+            .setName('关系与阵营数据文件夹')
+            .setDesc('独立于人物档案的项目级路径；留空时沿用实体数据文件夹。不同小说项目分别保存此设置。')
+            .addText(function(text) {
+                text.setPlaceholder('（默认同实体数据文件夹）')
+                    .setValue(self.plugin.settings.relationMetaFolder || '')
+                    .onChange(async function(value) {
+                        self.plugin.settings.relationMetaFolder = value.trim();
+                        self.plugin._rwRelationStoreUnsafe = false;
+                        await self.plugin.saveSettings();
+                        self.updatePathHint();
+                    });
+            });
+
+        new obsidian.Setting(el)
+            .setName('关系与阵营文件名')
+            .setDesc('当前小说项目专用，默认：关系与阵营.md')
+            .addText(function(text) {
+                text.setPlaceholder('关系与阵营.md')
+                    .setValue(self.plugin.settings.relationMetaFile || '关系与阵营.md')
+                    .onChange(async function(value) {
+                        self.plugin.settings.relationMetaFile = value.trim() || '关系与阵营.md';
+                        self.plugin._rwRelationStoreUnsafe = false;
                         await self.plugin.saveSettings();
                         self.updatePathHint();
                     });
@@ -13974,6 +15692,8 @@ el.createEl('p', {
                     .onChange(async function(value) {
                         self.plugin.settings.timelineFolder = value.trim();
                         await self.plugin.saveSettings();
+                        try { await rwSyncActiveWorldlineTimelinePathFromSettings(self.plugin); }
+                        catch (e) { showUserError('同步世界线时间线位置失败', e); }
                         self.updatePathHint();
                     });
             });
@@ -13987,6 +15707,8 @@ el.createEl('p', {
                     .onChange(async function(value) {
                         self.plugin.settings.timelineFile = value.trim() || '时间线.md';
                         await self.plugin.saveSettings();
+                        try { await rwSyncActiveWorldlineTimelinePathFromSettings(self.plugin); }
+                        catch (e) { showUserError('同步世界线时间线位置失败', e); }
                         self.updatePathHint();
                     });
             });
@@ -14199,6 +15921,17 @@ el.createEl('p', {
 
         el.createEl('h3', { text: '📌 关系类型配置' }).style.cssText = 'margin-top:10px;font-size:14px;font-weight:bold;color:#e67e22;';
         
+        new obsidian.Setting(el)
+            .setName('具体关系类型管理（新增／删除）')
+            .setDesc('管理新增人物关系时可选的具体关系类型。删除只影响可选列表，已有关系历史不会被删除。')
+            .addButton(function (btn) {
+                btn.setButtonText('管理具体关系类型')
+                    .setCta()
+                    .onClick(function () {
+                        new ConcreteRelationTypeModal(self.app, self.plugin, function() { refreshCharView(self.app); }).open();
+                    });
+            });
+
         new obsidian.Setting(el)
             .setName('人物关系分类管理（分类／常用关系／颜色）')
             .setDesc('为每个上属分类分别设置常用具体关系和图谱连线颜色；支持新增、重命名、删除分类。具体关系仍可在新增关系时自由输入。')
@@ -14463,15 +16196,15 @@ el.createEl('p', {
         }
         addFormatExample('1. 人物索引.md', '每个人物使用一个二级标题；字段采用「- 字段名：内容」。出生、出场、死亡时间支持公元前与公元格式。', '## 张三\n- 身份：皇帝\n- 阵营：北境王国\n- 出生：公元前280年\n- 首次出场：公元前260年\n- 死亡：公元前200年\n- 亲密人物：李四\n\n## 李四\n- 身份：将军\n- 出生：公元前290年');
         addFormatExample('2. 时间线.md：年份、月份与事件', '二级标题表示故事年份，三级标题表示月份/季节；每条事件以「- 」开头。公元前300年早于公元前200年，之后才是公元年份。', '## 公元前300年\n### 春季：\n- [战争] 张三率军出征\n- [政治] 李四受封将军\n### 秋季：\n- [婚恋] 张三与公主成婚\n\n## 公元前200年\n- [人物] 李四去世\n\n## 公元100年\n- [朝堂] 新帝登基');
-        addFormatExample('3. 事件主标签、次标签与情节线', '方括号内是主标签；次标签支持多个；情节线、状态、并入目标和章节等信息使用竖线分隔。标签名称可在「事件标签配置」中管理。', '- [朝堂政治] 丞相密谋逼宫 | 次标签:%5B%22权力争斗%22%2C%22身份揭露%22%5D | 情节线:夺嫡主线 | 状态:推进\n- [人物关系] 女主与旧友重逢 | 情节线:旧友支线 | 状态:埋设\n- [朝堂政治] 夺嫡支线并入主线 | 情节线:夺嫡支线 | 状态:并入 | 并入:皇位争夺主线');
+        addFormatExample('3. 事件主标签、次标签与情节线', '方括号内是主标签；次标签支持多个；情节线、状态、并入目标和章节等信息使用竖线分隔。标签名称可在「事件标签配置」中管理。', '- [朝堂政治] 丞相密谋逼宫 | 次标签:权力争斗、身份揭露 | 情节线:夺嫡主线 | 状态:推进\n- [人物关系] 女主与旧友重逢 | 情节线:旧友支线 | 状态:埋设\n- [朝堂政治] 夺嫡支线并入主线 | 情节线:夺嫡支线 | 状态:并入 | 并入:皇位争夺主线');
         addFormatExample('4. 章节库与故事时间', '章节库扫描后会把章节标题、文件路径和故事时间关联起来；章节引用可以使用 Obsidian 双链。', '## 第一章 初入宫门\n- 文件：[[正文/第一章]]\n- 故事时间：公元前280年春\n\n## 第二章 风起\n- 文件：[[正文/第二章]]\n- 故事时间：公元前279年');
-        addFormatExample('5. 多世界线', '世界线在插件界面中创建和切换，插件会为各世界线管理独立时间线数据。不要手动把不同世界线的事件混写到同一个时间线文件。', '原始世界线：时间线/时间线.md\n重生世界线：由插件创建独立数据文件\n分支世界线：创建时复制分叉点之前的历史快照；分叉后各自编辑');
+        addFormatExample('5. 多世界线', '世界线在插件界面中创建和切换。人物角色.md 与关系阵营.md 全局共用，只有时间线 MD 按世界线独立；世界线 ID 保存在插件内部设置中。新建世界线默认继承当前线分叉点之前的时间线、人物动态、关系阵营、组织、亲密度和章节设置；之后各线独立编辑。', '主线：时间线/主线.md\n分支A：时间线/分支A.md\n人物角色.md：全世界线共用\n关系阵营.md：全世界线共用\n新世界线继承分叉点之前的状态；分叉后各自编辑');
         addFormatExample('6. 关系与阵营.md', '文件分为「# 阵营」和「# 关系」两个区块。阵营使用二级标题；人物关系标题写两个人名，中间用「·」连接。字段名必须保持一致。', '# 关系与阵营\n\n# 阵营\n## 北境王国\n- 颜色：#4a90e2\n- 上级组织：大周\n- 描述：北方诸州组成的王国\n\n# 关系\n## 张三 · 李四\n- 类型：师徒\n- 亲密度：80\n- 描述：张三曾教导李四\n- 开始：公元前280年\n- 结束：公元前260年');
         addFormatExample('7. 世界观资料 Markdown 导入', '世界观资料库支持批量导入：二级标题为分类，三级标题为条目名称，条目下用「- 字段：内容」补充属性。导入前先点「解析预览」，确认后才写入插件资料库。', '# 功法\n\n### 火眼金睛\n- 详情：能看穿妖魔伪装\n- 使用者：孙悟空\n- 品质：神通\n\n# 地点与区域\n\n### 花果山\n- 类型：山脉\n- 位置：东胜神洲');
-        el.createEl('p', { text: '说明：组织任职履历、组织关系、领地变迁等结构化记录由插件界面管理并保存在插件数据中，不建议自行编造 Markdown 字段；请使用对应管理页面新增、编辑和删除。' }).style.cssText = 'font-size:11px;color:var(--text-muted);margin-top:10px;';
+        el.createEl('p', { text: '组织任职履历、组织关系、领地变迁等资料请在插件对应管理页面编辑，插件会自动维护相关记录。' }).style.cssText = 'font-size:11px;color:var(--text-muted);margin-top:10px;';
 
         el.createEl('p', {
-            text: '💾 阵营和关系数据保存在 .obsidian/plugins/' + this.plugin.manifest.id + '/data.json'
+            text: '💾 关系阵营与世界线资料由插件自动管理；Markdown 保留可阅读的创作资料与变更摘要。'
         }).style.cssText = 'color:#888;font-size:12px;margin-top:15px;';
     };
 
@@ -14487,6 +16220,34 @@ var RelationWeaverPlugin = /** @class */ (function (_super) {
 
     RelationWeaverPlugin.prototype.onload = async function () {
         await this.loadSettings();
+        rwEnsureWorldlineSettings(this);
+        await rwReconcileWorldlineTimelinePaths(this);
+        await rwEnsureWorldlineChangeLogFiles(this);
+        // Obsidian 中直接重命名/移动时间线 Markdown 时，按原路径更新内部映射；
+        // 世界线 ID 不变，因此人物与关系历史关联不会因文件名变化而断裂。
+        this.registerEvent(this.app.vault.on('rename', function(file, oldPath) {
+            if (!file || !oldPath || !Array.isArray(this.settings.timelineWorldlines)) return;
+            var normalizedOld = normalizeVaultPath(oldPath), normalizedNew = normalizeVaultPath(file.path);
+            var changed = false;
+            this.settings.timelineWorldlines.forEach(function(w) {
+                if (!w || !w.timelinePath) return;
+                var storedPath = normalizeVaultPath(w.timelinePath);
+                if (storedPath === normalizedOld) { w.timelinePath = normalizedNew; changed = true; }
+                else if (storedPath.indexOf(normalizedOld.replace(/\/$/, '') + '/') === 0) {
+                    w.timelinePath = normalizedNew.replace(/\/$/, '') + storedPath.substring(normalizedOld.replace(/\/$/, '').length);
+                    changed = true;
+                }
+                if (w.changeLogPath) {
+                    var logPath = normalizeVaultPath(w.changeLogPath);
+                    if (logPath === normalizedOld) { w.changeLogPath = normalizedNew; changed = true; }
+                    else if (logPath.indexOf(normalizedOld.replace(/\/$/, '') + '/') === 0) {
+                        w.changeLogPath = normalizedNew.replace(/\/$/, '') + logPath.substring(normalizedOld.replace(/\/$/, '').length);
+                        changed = true;
+                    }
+                }
+            });
+            if (changed) this.saveSettings().catch(function(e) { showUserError('更新世界线文件路径失败', e); });
+        }.bind(this)));
 
         this.registerView(VIEW_TYPE, function (leaf) {
             return new MyView(leaf, this);
@@ -14622,9 +16383,8 @@ var RelationWeaverPlugin = /** @class */ (function (_super) {
         this.registerEvent(this.app.vault.on('modify', function(file) {
             var charPath = getCharFullPath(pluginRef);
             var timelinePath = getTimelineFullPath(pluginRef);
-            if (file.path === charPath || file.path === timelinePath) {
-                refreshCharView(pluginRef.app, { silent: true });
-            }
+            if (file.path === charPath || file.path === timelinePath) refreshCharView(pluginRef.app, { silent: true });
+            // 世界线变更记录是插件生成的可读摘要，不作为结构化数据编辑入口。
         }));
         // 加载亲密度变化历史
         this._intimacyHistory = [];
@@ -14642,12 +16402,15 @@ var RelationWeaverPlugin = /** @class */ (function (_super) {
         // 保存历史数据的函数
         this.saveIntimacyHistory = async function() {
             try {
-                var dir = this.app.vault.configDir + '/plugins/' + this.manifest.id;
-                if (!await this.app.vault.adapter.exists(dir)) {
-                    await this.app.vault.adapter.mkdir(dir);
-                }
                 var path = rwGetIntimacyHistoryPath(this);
+                var dir = path.substring(0, path.lastIndexOf('/'));
+                if (!await this.app.vault.adapter.exists(dir)) {
+                    var parent = dir.substring(0, dir.lastIndexOf('/'));
+                    if (parent && !await this.app.vault.adapter.exists(parent)) await this.app.vault.adapter.mkdir(parent);
+                    if (!await this.app.vault.adapter.exists(dir)) await this.app.vault.adapter.mkdir(dir);
+                }
                 await this.app.vault.adapter.write(path, JSON.stringify(this._intimacyHistory || [], null, 2));
+                await rwPersistIntimacyHistoryToRelationMd(this);
             } catch(e) {
                 console.log('保存变化历史失败:', e);
             }
@@ -16184,9 +17947,25 @@ function rwRenderMarkdown(app, markdown, target, component){
     if(obsidian.MarkdownRenderer&&obsidian.MarkdownRenderer.render){obsidian.MarkdownRenderer.render(app,markdown||'（暂无内容）',target,'',component);}
     else {target.createEl('pre',{text:markdown||'（暂无内容）'});}
 }
-function rwGetOutlineLinkedEventIds(body) {
-    var m = String(body || '').match(/<!--\s*rw-timeline-events:([^>]*)-->/i);
-    return m ? m[1].split(',').map(function(x){return x.trim();}).filter(Boolean) : [];
+function rwOutlineEventLinkKey(outlinePath, sectionTitle) { return String(outlinePath || '') + '::' + String(sectionTitle || '').trim().toLowerCase(); }
+function rwGetOutlineLinkedEventIds(plugin, outlinePath, sectionTitle) {
+    var links = plugin && plugin.settings && plugin.settings.outlineEventLinks || {};
+    var value = links[rwOutlineEventLinkKey(outlinePath, sectionTitle)];
+    return Array.isArray(value) ? value.slice() : [];
+}
+async function rwMigrateOutlineEventLinks(plugin, file, outlinePath, markdown) {
+    var source=String(markdown||''), sections=[], re=/^##\s+(.+)\s*$/gm, m;
+    while((m=re.exec(source))) sections.push({title:m[1].trim(),start:m.index,end:re.lastIndex});
+    var links=plugin.settings.outlineEventLinks || (plugin.settings.outlineEventLinks={}), changed=false;
+    sections.forEach(function(sec,i){
+        var end=i+1<sections.length?sections[i+1].start:source.length;
+        var body=source.slice(sec.end,end), match=body.match(/<!--\s*rw-timeline-events:([^>]*)-->/i);
+        if(match){var key=rwOutlineEventLinkKey(outlinePath,sec.title), ids=match[1].split(',').map(function(x){return x.trim();}).filter(Boolean); if(ids.length){links[key]=Array.from(new Set((links[key]||[]).concat(ids)));changed=true;}}
+    });
+    var cleaned=source.replace(/\n?<!--\s*rw-timeline-events:[^>]*-->/ig,'').replace(/\n{3,}/g,'\n\n');
+    if(cleaned!==source){await plugin.saveSettings();await plugin.app.vault.modify(file,cleaned);return cleaned;}
+    if(changed) await plugin.saveSettings();
+    return source;
 }
 // 故事大纲章节与时间线事件采用双通道联动：稳定事件 ID 是首选，
 // 事件自身的多章节引用/故事设计章节是兼容回退，避免旧版临时 ID 或历史数据导致大纲漏显。
@@ -16206,12 +17985,8 @@ function rwOutlineEventMatchesSection(settings, event, sectionTitle, linkedIds) 
     if (chapter && refs.some(function(ref) { return rwChapterReferenceMatches(ref, chapter); })) return true;
     return false;
 }
-function rwSetOutlineLinkedEventIds(body, ids) {
-    var text = String(body || '');
-    text = text.replace(/\n?<!--\s*rw-timeline-events:[^>]*-->\s*/ig, '\n').trim();
-    ids = Array.from(new Set((ids || []).filter(Boolean)));
-    if (ids.length) text += (text ? '\n\n' : '') + '<!-- rw-timeline-events:' + ids.join(',') + ' -->';
-    return text;
+function rwSetOutlineLinkedEventIds(body) {
+    return String(body || '').replace(/\n?<!--\s*rw-timeline-events:[^>]*-->\s*/ig, '\n').trim();
 }
 async function rwPersistTimelineEventIds(app, plugin, events) {
     // Event IDs must live in the plugin sidecar registry, never in timeline Markdown.
@@ -16282,7 +18057,7 @@ MyView.prototype.renderOutlineTab = function(container) {
     var area=container.createEl('div',{cls:'rw-outline-content'}); area.createEl('div',{text:'正在读取故事大纲…',cls:'my-char-muted'});
     (async function(){try{
         var initial='# 故事大纲\n\n'+(self.plugin.settings.novelOutlineText||'## 第一幕：建置\n\n- 核心目标：\n- 引爆事件：\n- 第一转折：\n\n## 第二幕：对抗\n\n- 主要阻碍：\n- 中点反转：\n- 最低谷：\n\n## 第三幕：解决\n\n- 高潮选择：\n- 结局变化：\n');
-        var outlinePath=rwGetOutlinePath(self.plugin); var file=await rwResolveConfiguredFile(self.plugin,'outlineFilePath',RW_OUTLINE_FILE); if(!file){rwMissingFileMessage(area,'故事大纲',outlinePath);return;} var md=await self.app.vault.read(file); area.empty();
+        var outlinePath=rwGetOutlinePath(self.plugin); var file=await rwResolveConfiguredFile(self.plugin,'outlineFilePath',RW_OUTLINE_FILE); if(!file){rwMissingFileMessage(area,'故事大纲',outlinePath);return;} var md=await self.app.vault.read(file); md=await rwMigrateOutlineEventLinks(self.plugin,file,outlinePath,md); area.empty();
         var sections=[]; var re=/^##\s+(.+)\s*$/gm, m, matches=[]; while((m=re.exec(md))) matches.push({title:m[1].trim(),start:m.index,end:re.lastIndex});
         matches.forEach(function(x,i){sections.push({title:x.title,body:md.slice(x.end,i+1<matches.length?matches[i+1].start:md.length).trim(),start:x.start,headingEnd:x.end,end:i+1<matches.length?matches[i+1].start:md.length,index:i});});
         var stats=area.createEl('div',{cls:'rw-outline-stats'}); stats.createEl('strong',{text:String(sections.length)}); stats.createEl('span',{text:'个大纲章节 / 幕'});
@@ -16305,7 +18080,7 @@ MyView.prototype.renderOutlineTab = function(container) {
             var sum=card.createEl('summary');sum.createEl('strong',{text:sec.title});sum.createEl('span',{text:'展开内容',cls:'rw-outline-open-hint'});
             var body=card.createEl('div',{cls:'rw-outline-card-body'});
             var sectionTools=body.createEl('div',{cls:'rw-module-actions'});var deleteSection=sectionTools.createEl('button',{text:'删除本章大纲',cls:'my-char-btn-ghost'});deleteSection.addEventListener('click',async function(ev){ev.preventDefault();ev.stopPropagation();if(!confirm('删除章节大纲「'+sec.title+'」？\n\n将删除该标题下的全部大纲内容及其事件关联；不会删除时间线事件或故事线设计。此操作不可自动撤销。'))return;try{var latest=await self.app.vault.read(file);var fresh=[],rr=/^##\s+(.+)\s*$/gm,mm2;while((mm2=rr.exec(latest)))fresh.push({title:mm2[1].trim(),start:mm2.index,end:rr.lastIndex});var target=fresh[sec.index];if(!target||target.title!==sec.title){var same=fresh.filter(function(x){return x.title===sec.title;});if(same.length===1)target=same[0];else{new obsidian.Notice('大纲结构已变化或存在同名章节，请刷新后重试');return;}}var end=fresh[fresh.indexOf(target)+1]?fresh[fresh.indexOf(target)+1].start:latest.length;var before=latest.slice(0,target.start);var after=latest.slice(end);var nextText=(before.replace(/\n+$/,'\n\n')+after.replace(/^\n+/, '')).replace(/\n{4,}/g,'\n\n\n');await self.app.vault.modify(file,nextText.trimEnd()+'\n');new obsidian.Notice('已删除章节大纲：'+sec.title);self.render();}catch(err){showUserError('删除章节大纲失败',err);}});
-            var linkedIds=rwGetOutlineLinkedEventIds(sec.body);
+            var linkedIds=rwGetOutlineLinkedEventIds(self.plugin,outlinePath,sec.title);
             var linkedEvents=(self.timeline||[]).filter(function(e){return rwOutlineEventMatchesSection(self.plugin.settings,e,sec.title,linkedIds);});
             var linkedBox=body.createEl('section',{cls:'rw-outline-linked-events'});
             var linkedHead=linkedBox.createEl('div',{cls:'rw-outline-linked-head'});
@@ -16356,10 +18131,13 @@ MyView.prototype.renderOutlineTab = function(container) {
                     var next=starts.filter(function(x){return x.start>target.start;})[0];
                     var sectionEnd=next?next.start:latest.length;
                     var sectionText=latest.slice(target.end,sectionEnd);
-                    var newBody=rwSetOutlineLinkedEventIds(sectionText,ids);
+                    var newBody=rwSetOutlineLinkedEventIds(sectionText);
                     latest=latest.slice(0,target.end)+'\n'+newBody+'\n\n'+latest.slice(sectionEnd);
+                    if(!self.plugin.settings.outlineEventLinks) self.plugin.settings.outlineEventLinks={};
+                    self.plugin.settings.outlineEventLinks[rwOutlineEventLinkKey(outlinePath,sec.title)]=Array.from(new Set((ids||[]).filter(Boolean)));
+                    await self.plugin.saveSettings();
                     await self.app.vault.modify(file,latest);
-                    new obsidian.Notice('已更新大纲与时间线事件关联');self.render();
+                    new obsidian.Notice('已更新大纲与时间线事件关联（内部保存，不再写入 MD 标记）');self.render();
                 }catch(err){showUserError('关联时间线事件失败',err);}
             });
             var rendered=body.createEl('div',{cls:'rw-outline-rendered markdown-rendered'});rwRenderMarkdown(self.app,sec.body||'尚未填写内容',rendered,self);
@@ -17375,32 +19153,183 @@ SettingTab.prototype.display = function() {
 // ========== 扩展默认设置 ==========
 
 var __origLoadSettingsFinal = RelationWeaverPlugin.prototype.loadSettings;
+var RW_PROJECT_DEFAULTS = {
+    charFile: '人物索引.md', charFolder: '', timelineFile: '时间线.md', timelineFolder: '', relationMetaFolder: '',
+    customFields: '', customRelationTypes: '', deletedRelationTypeValues: [], customRelationCategories: '', relationCategoryConfigs: {}, relationCategoryNames: null, factionFieldName: '阵营',
+    deathFieldNames: '死亡,死亡时间', birthFieldNames: '出生,出生时间', firstAppearFieldName: '正文首次出现', intimateFieldName: '亲密人物',
+    preset: 'default', customEventTags: [], customIntimacyLevels: '', currentTimePoint: '', timeFilterEnabled: true,
+    timelineWorldlines: [], activeTimelineWorldlineId: '', worldlineCharacterOverrides: {}, worldlineChapterTimes: {}, worldlineCharacterHistory: { version: 1, records: [] }, outlineEventLinks: {}, customPlotStatuses: [], customEventPrimaryTags: null, customEventSecondaryTags: null, settingCollectionFile: '设定集.md', chapterLibrary: { folder: '', chapters: [] },
+    useCaseMode: 'novel', hiddenTabs: [], viewTitle: '', termLabels: {}, tabLabels: {}, graphNotesFolder: '', worldbuildingFilePath: '', drawPoolFilePath: '', outlineFilePath: '', outlineTemplates: [{id:'general',name:'通用小说',fields:['本章目标','核心冲突','关键转折','出场人物','状态']}], activeOutlineTemplate: 'general', syncGraphOnSave: false, graphAutoSyncExplicitlyEnabled: false,
+    graphSyncMode: 'all', graphSyncTypes: [], worldRecords: [], worldCategories: [], worldDataSchemaVersion: 2, worldDataMigrated: false,
+    novelCompactUI: true, topChromeCollapsed: false, timelineMode: 'auto', timelineEra: 'auto', syncRelationsToMd: true, syncFirstAppearOnEvent: true, relationMetaFile: '关系与阵营.md', relationMetaFolder: '', novelTagPreset: 'gudai',
+    autoDiscoverFromMd: true, syncRelationsToCharMd: true, timelineFloatChars: true, floatPanelPos: { x: 24, y: 120 }, rwAppFloatingWorkbench: { windows: [], nextId: 1 },
+    calendarMode: 'custom', calendarAssistMode: 'auto', calendarYearStartMonth: 1, calendarRolloverBeforeStart: false,
+    calendarMonthNames: ['正月','二月','三月','四月','五月','六月','七月','八月','九月','十月','十一月','十二月']
+};
+function rwCloneProjectSettings(settings) {
+    return JSON.parse(JSON.stringify(Object.assign({}, RW_PROJECT_DEFAULTS, settings || {})));
+}
+function rwCreateProjectId() {
+    return 'novel_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+}
+function rwProjectFolderName(name, id) {
+    var safe = String(name || '新小说').replace(/[\\/:*?"<>|]/g, '-').replace(/[. ]+$/g, '').trim().slice(0, 48) || '新小说';
+    return 'Relation Weaver Projects/' + safe + '-' + String(id).slice(-6);
+}
+function rwGetActiveProjectRecord(plugin) {
+    var sys = plugin && plugin._rwProjectSystem;
+    return sys && Array.isArray(sys.projects) ? sys.projects.find(function(p){ return p.id === sys.activeProjectId; }) : null;
+}
+function rwApplyProjectSettings(plugin, record) {
+    if (!record) throw new Error('小说项目不存在，无法切换。');
+    plugin._rwProjectSystem.activeProjectId = record.id;
+    plugin.settings = rwCloneProjectSettings(record.settings);
+    // 关系文件解析保护状态属于具体项目，不能跨项目沿用。
+    plugin._rwRelationStoreUnsafe = false;
+    rwEnsureWorldlineSettings(plugin);
+    ACTIVE_TIMELINE_ERA = plugin.settings.timelineEra || 'auto';
+    ACTIVE_STORY_CALENDAR = { startMonth: plugin.settings.calendarYearStartMonth || 1, assistMode: plugin.settings.calendarAssistMode || 'auto', rolloverBeforeStart: plugin.settings.calendarRolloverBeforeStart === true, monthNames: Array.isArray(plugin.settings.calendarMonthNames) ? plugin.settings.calendarMonthNames : RW_PROJECT_DEFAULTS.calendarMonthNames, seasonMonths: plugin.settings.calendarSeasonMonths || { spring: [1,2,3], summer: [4,5,6], autumn: [7,8,9], winter: [10,11,12] } };
+}
+function rwProjectEnvelope(plugin) {
+    var record = rwGetActiveProjectRecord(plugin);
+    if (record) record.settings = rwCloneProjectSettings(plugin.settings);
+    return { _rwProjectSystem: { version: 1, activeProjectId: plugin._rwProjectSystem.activeProjectId, projects: plugin._rwProjectSystem.projects } };
+}
+async function rwFlushActiveNovelProject(plugin) {
+    var leaves = plugin.app.workspace.getLeavesOfType(VIEW_TYPE) || [];
+    // 切换小说项目只是工作空间交接，不属于故事世界线变化。
+    var previousSuppress = plugin._rwSuppressWorldlineChangeLog === true;
+    plugin._rwSuppressWorldlineChangeLog = true;
+    try {
+        for (var i = 0; i < leaves.length; i++) {
+            var view = leaves[i] && leaves[i].view;
+            if (view && view.plugin === plugin && typeof view.saveFactionsAndRelations === 'function') {
+                await view.saveFactionsAndRelations({ skipGraphSync: true });
+            }
+        }
+        if (plugin.saveIntimacyHistory) await plugin.saveIntimacyHistory();
+        await plugin.saveSettings();
+    } finally {
+        plugin._rwSuppressWorldlineChangeLog = previousSuppress;
+    }
+}
 RelationWeaverPlugin.prototype.loadSettings = async function() {
-    var defaults = {
-        charFile: '人物索引.md', charFolder: '', timelineFile: '时间线.md', timelineFolder: '',
-        customFields: '', customRelationTypes: '', deletedRelationTypeValues: [], customRelationCategories: '', relationCategoryConfigs: {}, relationCategoryNames: null, factionFieldName: '阵营',
-        deathFieldNames: '死亡,死亡时间', birthFieldNames: '出生,出生时间',
-        firstAppearFieldName: '正文首次出现', intimateFieldName: '亲密人物',
-        preset: 'default', customEventTags: [], customIntimacyLevels: '',
-        currentTimePoint: '', timeFilterEnabled: true, timelineWorldlines: [], activeTimelineWorldlineId: '', worldlineCharacterOverrides: {}, worldlineChapterTimes: {}, customPlotStatuses: [], customEventPrimaryTags: null, customEventSecondaryTags: null, settingCollectionFile: '设定集.md', chapterLibrary: { folder: '', chapters: [] },
-        useCaseMode: 'novel', hiddenTabs: [], viewTitle: '',
-        termLabels: {}, tabLabels: {}, graphNotesFolder: '', worldbuildingFilePath: '', drawPoolFilePath: '', outlineFilePath: '', outlineTemplates: [{id:'general',name:'通用小说',fields:['本章目标','核心冲突','关键转折','出场人物','状态']}], activeOutlineTemplate: 'general', syncGraphOnSave: false, graphAutoSyncExplicitlyEnabled: false,
-        graphSyncMode: 'all', graphSyncTypes: [], worldRecords: [], worldCategories: [], worldDataSchemaVersion: 2, worldDataMigrated: false,
-        novelCompactUI: true, topChromeCollapsed: false, timelineMode: 'auto', timelineEra: 'auto', syncRelationsToMd: true,
-        syncFirstAppearOnEvent: true,
-        relationMetaFile: '关系与阵营.md', novelTagPreset: 'gudai',
-        autoDiscoverFromMd: true, syncRelationsToCharMd: true,
-        timelineFloatChars: true, floatPanelPos: { x: 24, y: 120 },
-        rwAppFloatingWorkbench: { windows: [], nextId: 1 },
-        calendarMode: 'custom', calendarAssistMode: 'auto', calendarYearStartMonth: 1,
-        calendarRolloverBeforeStart: false,
-        calendarMonthNames: ['正月','二月','三月','四月','五月','六月','七月','八月','九月','十月','十一月','十二月']
-    };
-    var loaded = await this.loadData() || {};
-    this.settings = Object.assign({}, defaults, loaded);
-    rwEnsureWorldlineSettings(this);
-    ACTIVE_TIMELINE_ERA = this.settings.timelineEra || 'auto';
-    ACTIVE_STORY_CALENDAR = { startMonth: this.settings.calendarYearStartMonth || 1, assistMode: this.settings.calendarAssistMode || 'auto', rolloverBeforeStart: this.settings.calendarRolloverBeforeStart === true, monthNames: Array.isArray(this.settings.calendarMonthNames) ? this.settings.calendarMonthNames : defaults.calendarMonthNames, seasonMonths: this.settings.calendarSeasonMonths || { spring: [1,2,3], summer: [4,5,6], autumn: [7,8,9], winter: [10,11,12] } };
+    var loaded = await this.loadData() || {}, needsMigration = false;
+    if (loaded._rwProjectSystem && Array.isArray(loaded._rwProjectSystem.projects) && loaded._rwProjectSystem.projects.length) {
+        this._rwProjectSystem = loaded._rwProjectSystem;
+        if (!this._rwProjectSystem.projects.some(function(p){return p.id === this._rwProjectSystem.activeProjectId;}, this)) this._rwProjectSystem.activeProjectId = this._rwProjectSystem.projects[0].id;
+    } else {
+        // 将升级前的整套设置原样包进默认小说项目；先备份原 data.json，再写入新项目索引。
+        needsMigration = true;
+        this._rwProjectSystem = { version: 1, activeProjectId: 'project-default', projects: [{ id: 'project-default', name: '默认小说（原有数据）', createdAt: Date.now(), legacyStorage: true, settings: rwCloneProjectSettings(loaded) }] };
+    }
+    var active = rwGetActiveProjectRecord(this);
+    rwApplyProjectSettings(this, active);
+    if (needsMigration) {
+        var adapter = this.app.vault.adapter;
+        var settingsPath = this.app.vault.configDir + '/plugins/' + this.manifest.id + '/data.json';
+        var backupPath = settingsPath + '.pre-project-migration.bak';
+        try {
+            if (await adapter.exists(settingsPath) && !await adapter.exists(backupPath)) {
+                var originalRaw = await adapter.read(settingsPath);
+                JSON.parse(originalRaw);
+                await adapter.write(backupPath, originalRaw);
+                if (await adapter.read(backupPath) !== originalRaw) throw new Error('原设置备份回读校验失败');
+            }
+            await this.saveData(rwProjectEnvelope(this));
+        } catch (e) {
+            console.error('[Relation Weaver] 多小说项目迁移失败，原设置应保留在备份文件中：', e);
+            new obsidian.Notice('⚠️ 小说项目初始化未能完成：原设置未主动清理，请检查插件目录中的 .pre-project-migration.bak 备份。', 10000);
+            throw e;
+        }
+    }
+};
+RelationWeaverPlugin.prototype.saveSettings = async function() {
+    try { var wl = this.settings && Array.isArray(this.settings.timelineWorldlines) ? this.settings.timelineWorldlines.find(function(w){return w.id === this.settings.activeTimelineWorldlineId;}, this) : null; if (wl) wl.currentTimePoint = String(this.settings.currentTimePoint || ''); if (wl) rwCaptureWorldlineChapterTimes(this, wl.id); } catch(e) {}
+    var record = rwGetActiveProjectRecord(this);
+    if (record) record.settings = rwCloneProjectSettings(this.settings);
+    await this.saveData(rwProjectEnvelope(this));
+};
+RelationWeaverPlugin.prototype.createNovelProject = async function(name) {
+    name = String(name || '').trim();
+    if (!name) throw new Error('请填写小说名称。');
+    var id = rwCreateProjectId(), folder = rwProjectFolderName(name, id);
+    var adapter = this.app.vault.adapter;
+    if (await adapter.exists(folder) || this.app.vault.getAbstractFileByPath(folder)) throw new Error('项目目录已存在，为避免覆盖已有文件，请重试创建。');
+    var settings = rwCloneProjectSettings({
+        charFolder: folder, timelineFolder: folder, relationMetaFolder: folder, charFile: '人物索引.md', timelineFile: '时间线.md', relationMetaFile: '关系与阵营.md',
+        graphNotesFolder: folder + '/关系图谱节点', worldbuildingFilePath: folder + '/世界观资料.md', drawPoolFilePath: folder + '/抽签池.md', outlineFilePath: folder + '/故事大纲.md',
+        chapterLibrary: { folder: folder + '/正文', chapters: [] }, settingCollectionFile: '设定集.md', timelineWorldlines: [], activeTimelineWorldlineId: '',
+        worldlineCharacterOverrides: {}, worldlineChapterTimes: {}, worldlineCharacterHistory: { version: 1, records: [] }, outlineEventLinks: {}, timelineEventRegistry: {},
+        worldRecords: [], worldCategories: [], chapterLibraryState: { folder: folder + '/正文', chapters: [] }
+    });
+    await rwFlushActiveNovelProject(this);
+    var leavesBeforeCreate = this.app.workspace.getLeavesOfType(VIEW_TYPE) || [];
+    for (var cvi = 0; cvi < leavesBeforeCreate.length; cvi++) { var pendingView = leavesBeforeCreate[cvi] && leavesBeforeCreate[cvi].view; if (pendingView && pendingView.plugin === this) pendingView._rwProjectLoadToken = (pendingView._rwProjectLoadToken || 0) + 1; }
+    var record = { id: id, name: name, createdAt: Date.now(), legacyStorage: false, settings: settings };
+    this._rwProjectSystem.projects.push(record);
+    rwApplyProjectSettings(this, record);
+    this._intimacyHistory = [];
+    await rwEnsureWorldlineChangeLogFiles(this);
+    // 为新项目建立空白基础 MD；仅在目标不存在时创建，绝不覆盖用户文件。
+    var baseFiles = [
+        { path: getCharFullPath(this), content: '# 人物索引\n' },
+        { path: getTimelineFullPath(this), content: '# 原始世界线\n' },
+        { path: getRelationMetaPath(this), content: '# 关系与阵营\n\n# 阵营\n\n# 关系\n' }
+    ];
+    for (var bi = 0; bi < baseFiles.length; bi++) {
+        var baseFile = baseFiles[bi];
+        if (!this.app.vault.getAbstractFileByPath(baseFile.path) && !await adapter.exists(baseFile.path)) {
+            var baseFolder = baseFile.path.indexOf('/') >= 0 ? baseFile.path.substring(0, baseFile.path.lastIndexOf('/')) : '';
+            if (baseFolder) await rwEnsureVaultFolder(adapter, baseFolder);
+            await this.app.vault.create(baseFile.path, baseFile.content);
+        }
+    }
+    await this.saveSettings();
+    // 新建项目后必须立即让所有已打开的 Relation Weaver 视图重新从新项目路径加载。
+    // 否则旧项目的 factions/relations 仍留在视图内存中，用户看到的像是新项目继承旧数据；
+    // 更严重的是，若此时直接保存，还可能把旧项目内存写入新项目的空白文件。
+    var newProjectLeaves = this.app.workspace.getLeavesOfType(VIEW_TYPE) || [];
+    for (var nli = 0; nli < newProjectLeaves.length; nli++) {
+        var newProjectView = newProjectLeaves[nli] && newProjectLeaves[nli].view;
+        if (!newProjectView || newProjectView.plugin !== this) continue;
+        newProjectView.factions = [];
+        newProjectView.relations = [];
+        newProjectView.orgRelations = [];
+        newProjectView.orgMemberships = [];
+        newProjectView.orgPositionDefs = [];
+        newProjectView.orgTerritoryChanges = [];
+        newProjectView.chars = [];
+        newProjectView.timeline = [];
+        await newProjectView.loadAllData({ silent: true });
+        if (typeof newProjectView.render === 'function') newProjectView.render();
+    }
+    return record;
+};
+RelationWeaverPlugin.prototype.switchNovelProject = async function(projectId) {
+    if (!this._rwProjectSystem || projectId === this._rwProjectSystem.activeProjectId) return;
+    var record = this._rwProjectSystem.projects.find(function(p){return p.id === projectId;});
+    if (!record) throw new Error('找不到指定的小说项目。');
+    await rwFlushActiveNovelProject(this);
+    var leavesBeforeSwitch = this.app.workspace.getLeavesOfType(VIEW_TYPE) || [];
+    for (var svi = 0; svi < leavesBeforeSwitch.length; svi++) { var staleView = leavesBeforeSwitch[svi] && leavesBeforeSwitch[svi].view; if (staleView && staleView.plugin === this) staleView._rwProjectLoadToken = (staleView._rwProjectLoadToken || 0) + 1; }
+    var current = rwGetActiveProjectRecord(this);
+    if (current) current.settings = rwCloneProjectSettings(this.settings);
+    rwApplyProjectSettings(this, record);
+    await rwEnsureWorldlineChangeLogFiles(this);
+    this._intimacyHistory = [];
+    try {
+        var historyPath = rwGetIntimacyHistoryPath(this);
+        if (await this.app.vault.adapter.exists(historyPath)) this._intimacyHistory = JSON.parse(await this.app.vault.adapter.read(historyPath));
+    } catch (historyError) {
+        console.error('[Relation Weaver] 读取目标小说的亲密度历史失败：', historyError);
+        this._intimacyHistory = [];
+    }
+    await this.saveSettings();
+    var leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE) || [];
+    for (var li = 0; li < leaves.length; li++) {
+        try { if (leaves[li].view && leaves[li].view.plugin === this) { await leaves[li].view.loadAllData({ silent: true }); leaves[li].view.render(); } } catch (reloadError) { console.error('[Relation Weaver] 切换小说后刷新工作台失败：', reloadError); }
+    }
 };
 // ============================================================
 // 🔥 热力图
