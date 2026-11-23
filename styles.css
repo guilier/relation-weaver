@@ -4803,3 +4803,18 @@
     min-width: 0;
   }
 }
+
+/* 多事件线任务生命周期 */
+.rw-task-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:8px 0 14px}
+.rw-task-toolbar h3{flex-basis:100%;margin:0}
+.rw-task-toolbar p{flex-basis:100%;margin:0 0 4px}
+.rw-task-current-line{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:9px 12px;margin:8px 0 12px;border:1px solid var(--background-modifier-border);border-radius:9px;color:var(--text-muted);font-size:12px}
+.rw-task-card{padding:12px;margin:10px 0;border:1px solid var(--background-modifier-border);border-radius:10px;background:var(--background-secondary)}
+.rw-task-card-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.rw-task-status{font-size:11px;padding:3px 8px;border-radius:999px;background:var(--background-modifier-border);color:var(--text-muted)}
+.rw-task-status-completed{color:var(--text-success)}.rw-task-status-failed{color:var(--text-error)}.rw-task-status-cancelled{opacity:.7}.rw-task-status-accepted{color:var(--text-accent)}
+.rw-task-history{display:flex;flex-direction:column;gap:3px;margin:8px 0;padding-left:10px;border-left:2px solid var(--background-modifier-border);font-size:11px;color:var(--text-muted)}
+.rw-task-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+
+/* Relation Weaver 3.54.0: in-app worldline creation dialog */
+.my-char-modal-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:14px}
