@@ -5,7 +5,7 @@
 Characters · Relationships · Factions · Organizations · Positions · Territories · Timeline · Chapters · Foreshadowing · Story Logic Checks · Worldbuilding · Story Outline
 
 - **Plugin ID:** `relation-weaver`
-- **Current Version:** `3.51.2`
+- **Current Version:** `3.68.6`
 - **Author:** [guilier](https://github.com/guilier)
 - **Repository:** https://github.com/guilier/relation-weaver
 - **License:** MIT
@@ -67,6 +67,9 @@ The plugin uses the current Obsidian Vault as its workspace, works with Markdown
 > 说明：功能地图描述的是当前版本所包含的主要工作流。部分能力由多个版本逐步完善；并非所有功能都在 3.48.5 首次新增。各模块的具体字段和可用操作以当前插件界面为准。
 >
 > Note: The feature map describes the main workflows included in the current version. Some capabilities were refined across multiple versions; not all features were first introduced in 3.48.5. Specific fields and available operations in each module are subject to the current plugin interface.
+### 3.68.6 管理多本小说
+此版本修复多世界线渲染，并增加管理多本小说。
+
 ### 3.51.2 增加多事件线支持
 此版本适用于重生文/无限流等小说大纲需要。
 
