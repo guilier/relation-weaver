@@ -4,6 +4,18 @@ function __extends(d, b) {
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
 }var obsidian = require('obsidian');
 
+// Relation Weaver 作者赞助入口：仅打开作者提供的公开爱发电主页，不处理或收集任何支付信息。
+var RW_SPONSOR_URL = 'https://afdian.com/a/guilier';
+function rwOpenSponsorPage() {
+    try {
+        var opened = window.open(RW_SPONSOR_URL, '_blank');
+        if (opened) { try { opened.opener = null; } catch (e) {} }
+        else new obsidian.Notice('请在浏览器中访问爱发电主页：https://afdian.com/a/guilier');
+    } catch (e) {
+        new obsidian.Notice('请在浏览器中访问爱发电主页：https://afdian.com/a/guilier');
+    }
+}
+
 // 人物档案字段别名统一器。放在模块顶层，确保 DetailModal 展示/编辑均可访问。
 // 同一语义只生成一个界面字段；优先采用规范字段的非空值，否则采用别名的非空值。
 function rwGetCharacterFieldAliasState(fields) {
@@ -19148,6 +19160,18 @@ SettingTab.prototype.display = function() {
             });
     }
     rwOrganizeSettingsSections(el);
+
+    // 独立的作者支持区放在设置页底部，不干扰任何创作功能，也不显示强制赞助提示。
+    var sponsorSection = el.createEl('div', { cls: 'rw-sponsor-settings' });
+    sponsorSection.style.cssText = 'margin:18px 0 8px;padding:14px 16px;border:1px solid var(--background-modifier-border);border-radius:12px;background:var(--background-secondary);';
+    sponsorSection.createEl('div', { text: '☕ 请作者喝杯咖啡' }).style.cssText = 'font-size:15px;font-weight:600;margin-bottom:6px;';
+    sponsorSection.createEl('p', { text: '如果 Relation Weaver 帮助你更好地管理小说世界，欢迎支持插件的持续开发与维护。赞助完全自愿，不影响任何功能。' }).style.cssText = 'font-size:12px;color:var(--text-muted);margin:0 0 10px;';
+    var sponsorActions = sponsorSection.createDiv();
+    sponsorActions.style.cssText = 'display:flex;align-items:center;gap:10px;flex-wrap:wrap;';
+    var sponsorLink = sponsorActions.createEl('button', { text: '前往爱发电支持作者' });
+    sponsorLink.className = 'mod-cta';
+    sponsorLink.addEventListener('click', function () { rwOpenSponsorPage(); });
+    sponsorActions.createEl('span', { text: 'afdian.com/a/guilier' }).style.cssText = 'font-size:11px;color:var(--text-muted);';
 };
 
 // ========== 扩展默认设置 ==========
