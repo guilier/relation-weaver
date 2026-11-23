@@ -1,9 +1,9 @@
 {
   "id": "relation-weaver",
   "name": "Relation Weaver",
-  "version": "3.68.4",
+  "version": "3.68.6",
   "minAppVersion": "1.4.0",
-  "description": "修复多世界线功能、支持一个插件多本小说管理，恢复关系 Tab 上属分类筛选；关系分类与具体类型筛选并行，保留 Markdown 双向同步.",
+  "description": "多小说项目、多世界线与关系分类双向同步功能.",
   "author": "guilier",
   "isDesktopOnly": false
 }
