@@ -4818,3 +4818,13 @@
 
 /* Relation Weaver 3.54.0: in-app worldline creation dialog */
 .my-char-modal-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:14px}
+
+
+/* ===== 作者赞助入口 ===== */
+.rw-sponsor-settings {
+  transition: border-color 0.18s ease, background 0.18s ease;
+}
+
+.rw-sponsor-settings:hover {
+  border-color: var(--background-modifier-border-hover);
+}
